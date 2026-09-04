@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+runs/
+/e2e-workspaces/
+/live-*/
+**/node_modules/
+.DS_Store
