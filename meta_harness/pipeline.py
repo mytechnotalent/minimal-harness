@@ -7,6 +7,7 @@ from typing import Callable
 from .docker_gate import DockerGate
 from .models import Candidate, SearchConfig, SearchResult
 from .openrouter import OpenRouterClient
+from .prompts import load as _load_prompt
 from .web_search import WebSearchClient
 
 Proposer = Callable[[str, list[Candidate]], list[Candidate]]
@@ -216,9 +217,7 @@ class SearchPipeline:
         context = self._json(
             {"seed": seed, "history": history, "web": self._web(seed)}
         )
-        raw = self.client.complete(
-            "You are a proposer. Return a JSON array of proposals.", context
-        )
+        raw = self.client.complete(_load_prompt("proposer"), context)
         return self._proposal_items(history, raw)
 
     def _web(self, seed: str) -> list[dict[str, str]]:
@@ -321,9 +320,7 @@ class SearchPipeline:
             Decoded review object.
         """
         context = self._json({"candidate": candidate, "history": history})
-        raw = self.client.complete(
-            "You are an adversarial reviewer. Return JSON.", context
-        )
+        raw = self.client.complete(_load_prompt("reviewer"), context)
         return self._review_value(raw)
 
     def _review_value(self, raw: str) -> dict:
@@ -469,7 +466,7 @@ class SearchPipeline:
             Selected candidate.
         """
         raw = self.client.complete(
-            "You are the adjudicator. Return JSON.",
+            _load_prompt("adjudicator"),
             self._json({"candidates": candidates, "history": history}),
         )
         return self._select(candidates, self._selection_id(raw))
