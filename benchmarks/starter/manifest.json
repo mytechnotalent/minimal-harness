@@ -1,0 +1,20 @@
+[
+  {
+    "id": "double",
+    "function": "double",
+    "prompt": "Implement double(x) that returns x times 2.",
+    "test": "tasks/double/test_double.py"
+  },
+  {
+    "id": "reverse",
+    "function": "reverse",
+    "prompt": "Implement reverse(s) that returns the reverse of a string.",
+    "test": "tasks/reverse/test_reverse.py"
+  },
+  {
+    "id": "is_even",
+    "function": "is_even",
+    "prompt": "Implement is_even(x) that returns True when x is an even integer.",
+    "test": "tasks/is_even/test_is_even.py"
+  }
+]
