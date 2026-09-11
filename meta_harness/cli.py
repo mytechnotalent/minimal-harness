@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .agent import Agent
+from .inspector import print_run
 from .models import SearchConfig
 from .openrouter import OpenRouterClient, OpenRouterError
 from .pipeline import SearchPipeline
@@ -33,6 +34,7 @@ OPTION_SPECS = [
     (("--no-docker",), {"action": "store_true"}),
     (("--no-web",), {"action": "store_true"}),
     (("--task-manifest",), {"default": None}),
+    (("--show-run",), {"default": None}),
 ]
 
 
@@ -95,6 +97,8 @@ def _dispatch(args: Arguments) -> None:
     if args.list_models:
         _print_models(args.free_only)
         return
+    if args.show_run:
+        sys.exit(print_run(Path(args.show_run)))
     try:
         _run_mode(args)
     except OpenRouterError as exc:

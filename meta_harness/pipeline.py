@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from ._json_util import json_value
+from .chat_model import ChatModel
 from .docker_gate import DockerGate
 from .models import Candidate, SearchConfig, SearchResult
 from .openrouter import OpenRouterClient
@@ -22,7 +23,7 @@ class SearchPipeline:
     def __init__(
         self,
         config: SearchConfig,
-        client: OpenRouterClient | None = None,
+        client: ChatModel | None = None,
         workspace: Path | str = "runs",
         web_search: WebSearchClient | None = None,
     ) -> None:
@@ -32,8 +33,9 @@ class SearchPipeline:
         ----------
         config : SearchConfig
             Search and gate settings.
-        client : OpenRouterClient or None
-            Optional agent client.
+        client : ChatModel or None
+            Any chat-completion client that satisfies the ``ChatModel``
+            protocol. Defaults to a new ``OpenRouterClient``.
         workspace : pathlib.Path or str
             Artifact directory.
 
