@@ -51,6 +51,38 @@ def blocked_proposer(seed: str, history: list[Candidate]) -> list[Candidate]:
     return [Candidate("c1", "test", "proposal")]
 
 
+REFERENCE_SOLUTION = (
+    "def double(x):\n"
+    "    return x * 2\n"
+    "\n"
+    "def reverse(s):\n"
+    "    return s[::-1]\n"
+    "\n"
+    "def is_even(x):\n"
+    "    return x % 2 == 0\n"
+)
+
+
+def reference_solution_proposer(
+    seed: str, history: list[Candidate]
+) -> list[Candidate]:
+    """Return one candidate carrying the starter reference solution.
+
+    Parameters
+    ----------
+    seed : str
+        Initial task description.
+    history : list[Candidate]
+        Prior candidates.
+
+    Returns
+    -------
+    list[Candidate]
+        One candidate whose proposal is valid Python.
+    """
+    return [Candidate("candidate-1", "test", REFERENCE_SOLUTION)]
+
+
 def blocked_review(
     candidate: Candidate, history: list[Candidate]
 ) -> Candidate:
@@ -177,6 +209,56 @@ class PipelineTests(unittest.TestCase):
             proposers_per_iteration=1,
             target_score=2.0,
             use_docker=False,
+        )
+
+    def test_task_manifest_scores_python_proposal(self) -> None:
+        """Score a Python-code proposal against the starter manifest.
+
+        Returns
+        -------
+        None
+            Assertions pass when the manifest scorer is invoked.
+        """
+        manifest_path = self._starter_manifest_path()
+        result = self._run_with_manifest(manifest_path)
+        self.assertIsNotNone(result.winner)
+        self.assertEqual(result.winner.score, 1.0)
+        self.assertTrue(result.winner.dynamic_test.get("final_passed"))
+
+    def _starter_manifest_path(self) -> str:
+        """Return the starter benchmark manifest path.
+
+        Returns
+        -------
+        str
+            Absolute path to the starter manifest.
+        """
+        here = Path(__file__).resolve().parent
+        return str(here.parent / "benchmarks" / "starter" / "manifest.json")
+
+    def _run_with_manifest(self, manifest_path: str):
+        """Run one iteration with a fixed Python-code proposer.
+
+        Parameters
+        ----------
+        manifest_path : str
+            Path to the task manifest.
+
+        Returns
+        -------
+        SearchResult
+            Completed search result.
+        """
+        config = SearchConfig(
+            iterations=1,
+            proposers_per_iteration=1,
+            target_score=1.0,
+            use_docker=False,
+            use_web_search=False,
+            task_manifest=manifest_path,
+        )
+        return SearchPipeline(config, client=self.FakeClient()).run(
+            "seed", reference_solution_proposer
         )
 
     def test_blocked_review_does_not_score_candidate(self) -> None:

@@ -9,6 +9,7 @@ from .docker_gate import DockerGate
 from .models import Candidate, SearchConfig, SearchResult
 from .openrouter import OpenRouterClient
 from .prompts import load as _load_prompt
+from .task_evaluator import load_manifest, score_candidate
 from .web_search import WebSearchClient
 
 Proposer = Callable[[str, list[Candidate]], list[Candidate]]
@@ -450,6 +451,8 @@ class SearchPipeline:
         dict
             First-gate result.
         """
+        if self.config.task_manifest:
+            return self._manifest_result(candidate)
         if not self.config.use_docker:
             return {
                 "passed": True,
@@ -457,6 +460,24 @@ class SearchPipeline:
                 "error": "Docker disabled; no score assigned",
             }
         return self._run_candidate_gate(candidate, iteration)
+
+    def _manifest_result(self, candidate: Candidate) -> dict:
+        """Score the candidate proposal against the task manifest.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate to score.
+
+        Returns
+        -------
+        dict
+            Gate result with pass rate and passed flag.
+        """
+        path = Path(self.config.task_manifest)
+        manifest = load_manifest(path)
+        rate, _ = score_candidate(candidate.proposal, path.parent, manifest)
+        return {"passed": rate > 0.0, "score": rate}
 
     def _run_candidate_gate(
         self, candidate: Candidate, iteration: int
@@ -648,12 +669,30 @@ class SearchPipeline:
         dict
             Final-gate result.
         """
+        if self.config.task_manifest:
+            return self._final_manifest_result(candidate)
         if not self.config.use_docker:
             return {
                 "final_passed": True,
                 "error": "Docker disabled; final gate simulated",
             }
         return self._final_docker_gate(candidate, iteration)
+
+    def _final_manifest_result(self, candidate: Candidate) -> dict:
+        """Rescore the winner against the task manifest.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate to score.
+
+        Returns
+        -------
+        dict
+            Final-gate result with pass rate and passed flag.
+        """
+        result = self._manifest_result(candidate)
+        return {**result, "final_passed": result["passed"]}
 
     def _final_docker_gate(self, candidate: Candidate, iteration: int) -> dict:
         """Run the final Docker gate.

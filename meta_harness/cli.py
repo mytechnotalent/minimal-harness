@@ -32,6 +32,7 @@ OPTION_SPECS = [
     (("--target-score",), {"type": float, "default": 1.0}),
     (("--no-docker",), {"action": "store_true"}),
     (("--no-web",), {"action": "store_true"}),
+    (("--task-manifest",), {"default": None}),
 ]
 
 
@@ -322,11 +323,11 @@ def _config(args: Arguments) -> SearchConfig:
         Configured optimization settings.
     """
     return SearchConfig(
-        args.iterations,
-        2,
-        args.target_score,
-        not args.no_docker,
-        not args.no_web,
+        iterations=args.iterations,
+        target_score=args.target_score,
+        use_docker=not args.no_docker,
+        use_web_search=not args.no_web,
+        task_manifest=args.task_manifest,
     )
 
 
