@@ -51,15 +51,11 @@ def blocked_proposer(seed: str, history: list[Candidate]) -> list[Candidate]:
     return [Candidate("c1", "test", "proposal")]
 
 
-REFERENCE_SOLUTION = (
-    "def double(x):\n"
-    "    return x * 2\n"
-    "\n"
-    "def reverse(s):\n"
-    "    return s[::-1]\n"
-    "\n"
-    "def is_even(x):\n"
-    "    return x % 2 == 0\n"
+REFERENCE_SOLUTION_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "benchmarks"
+    / "starter"
+    / "reference_solution.py"
 )
 
 
@@ -80,7 +76,8 @@ def reference_solution_proposer(
     list[Candidate]
         One candidate whose proposal is valid Python.
     """
-    return [Candidate("candidate-1", "test", REFERENCE_SOLUTION)]
+    code = REFERENCE_SOLUTION_PATH.read_text(encoding="utf-8")
+    return [Candidate("candidate-1", "test", code)]
 
 
 def blocked_review(

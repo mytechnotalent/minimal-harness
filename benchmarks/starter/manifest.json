@@ -16,5 +16,35 @@
     "function": "is_even",
     "prompt": "Implement is_even(x) that returns True when x is an even integer.",
     "test": "tasks/is_even/test_is_even.py"
+  },
+  {
+    "id": "palindrome",
+    "function": "palindrome",
+    "prompt": "Implement palindrome(s) that returns True when s reads the same forward and backward.",
+    "test": "tasks/palindrome/test_palindrome.py"
+  },
+  {
+    "id": "sum_list",
+    "function": "sum_list",
+    "prompt": "Implement sum_list(xs) that returns the sum of a list of numbers.",
+    "test": "tasks/sum_list/test_sum_list.py"
+  },
+  {
+    "id": "fibonacci",
+    "function": "fibonacci",
+    "prompt": "Implement fibonacci(n) that returns the nth Fibonacci number, with fibonacci(0)=0, fibonacci(1)=1.",
+    "test": "tasks/fibonacci/test_fibonacci.py"
+  },
+  {
+    "id": "gcd",
+    "function": "gcd",
+    "prompt": "Implement gcd(a, b) that returns the greatest common divisor of two non-negative integers.",
+    "test": "tasks/gcd/test_gcd.py"
+  },
+  {
+    "id": "fizz_buzz",
+    "function": "fizz_buzz",
+    "prompt": "Implement fizz_buzz(n) that returns a list of strings for 1..n where multiples of 3 are 'Fizz', multiples of 5 are 'Buzz', multiples of both are 'FizzBuzz', otherwise the number as a string.",
+    "test": "tasks/fizz_buzz/test_fizz_buzz.py"
   }
 ]

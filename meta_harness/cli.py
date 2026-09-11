@@ -116,9 +116,22 @@ def _run_mode(args: Arguments) -> None:
         The selected mode writes its output.
     """
     if args.optimize:
-        _print_result(SearchPipeline(_config(args)).run(args.seed or ""))
+        _run_optimize(args)
         return
     _run_agent(args)
+
+
+def _run_optimize(args: Arguments) -> None:
+    """Run the search pipeline and print result plus usage summary.
+
+    Parameters
+    ----------
+    args : Arguments
+        Parsed command-line options.
+    """
+    pipeline = SearchPipeline(_config(args))
+    _print_result(pipeline.run(args.seed or ""))
+    print(f"usage: {pipeline.client.usage_summary()}")
 
 
 def _run_agent(args: Arguments) -> None:
