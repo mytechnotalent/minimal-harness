@@ -220,9 +220,11 @@ class OpenRouterClient:
         Returns
         -------
         str
-            OpenRouter endpoint URL.
+            OpenRouter endpoint URL, overridable via
+            ``OPENROUTER_BASE_URL`` for local testing.
         """
-        return "https://openrouter.ai/api/v1/chat/completions"
+        default = "https://openrouter.ai/api/v1/chat/completions"
+        return os.getenv("OPENROUTER_BASE_URL", default)
 
     def _headers(self) -> dict[str, str]:
         """Return required request headers.

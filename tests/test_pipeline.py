@@ -250,6 +250,47 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(result.stopped_on_target)
         self.assertEqual(result.history[0].dynamic_test["final_passed"], True)
 
+    def test_winner_score_survives_final_gate(self) -> None:
+        """Preserve the first-gate score through the final gate.
+
+        Returns
+        -------
+        None
+            Assertions pass when the winner keeps its numeric score.
+        """
+        _, result = self._run_full_search()
+        winner = result.winner
+        self.assertIsNotNone(winner)
+        self.assertIsNotNone(winner.score)
+
+    def test_adjudicator_skipped_when_review_blocks_all(self) -> None:
+        """Skip adjudication when no candidate survives the review gate.
+
+        Returns
+        -------
+        None
+            Assertions pass when only proposer and reviewer are called.
+        """
+        client, result = self._run_blocked_sequence()
+        self.assertNotIn("adjudicator", client.roles)
+        self.assertIsNone(result.winner)
+
+    def _run_blocked_sequence(self):
+        """Run one iteration with review forced to block.
+
+        Returns
+        -------
+        tuple[SequenceClient, SearchResult]
+            Client call record and result.
+        """
+        client = SequenceClient()
+        config = SearchConfig(iterations=1, use_docker=False)
+        pipeline = SearchPipeline(
+            config, client=client, web_search=FakeWebSearch()
+        )
+        pipeline._review = blocked_review
+        return client, pipeline.run("seed")
+
     def _run_full_search(self):
         """Run the complete mocked agent pipeline.
 

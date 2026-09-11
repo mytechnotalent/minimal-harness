@@ -122,7 +122,39 @@ class SearchPipeline:
         evaluated = self._evaluate_all(candidates, history, iteration)
         if not evaluated:
             return history, winner
-        selected = self._adjudicate(evaluated, history)
+        return self._advance(evaluated, history, winner, iteration)
+
+    def _advance(
+        self,
+        evaluated: list[Candidate],
+        history: list[Candidate],
+        winner: Candidate | None,
+        iteration: int,
+    ) -> tuple[list[Candidate], Candidate | None]:
+        """Adjudicate + final-gate when survivors exist, else log only.
+
+        Parameters
+        ----------
+        evaluated : list[Candidate]
+            First-gate results.
+        history : list[Candidate]
+            Prior records.
+        winner : Candidate or None
+            Current winner.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        tuple[list[Candidate], Candidate or None]
+            Updated history and winner.
+        """
+        survivors = [
+            item for item in evaluated if item.dynamic_test.get("passed")
+        ]
+        if not survivors:
+            return self._record(evaluated, None, history, winner, iteration)
+        selected = self._adjudicate(survivors, history)
         final = self._final_dynamic_test(selected, iteration)
         return self._record(evaluated, final, history, winner, iteration)
 
@@ -672,7 +704,11 @@ class SearchPipeline:
             if not candidate.dynamic_test.get("passed")
             else self._final_gate(candidate, iteration)
         )
-        return self._with_test(candidate, {**candidate.dynamic_test, **result})
+        return self._with_test(
+            candidate,
+            {**candidate.dynamic_test, **result},
+            candidate.score,
+        )
 
     def _final_gate(self, candidate: Candidate, iteration: int) -> dict:
         """Run or simulate the final dynamic gate.
@@ -720,7 +756,7 @@ class SearchPipeline:
     def _record(
         self,
         evaluated: list[Candidate],
-        final: Candidate,
+        final: Candidate | None,
         history: list[Candidate],
         winner: Candidate | None,
         iteration: int,
@@ -731,8 +767,8 @@ class SearchPipeline:
         ----------
         evaluated : list[Candidate]
             First-gate results.
-        final : Candidate
-            Final-gate result.
+        final : Candidate or None
+            Final-gate result, or ``None`` when no survivor was adjudicated.
         history : list[Candidate]
             Mutable history.
         winner : Candidate or None
@@ -746,12 +782,50 @@ class SearchPipeline:
             Updated history and winner.
         """
         for item in evaluated:
-            completed = (
-                final if item.candidate_id == final.candidate_id else item
-            )
+            completed = self._completed(item, final)
             history.append(completed)
             self._write_artifact(iteration, completed)
-        return history, self._best(winner, final)
+        return history, self._best_or_current(winner, final)
+
+    def _completed(
+        self, item: Candidate, final: Candidate | None
+    ) -> Candidate:
+        """Return the finalized candidate when it matches ``final``.
+
+        Parameters
+        ----------
+        item : Candidate
+            Evaluated candidate.
+        final : Candidate or None
+            Final-gate result.
+
+        Returns
+        -------
+        Candidate
+            ``final`` when the ids match, otherwise ``item``.
+        """
+        if final is None:
+            return item
+        return final if item.candidate_id == final.candidate_id else item
+
+    def _best_or_current(
+        self, winner: Candidate | None, candidate: Candidate | None
+    ) -> Candidate | None:
+        """Update the winner when a valid candidate is present.
+
+        Parameters
+        ----------
+        winner : Candidate or None
+            Current winner.
+        candidate : Candidate or None
+            Candidate to compare, or ``None``.
+
+        Returns
+        -------
+        Candidate or None
+            Updated winner.
+        """
+        return winner if candidate is None else self._best(winner, candidate)
 
     def _best(
         self, winner: Candidate | None, candidate: Candidate
