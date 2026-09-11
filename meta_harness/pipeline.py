@@ -1,6 +1,7 @@
 """Orchestrate proposal, review, testing, adjudication, and cycling."""
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -46,6 +47,7 @@ class SearchPipeline:
         self.workspace = Path(workspace)
         self.gate = DockerGate(config.docker_image)
         self.web_search = web_search or WebSearchClient()
+        self._current_iteration = 0
 
     def run(self, seed: str, proposer: Proposer | None = None) -> SearchResult:
         """Cycle candidates until target or budget exhaustion.
@@ -120,6 +122,7 @@ class SearchPipeline:
         tuple[list[Candidate], Candidate or None]
             Updated history and winner.
         """
+        self._current_iteration = iteration
         candidates = self._proposals(seed, history, proposer)
         evaluated = self._evaluate_all(candidates, history, iteration)
         if not evaluated:
@@ -251,7 +254,9 @@ class SearchPipeline:
         context = self._json(
             {"seed": seed, "history": history, "web": self._web(seed)}
         )
-        raw = self.client.complete(_load_prompt("proposer"), context)
+        prompt = _load_prompt("proposer")
+        raw = self.client.complete(prompt, context)
+        self._record_call("proposer", prompt, context, raw)
         return self._proposal_items(history, raw)
 
     def _web(self, seed: str) -> list[dict[str, str]]:
@@ -354,7 +359,11 @@ class SearchPipeline:
             Decoded review object.
         """
         context = self._json({"candidate": candidate, "history": history})
-        raw = self.client.complete(_load_prompt("reviewer"), context)
+        prompt = _load_prompt("reviewer")
+        raw = self.client.complete(prompt, context)
+        self._record_call(
+            "reviewer", prompt, context, raw, candidate.candidate_id
+        )
         return self._review_value(raw)
 
     def _review_value(self, raw: str) -> dict:
@@ -519,10 +528,10 @@ class SearchPipeline:
         Candidate
             Selected candidate.
         """
-        raw = self.client.complete(
-            _load_prompt("adjudicator"),
-            self._json({"candidates": candidates, "history": history}),
-        )
+        prompt = _load_prompt("adjudicator")
+        context = self._json({"candidates": candidates, "history": history})
+        raw = self.client.complete(prompt, context)
+        self._record_call("adjudicator", prompt, context, raw)
         return self._select(candidates, self._selection_id(raw))
 
     def _selection_id(self, raw: str) -> str | None:
@@ -853,6 +862,65 @@ class SearchPipeline:
         """
         path = self._candidate_dir(candidate, iteration) / "candidate.json"
         path.write_text(json.dumps(candidate.__dict__, indent=2, default=str))
+
+    def _record_call(
+        self,
+        stage: str,
+        prompt: str,
+        context: str,
+        response: str,
+        candidate_id: str | None = None,
+    ) -> None:
+        """Append one model-call entry to the iteration trajectory.
+
+        Parameters
+        ----------
+        stage : str
+            Stage identifier: ``proposer``, ``reviewer``, or ``adjudicator``.
+        prompt : str
+            System prompt sent to the model.
+        context : str
+            User payload sent to the model.
+        response : str
+            Raw model response.
+        candidate_id : str or None
+            Candidate identifier for per-candidate stages.
+
+        Returns
+        -------
+        None
+            Entry appended to ``runs/iteration-N/trajectory.jsonl``.
+        """
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "iteration": self._current_iteration,
+            "stage": stage,
+            "candidate_id": candidate_id,
+            "prompt_system": prompt,
+            "prompt_user": context,
+            "response": response,
+        }
+        self._append_trajectory(entry)
+
+    def _append_trajectory(self, entry: dict) -> None:
+        """Append one trajectory entry to the iteration jsonl file.
+
+        Parameters
+        ----------
+        entry : dict
+            Entry to append.
+
+        Returns
+        -------
+        None
+            Entry written to disk.
+        """
+        directory = self.workspace / f"iteration-{self._current_iteration}"
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / "trajectory.jsonl").open(
+            "a", encoding="utf-8"
+        ) as handle:
+            handle.write(json.dumps(entry) + "\n")
 
     def _target_reached(self, winner: Candidate | None) -> bool:
         """Check whether the target is reached.

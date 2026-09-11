@@ -64,13 +64,14 @@ of outcome, so a killed run can be inspected and (in future) resumed.
 
 ## Artifact layout
 
-Current on-disk layout (as of this doc's writing):
+Current on-disk layout:
 
 ```
 runs/
   iteration-1/
+    trajectory.jsonl        # one JSON line per model call in the iteration
     candidate-1/
-      candidate.json     # id, source, proposal, review, dynamic_test, score
+      candidate.json        # id, source, proposal, review, dynamic_test, score
     candidate-2/
       candidate.json
   iteration-2/
@@ -80,6 +81,12 @@ runs/
 `candidate.json` holds the candidate id and source, the proposal string,
 the reviewer's structured verdict, the dynamic-test result from the gate
 run, and the final score (may be `null` when Docker is disabled).
+
+`trajectory.jsonl` records every model call the iteration made. Each line
+carries a UTC timestamp, iteration number, stage (`proposer` / `reviewer` /
+`adjudicator`), optional `candidate_id` (present for reviewer calls),
+system prompt, user payload, and the raw model response. The file is
+append-only within a run.
 
 ## Failure modes and defenses
 

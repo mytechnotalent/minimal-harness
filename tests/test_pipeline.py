@@ -1,5 +1,6 @@
 """Offline tests for adversarial search control flow."""
 
+import json
 import tempfile
 import unittest
 from functools import partial
@@ -273,6 +274,60 @@ class PipelineTests(unittest.TestCase):
             result.history[0].dynamic_test["error"],
             "adversarial review blocked candidate",
         )
+
+    def test_trajectory_records_every_stage_call(self) -> None:
+        """Write one trajectory entry per proposer, reviewer, adjudicator call.
+
+        Returns
+        -------
+        None
+            Assertions pass when every stage call is recorded.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            self._run_full_search_in(directory)
+            stages = self._trajectory_stages(Path(directory))
+        self.assertEqual(stages.count("proposer"), 1)
+        self.assertEqual(stages.count("reviewer"), 1)
+        self.assertEqual(stages.count("adjudicator"), 1)
+
+    def _run_full_search_in(self, directory: str) -> None:
+        """Run one full search into a persistent workspace directory.
+
+        Parameters
+        ----------
+        directory : str
+            Workspace directory.
+
+        Returns
+        -------
+        None
+            Search runs to completion.
+        """
+        client = SequenceClient()
+        config = SearchConfig(iterations=1, target_score=0.0, use_docker=False)
+        SearchPipeline(
+            config,
+            client=client,
+            workspace=directory,
+            web_search=FakeWebSearch(),
+        ).run("seed")
+
+    def _trajectory_stages(self, workspace: Path) -> list[str]:
+        """Return the stage tag of every trajectory entry.
+
+        Parameters
+        ----------
+        workspace : pathlib.Path
+            Workspace directory.
+
+        Returns
+        -------
+        list[str]
+            Stage tags in the order they were written.
+        """
+        path = workspace / "iteration-1" / "trajectory.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        return [json.loads(line)["stage"] for line in lines if line.strip()]
 
     def test_model_json_parser_accepts_fenced_proposals(self) -> None:
         """Accept explanatory text around fenced proposal JSON.
