@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Callable
 
+from ._json_util import json_value
 from .docker_gate import DockerGate
 from .models import Candidate, SearchConfig, SearchResult
 from .openrouter import OpenRouterClient
@@ -308,7 +309,7 @@ class SearchPipeline:
             Parsed proposals or one raw-text proposal.
         """
         try:
-            value = self._json_value(raw)
+            value = json_value(raw)
         except ValueError:
             return [raw.strip()]
         return value if isinstance(value, list) else [value]
@@ -369,7 +370,7 @@ class SearchPipeline:
             Review result.
         """
         try:
-            value = self._json_value(raw)
+            value = json_value(raw)
         except ValueError:
             return {"passed": False, "blockers": ["invalid JSON"], "tests": []}
         return value if isinstance(value, dict) else {"passed": False}
@@ -532,7 +533,7 @@ class SearchPipeline:
             Candidate identifier.
         """
         try:
-            value = self._json_value(raw)
+            value = json_value(raw)
         except ValueError:
             return None
         return self._candidate_id(value)
@@ -555,84 +556,6 @@ class SearchPipeline:
             if isinstance(value, dict)
             else None
         )
-
-    def _json_text(self, raw: str) -> str:
-        """Extract a JSON proposal array from model output.
-
-        Parameters
-        ----------
-        raw : str
-            Model response containing JSON.
-
-        Returns
-        -------
-        str
-            Normalized JSON array text.
-        """
-        value = self._json_value(raw)
-        if not isinstance(value, list):
-            raise ValueError("proposer response must be a JSON array")
-        return json.dumps(value)
-
-    def _json_value(self, raw: str):
-        """Decode JSON embedded in model output.
-
-        Parameters
-        ----------
-        raw : str
-            Model response containing JSON.
-
-        Returns
-        -------
-        object
-            Decoded JSON value.
-        """
-        text = raw.strip().replace("```json", "").replace("```", "")
-        return self._scan_json(text)
-
-    def _scan_json(self, text: str):
-        """Scan text for the first valid JSON value.
-
-        Parameters
-        ----------
-        text : str
-            Cleaned model response.
-
-        Returns
-        -------
-        object
-            Decoded JSON value.
-        """
-        decoder = json.JSONDecoder()
-        for index, character in enumerate(text):
-            if character not in "[{":
-                continue
-            value = self._decode_at(decoder, text, index)
-            if value is not None:
-                return value
-        raise ValueError("model response did not contain valid JSON")
-
-    def _decode_at(self, decoder: json.JSONDecoder, text: str, index: int):
-        """Try to decode JSON beginning at one text position.
-
-        Parameters
-        ----------
-        decoder : json.JSONDecoder
-            Decoder used for the attempt.
-        text : str
-            Response text.
-        index : int
-            Candidate starting position.
-
-        Returns
-        -------
-        object or None
-            Decoded value, or None when decoding fails.
-        """
-        try:
-            return decoder.raw_decode(text[index:])[0]
-        except json.JSONDecodeError:
-            return None
 
     def _select(
         self, candidates: list[Candidate], selected: str | None

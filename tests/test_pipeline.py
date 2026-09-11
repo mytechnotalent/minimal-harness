@@ -5,6 +5,7 @@ import unittest
 from functools import partial
 from pathlib import Path
 
+from meta_harness._json_util import json_text
 from meta_harness.models import Candidate, SearchConfig
 from meta_harness.pipeline import SearchPipeline
 
@@ -206,7 +207,7 @@ class PipelineTests(unittest.TestCase):
             SearchConfig(use_web_search=False), client=self.FakeClient()
         )
         raw = 'Here you go:\n```json\n["fix"]\n```'
-        proposals = pipeline._proposal_items([], pipeline._json_text(raw))
+        proposals = pipeline._proposal_items([], json_text(raw))
         self.assertEqual(proposals[0].proposal, "fix")
 
     def test_non_json_agent_output_has_safe_stage_fallbacks(self) -> None:
