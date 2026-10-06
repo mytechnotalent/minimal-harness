@@ -119,8 +119,21 @@ The default runtime now includes a bounded Pi-like tool loop. OpenRouter can req
 - `web_search`: retrieve public search results and GitHub profile fallback data.
 - `browser_open`: inspect a page title, URL, and visible text with Playwright.
 - `browser_screenshot`: capture a full-page PNG with Playwright.
+- `ask`: present a question with clickable options and a "type your own answer" entry.
+- `suggest`: record short optional next-step buttons shown after an answer.
 
 File paths are confined to the workspace root. This loop supports real website generation, local commands, web retrieval, browser inspection, screenshots, JSONL sessions, steering, follow-ups, context compaction, and a full-screen curses TUI.
+
+The agent is instructed to **ask rather than assume**: when a request is
+missing information, it asks one question at a time through the `ask` tool
+instead of guessing. Interactive frontends render 2–5 options plus a
+"type your own answer" choice; `--interactive` uses a numbered prompt.
+
+Answers are written as separate paragraphs with a blank line between
+sections, and warnings come last. Optional next steps the agent did not have
+to mention are delivered through the `suggest` tool and shown under a
+"Suggestions:" heading as short, mouse-clickable entries in the TUI (numbered
+in `--interactive`); clicking one runs it as your next message.
 
 The live tool loop has been tested with OpenRouter prompts that caused the agent to create files, run bash verification, invoke `web_search`, and create a website.
 
@@ -138,7 +151,7 @@ Launch the full-screen terminal interface:
 python3 -m meta_harness.cli --tui --session runs/tui-session.jsonl "Inspect this workspace"
 ```
 
-Type prompts in the bottom editor. Press Enter to submit, Backspace to edit, and Ctrl-C or Ctrl-D to exit.
+Type prompts in the bottom editor. Press Enter to submit, Backspace to edit, and Ctrl-C or Ctrl-D to exit. While the agent is working, the status line animates `thinking.`, `thinking..`, `thinking...` so you can see it is still running. When a conversation is longer than the screen, scroll the transcript with Up/Down, PageUp/PageDown, Home/End, or the mouse wheel; submitting a new prompt jumps back to the newest text.
 
 Use an isolated workspace for application generation:
 
@@ -162,6 +175,14 @@ python3 -m meta_harness.cli --optimize --iterations 3 "Improve retrieval quality
 python3 -m meta_harness.cli --optimize --iterations 1 --no-web "Test the proposer wiring"
 python3 -m meta_harness.cli --optimize --no-docker --no-web "Run an offline wiring check"
 ```
+
+When run in a real terminal, `--optimize` opens a live full-screen dashboard
+showing the current iteration and stage, a candidate table (review, both gates,
+score), a scrolling activity log, token usage, and the current winner. Press
+`q` to cancel the run after the in-flight model call finishes. When output is
+piped or redirected (for example `--optimize ... | tee run.log`), the dashboard
+is skipped automatically and the plain `winner=... score=...` summary is
+printed instead.
 
 The interactive tool loop also accepts `--max-turns N` (default `24`) and `--workspace PATH` (default `.`). Provider model discovery is available with `--list-models` and `--free-only`.
 
@@ -321,6 +342,7 @@ Stop a running process with `Ctrl-C`.
 - `meta_harness/openrouter.py`: OpenRouter HTTP client and timeout handling.
 - `meta_harness/web_search.py`: DuckDuckGo retrieval and GitHub fallback.
 - `meta_harness/pipeline.py`: proposal, review, two gates, adjudication, and cycling.
+- `meta_harness/progress.py`: live full-screen optimization dashboard.
 - `meta_harness/docker_gate.py`: constrained Docker execution.
 - `meta_harness/models.py`: data models.
 - `tests/`: offline tests.

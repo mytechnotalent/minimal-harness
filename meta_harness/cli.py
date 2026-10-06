@@ -10,6 +10,7 @@ from .inspector import print_run
 from .models import SearchConfig
 from .openrouter import OpenRouterClient, OpenRouterError
 from .pipeline import SearchPipeline
+from .progress import ProgressTUI
 from .provider import ProviderCatalog
 from .session import Session
 from .tui import TUI
@@ -126,14 +127,51 @@ def _run_mode(args: Arguments) -> None:
 
 
 def _run_optimize(args: Arguments) -> None:
-    """Run the search pipeline and print result plus usage summary.
+    """Run the search pipeline behind a live dashboard or plain output.
 
     Parameters
     ----------
     args : Arguments
         Parsed command-line options.
+
+    Returns
+    -------
+    None
+        The search runs and its outcome is displayed.
     """
     pipeline = SearchPipeline(_config(args))
+    if _use_progress():
+        ProgressTUI(pipeline, args.seed or "").run()
+    else:
+        _run_optimize_plain(pipeline, args)
+
+
+def _use_progress() -> bool:
+    """Return whether the interactive progress dashboard should run.
+
+    Returns
+    -------
+    bool
+        ``True`` only when standard output is a real terminal.
+    """
+    return sys.stdout.isatty()
+
+
+def _run_optimize_plain(pipeline: SearchPipeline, args: Arguments) -> None:
+    """Run the search pipeline and print result plus usage summary.
+
+    Parameters
+    ----------
+    pipeline : SearchPipeline
+        Configured search pipeline.
+    args : Arguments
+        Parsed command-line options.
+
+    Returns
+    -------
+    None
+        Result and usage are printed.
+    """
     _print_result(pipeline.run(args.seed or ""))
     print(f"usage: {pipeline.client.usage_summary()}")
 
@@ -246,6 +284,7 @@ def _repl(agent: Agent) -> None:
     None
         REPL runs until quit or EOF.
     """
+    agent.tools.questioner = _repl_questioner
     print("Minimal Harness interactive mode. Type /quit to exit.")
     while _repl_step(agent):
         pass
@@ -271,6 +310,50 @@ def _repl_step(agent: Agent) -> bool:
     return _run_prompt(agent, prompt)
 
 
+def _repl_questioner(question: str, options: list[str]) -> str:
+    """Ask a numbered question in the line-oriented REPL.
+
+    Parameters
+    ----------
+    question : str
+        Question text.
+    options : list[str]
+        Suggested answers.
+
+    Returns
+    -------
+    str
+        Selected option or typed answer.
+    """
+    print(f"? {question}")
+    for index, option in enumerate(options, 1):
+        print(f"  [{index}] {option}")
+    print("  [0] type your own")
+    return _repl_answer(input("answer> ").strip(), options)
+
+
+def _repl_answer(raw: str, options: list[str]) -> str:
+    """Resolve a typed REPL answer into option text.
+
+    Parameters
+    ----------
+    raw : str
+        Typed response.
+    options : list[str]
+        Suggested answers.
+
+    Returns
+    -------
+    str
+        Selected option or the typed text.
+    """
+    if raw.isdigit():
+        index = int(raw)
+        if 1 <= index <= len(options):
+            return options[index - 1]
+    return raw if raw else "no answer"
+
+
 def _run_prompt(agent: Agent, prompt: str) -> bool:
     """Process one REPL prompt.
 
@@ -290,7 +373,29 @@ def _run_prompt(agent: Agent, prompt: str) -> bool:
         return False
     if prompt.strip():
         print(f"agent> {agent.run(prompt)}")
+        _print_repl_suggestions(agent)
     return True
+
+
+def _print_repl_suggestions(agent: Agent) -> None:
+    """Print the agent's suggestions as a numbered list.
+
+    Parameters
+    ----------
+    agent : Agent
+        Agent whose suggestions should be shown.
+
+    Returns
+    -------
+    None
+        Suggestions are printed when present.
+    """
+    suggestions = getattr(agent.tools, "suggestions", None)
+    agent.tools.suggestions = []
+    if isinstance(suggestions, (list, tuple)) and suggestions:
+        print("Suggestions:")
+        for index, item in enumerate(suggestions, 1):
+            print(f"  [{index}] {item}")
 
 
 def _load_env() -> None:

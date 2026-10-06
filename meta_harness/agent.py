@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .openrouter import OpenRouterClient
+from .prompts import load as _load_prompt
 from .session import Session
 from .tools import ToolError, ToolRegistry
 
@@ -58,7 +59,12 @@ class Agent:
         list[dict[str, Any]]
             Initial conversation messages.
         """
-        return session.messages[:] if session else []
+        messages = session.messages[:] if session else []
+        if messages and messages[0].get("role") == "system":
+            return messages
+        return [
+            {"role": "system", "content": _load_prompt("agent")}
+        ] + messages
 
     def run(self, prompt: str) -> str:
         """Run the agent until final text or turn limit.
