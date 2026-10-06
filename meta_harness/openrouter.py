@@ -3,6 +3,7 @@
 import json
 import os
 import signal
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -257,14 +258,30 @@ class OpenRouterClient:
         dict[str, Any]
             Decoded response body.
         """
-        signal.signal(signal.SIGALRM, _raise_timeout)
-        signal.alarm(120)
+        armed = self._arm_alarm()
         try:
             return self._send_body(request)
         except Exception as exc:
             raise self._request_error(exc) from exc
         finally:
-            signal.alarm(0)
+            if armed:
+                signal.alarm(0)
+
+    def _arm_alarm(self) -> bool:
+        """Arm the process timeout alarm when on the main thread.
+
+        Returns
+        -------
+        bool
+            ``True`` when an alarm was set and must be cleared. Worker
+            threads cannot install signal handlers, so they rely on the
+            socket timeout instead.
+        """
+        if threading.current_thread() is not threading.main_thread():
+            return False
+        signal.signal(signal.SIGALRM, _raise_timeout)
+        signal.alarm(120)
+        return True
 
     def _request_error(self, exc: Exception) -> OpenRouterError:
         """Convert request exceptions to readable client errors.

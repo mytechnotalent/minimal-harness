@@ -57,7 +57,9 @@ separate process, against artifacts written to `runs/`.
 Search stops when either:
 
 - a candidate reaches the configured `target_score` after Gate 2, **or**
-- the configured iteration budget is exhausted.
+- the configured iteration budget is exhausted, **or**
+- the user cancels from the live dashboard (`q`), which is reported as
+  `cancelled by user` and checked between iterations.
 
 Every completed iteration writes its full artifact set to `runs/` regardless
 of outcome, so a killed run can be inspected and (in future) resumed.

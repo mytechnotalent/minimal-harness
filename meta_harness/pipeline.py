@@ -26,6 +26,8 @@ class SearchPipeline:
         client: ChatModel | None = None,
         workspace: Path | str = "runs",
         web_search: WebSearchClient | None = None,
+        observer: Callable[[dict], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> None:
         """Initialize the search pipeline.
 
@@ -38,6 +40,14 @@ class SearchPipeline:
             protocol. Defaults to a new ``OpenRouterClient``.
         workspace : pathlib.Path or str
             Artifact directory.
+        web_search : WebSearchClient or None
+            Optional web-search client.
+        observer : collections.abc.Callable or None
+            Optional progress callback invoked with one event dict per
+            state change. Defaults to no reporting.
+        should_stop : collections.abc.Callable or None
+            Optional predicate polled between iterations. When it returns
+            ``True`` the search stops and reports cancellation.
 
         Returns
         -------
@@ -49,7 +59,9 @@ class SearchPipeline:
         self.workspace = Path(workspace)
         self.gate = DockerGate(config.docker_image)
         self.web_search = web_search or WebSearchClient()
+        self.observer, self.should_stop = observer, should_stop
         self._current_iteration = 0
+        self._cancelled = False
 
     def run(self, seed: str, proposer: Proposer | None = None) -> SearchResult:
         """Cycle candidates until target or budget exhaustion.
@@ -66,10 +78,14 @@ class SearchPipeline:
         SearchResult
             Search history, winner, and stop reason.
         """
+        self._emit("run_started", seed=seed, iterations=self.config.iterations)
         history, winner = self._search(seed, proposer)
         reached = self._target_reached(winner)
-        reason = "target score reached" if reached else self._stop_reason()
-        return SearchResult(winner, tuple(history), reached, reason)
+        result = SearchResult(
+            winner, tuple(history), reached, self._reason(reached)
+        )
+        self._emit_finished(result, reached)
+        return result
 
     def _search(
         self, seed: str, proposer: Proposer | None
@@ -91,9 +107,12 @@ class SearchPipeline:
         history, winner = [], None
         self.workspace.mkdir(parents=True, exist_ok=True)
         for iteration in range(1, self.config.iterations + 1):
+            if self._should_stop():
+                break
             history, winner = self._iteration(
                 seed, history, winner, proposer, iteration
             )
+            self._emit_winner(iteration, winner)
         return history, winner
 
     def _iteration(
@@ -125,6 +144,7 @@ class SearchPipeline:
             Updated history and winner.
         """
         self._current_iteration = iteration
+        self._emit("iteration_started", iteration=iteration)
         candidates = self._proposals(seed, history, proposer)
         evaluated = self._evaluate_all(candidates, history, iteration)
         if not evaluated:
@@ -257,6 +277,7 @@ class SearchPipeline:
             {"seed": seed, "history": history, "web": self._web(seed)}
         )
         prompt = _load_prompt("proposer")
+        self._emit("stage_started", stage="proposer")
         raw = self.client.complete(prompt, context)
         self._record_call("proposer", prompt, context, raw)
         return self._proposal_items(history, raw)
@@ -339,9 +360,14 @@ class SearchPipeline:
         Candidate
             Candidate with review data.
         """
-        return self._with_review(
-            candidate, self._review_data(candidate, history)
+        review = self._review_data(candidate, history)
+        self._emit(
+            "reviewed",
+            candidate_id=candidate.candidate_id,
+            passed=bool(review.get("passed")),
+            blockers=review.get("blockers", []),
         )
+        return self._with_review(candidate, review)
 
     def _review_data(
         self, candidate: Candidate, history: list[Candidate]
@@ -362,6 +388,11 @@ class SearchPipeline:
         """
         context = self._json({"candidate": candidate, "history": history})
         prompt = _load_prompt("reviewer")
+        self._emit(
+            "stage_started",
+            stage="reviewer",
+            candidate_id=candidate.candidate_id,
+        )
         raw = self.client.complete(prompt, context)
         self._record_call(
             "reviewer", prompt, context, raw, candidate.candidate_id
@@ -403,6 +434,7 @@ class SearchPipeline:
             Candidate with score and gate data.
         """
         result = self._test_result(candidate, iteration)
+        self._emit_gate("gate1", candidate, result)
         return self._with_test(
             candidate, result, self._score(candidate, result)
         )
@@ -532,9 +564,12 @@ class SearchPipeline:
         """
         prompt = _load_prompt("adjudicator")
         context = self._json({"candidates": candidates, "history": history})
+        self._emit("stage_started", stage="adjudicator")
         raw = self.client.complete(prompt, context)
         self._record_call("adjudicator", prompt, context, raw)
-        return self._select(candidates, self._selection_id(raw))
+        selected = self._select(candidates, self._selection_id(raw))
+        self._emit("adjudicated", selected=selected.candidate_id)
+        return selected
 
     def _selection_id(self, raw: str) -> str | None:
         """Extract a selection from adjudicator output.
@@ -659,6 +694,7 @@ class SearchPipeline:
             if not candidate.dynamic_test.get("passed")
             else self._final_gate(candidate, iteration)
         )
+        self._emit_gate("gate2", candidate, result)
         return self._with_test(
             candidate,
             {**candidate.dynamic_test, **result},
@@ -758,6 +794,7 @@ class SearchPipeline:
             completed = self._completed(item, final)
             history.append(completed)
             self._write_artifact(iteration, completed)
+            self._emit_candidate(iteration, completed)
         return history, self._best_or_current(winner, final)
 
     def _completed(
@@ -893,6 +930,7 @@ class SearchPipeline:
         None
             Entry appended to ``runs/iteration-N/trajectory.jsonl``.
         """
+        self._emit("stage_finished", stage=stage, candidate_id=candidate_id)
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "iteration": self._current_iteration,
@@ -942,18 +980,201 @@ class SearchPipeline:
             and (winner.score or 0.0) >= self.config.target_score
         )
 
-    def _stop_reason(self) -> str:
-        """Describe budget exhaustion.
+    def _reason(self, reached: bool) -> str:
+        """Return the stop reason, honoring user cancellation.
+
+        Parameters
+        ----------
+        reached : bool
+            Whether the target score was reached.
 
         Returns
         -------
         str
             Human-readable stop reason.
         """
+        if self._cancelled:
+            return "cancelled by user"
+        return self._stop_reason(reached)
+
+    def _stop_reason(self, reached: bool) -> str:
+        """Describe why the search stopped.
+
+        Parameters
+        ----------
+        reached : bool
+            Whether the target score was reached.
+
+        Returns
+        -------
+        str
+            Human-readable stop reason.
+        """
+        if reached:
+            return "target score reached"
         suffix = (
             " (Docker gate disabled)" if not self.config.use_docker else ""
         )
         return f"iteration budget exhausted{suffix}"
+
+    def _emit(self, event: str, **fields: object) -> None:
+        """Send one progress event to the observer when present.
+
+        Parameters
+        ----------
+        event : str
+            Event name.
+        **fields : object
+            Event payload fields.
+
+        Returns
+        -------
+        None
+            The observer is invoked only when configured.
+        """
+        if self.observer is not None:
+            self.observer({"event": event, **fields})
+
+    def _should_stop(self) -> bool:
+        """Return whether the caller requested a graceful stop.
+
+        Returns
+        -------
+        bool
+            ``True`` once cancelled; also latches the cancellation flag.
+        """
+        stopped = self.should_stop is not None and self.should_stop()
+        self._cancelled = self._cancelled or stopped
+        return stopped
+
+    def _emit_finished(self, result: SearchResult, reached: bool) -> None:
+        """Emit the terminal run event.
+
+        Parameters
+        ----------
+        result : SearchResult
+            Completed search result.
+        reached : bool
+            Whether the target score was reached.
+
+        Returns
+        -------
+        None
+            Event is emitted.
+        """
+        self._emit(
+            "run_finished",
+            winner_id=self._winner_id(result.winner),
+            winner_score=self._winner_score(result.winner),
+            stop_reason=result.stop_reason,
+            stopped_on_target=reached,
+            cancelled=self._cancelled,
+        )
+
+    def _emit_winner(self, iteration: int, winner: Candidate | None) -> None:
+        """Emit the end-of-iteration summary event.
+
+        Parameters
+        ----------
+        iteration : int
+            Current iteration number.
+        winner : Candidate or None
+            Best candidate so far.
+
+        Returns
+        -------
+        None
+            Event is emitted.
+        """
+        self._emit(
+            "iteration_finished",
+            iteration=iteration,
+            winner_id=self._winner_id(winner),
+            winner_score=self._winner_score(winner),
+        )
+
+    def _emit_gate(
+        self, event: str, candidate: Candidate, result: dict
+    ) -> None:
+        """Emit a gate-result event for one candidate.
+
+        Parameters
+        ----------
+        event : str
+            Event name, ``gate1`` or ``gate2``.
+        candidate : Candidate
+            Candidate evaluated.
+        result : dict
+            Gate result mapping.
+
+        Returns
+        -------
+        None
+            Event is emitted.
+        """
+        self._emit(
+            event,
+            candidate_id=candidate.candidate_id,
+            passed=bool(result.get("passed")),
+            final_passed=bool(result.get("final_passed")),
+            score=result.get("score"),
+            error=result.get("error"),
+        )
+
+    def _emit_candidate(self, iteration: int, candidate: Candidate) -> None:
+        """Emit a finalized candidate summary.
+
+        Parameters
+        ----------
+        iteration : int
+            Current iteration number.
+        candidate : Candidate
+            Finalized candidate record.
+
+        Returns
+        -------
+        None
+            Event is emitted.
+        """
+        self._emit(
+            "candidate_recorded",
+            iteration=iteration,
+            candidate_id=candidate.candidate_id,
+            score=candidate.score,
+            review_passed=bool(candidate.review.get("passed")),
+            gate_passed=bool(candidate.dynamic_test.get("passed")),
+            final_passed=bool(candidate.dynamic_test.get("final_passed")),
+        )
+
+    def _winner_id(self, candidate: Candidate | None) -> str | None:
+        """Return a candidate identifier or ``None``.
+
+        Parameters
+        ----------
+        candidate : Candidate or None
+            Candidate record.
+
+        Returns
+        -------
+        str or None
+            Candidate identifier when present.
+        """
+        return None if candidate is None else candidate.candidate_id
+
+    def _winner_score(self, candidate: Candidate | None) -> float | None:
+        """Return a candidate score or ``None``.
+
+        Parameters
+        ----------
+        candidate : Candidate or None
+            Candidate record.
+
+        Returns
+        -------
+        float or None
+            Candidate score when present.
+        """
+        return None if candidate is None else candidate.score
 
     def _json(self, value: dict) -> str:
         """Serialize agent context.
