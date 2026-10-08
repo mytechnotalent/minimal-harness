@@ -19,6 +19,7 @@ gate 2 → log → repeat**. See [docs/adversarial-loop.md](docs/adversarial-loo
 - `meta_harness/openrouter.py` — model provider client.
 - `meta_harness/session.py` — JSONL trajectory persistence.
 - `meta_harness/tui.py` — full-screen curses TUI.
+- `meta_harness/progress.py` — live `--optimize` progress dashboard.
 - `tests/` — offline unit tests.
 - `runs/` — per-run candidate artifacts (generated).
 
@@ -52,6 +53,10 @@ Adversarial-stage prompts live in `meta_harness/prompts/*.md`. Load with
 `from meta_harness.prompts import load` and `load("proposer")`. Keep the
 one-liner headers in place — the `SequenceClient` test classifies stages by
 scanning for `proposer` and `reviewer` in the system string.
+
+`agent.md` is the interactive agent's system prompt. It instructs the agent
+to ask one question at a time (via the `ask` tool) instead of assuming. The
+`ask` tool is only advertised when an interactive questioner is wired up.
 
 ## Held-out data
 

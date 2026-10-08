@@ -1,6 +1,7 @@
 """Tests for OpenRouter request resilience."""
 
 import io
+import threading
 import unittest
 import urllib.error
 from unittest.mock import patch
@@ -52,6 +53,25 @@ class OpenRouterTests(unittest.TestCase):
         with patch.object(client, "_open", side_effect=[error, {"ok": True}]):
             with patch("meta_harness.openrouter.time.sleep") as sleeper:
                 return client._retry_open(request), sleeper
+
+    def test_send_runs_off_the_main_thread(self) -> None:
+        """A worker thread can send without installing a signal handler.
+
+        Returns
+        -------
+        None
+            Assertions pass when the threaded send returns its body.
+        """
+        client = OpenRouterClient()
+        request = client._build_request("system", "user", 0.0)
+        outcome: dict = {}
+        with patch.object(client, "_open", return_value={"ok": True}):
+            worker = threading.Thread(
+                target=lambda: outcome.update(value=client._send(request))
+            )
+            worker.start()
+            worker.join()
+        self.assertEqual(outcome.get("value"), {"ok": True})
 
 
 if __name__ == "__main__":

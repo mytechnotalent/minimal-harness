@@ -27,6 +27,11 @@ TOOL_SCHEMAS = {
     },
     "browser_assert": {"url": {"type": "string"}, "text": {"type": "string"}},
     "evaluate_app": {"path": {"type": "string"}},
+    "ask": {
+        "question": {"type": "string"},
+        "options": {"type": "array", "items": {"type": "string"}},
+    },
+    "suggest": {"options": {"type": "array", "items": {"type": "string"}}},
     "list_models": {"free_only": {"type": "boolean"}},
 }
 
@@ -63,13 +68,21 @@ class ToolError(RuntimeError):
 class ToolRegistry:
     """Register and execute bounded agent tools."""
 
-    def __init__(self, root: Path | str = ".") -> None:
+    def __init__(
+        self,
+        root: Path | str = ".",
+        questioner: Callable[[str, list[str]], str] | None = None,
+    ) -> None:
         """Initialize tools rooted at one workspace.
 
         Parameters
         ----------
         root : pathlib.Path or str
             Workspace root for file operations.
+        questioner : collections.abc.Callable or None
+            Optional callback that presents a question with options and
+            returns the user's chosen answer. When absent, the ``ask``
+            tool is not advertised.
 
         Returns
         -------
@@ -77,6 +90,8 @@ class ToolRegistry:
             This initializer configures the registry.
         """
         self.root = Path(root).resolve()
+        self.questioner = questioner
+        self.suggestions: list[str] = []
         self.tools = self._tool_map()
 
     def _tool_map(self) -> dict[str, Callable[..., Any]]:
@@ -97,7 +112,11 @@ class ToolRegistry:
         list[dict[str, Any]]
             Schemas advertised to the model.
         """
-        return [self._schema(name) for name in self.tools]
+        return [
+            self._schema(name)
+            for name in self.tools
+            if name not in ("ask", "suggest") or self.questioner is not None
+        ]
 
     def execute(self, name: str, arguments: dict[str, Any]) -> str:
         """Execute one named tool.
@@ -343,6 +362,45 @@ class ToolRegistry:
         """
         catalog = ProviderCatalog()
         return catalog.free_models() if free_only else catalog.list_models()
+
+    def ask(
+        self, question: str, options: list[str] | None = None
+    ) -> dict[str, str]:
+        """Ask the interactive user a question.
+
+        Parameters
+        ----------
+        question : str
+            Question to present.
+        options : list[str] or None
+            Suggested answers. The interface always adds a custom option.
+
+        Returns
+        -------
+        dict[str, str]
+            The question and the chosen answer.
+        """
+        if self.questioner is None:
+            raise ToolError("no interactive user is available to answer")
+        answer = self.questioner(question, list(options or []))
+        return {"question": question, "answer": answer}
+
+    def suggest(self, options: list[str] | None = None) -> dict[str, bool]:
+        """Record short optional next-step suggestions.
+
+        Parameters
+        ----------
+        options : list[str] or None
+            Short action-shaped labels. At most four are kept.
+
+        Returns
+        -------
+        dict[str, bool]
+            Acknowledgement that the suggestions were recorded.
+        """
+        kept = [str(item)[:40] for item in (options or []) if str(item)]
+        self.suggestions = kept[:4]
+        return {"ok": True}
 
     def _path(self, path: str) -> Path:
         """Resolve and confine a workspace path.
