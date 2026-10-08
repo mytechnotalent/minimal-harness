@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .agent import Agent
+from .inspector import print_run
 from .models import SearchConfig
 from .openrouter import OpenRouterClient, OpenRouterError
 from .pipeline import SearchPipeline
@@ -32,6 +33,8 @@ OPTION_SPECS = [
     (("--target-score",), {"type": float, "default": 1.0}),
     (("--no-docker",), {"action": "store_true"}),
     (("--no-web",), {"action": "store_true"}),
+    (("--task-manifest",), {"default": None}),
+    (("--show-run",), {"default": None}),
 ]
 
 
@@ -94,6 +97,8 @@ def _dispatch(args: Arguments) -> None:
     if args.list_models:
         _print_models(args.free_only)
         return
+    if args.show_run:
+        sys.exit(print_run(Path(args.show_run)))
     try:
         _run_mode(args)
     except OpenRouterError as exc:
@@ -115,9 +120,22 @@ def _run_mode(args: Arguments) -> None:
         The selected mode writes its output.
     """
     if args.optimize:
-        _print_result(SearchPipeline(_config(args)).run(args.seed or ""))
+        _run_optimize(args)
         return
     _run_agent(args)
+
+
+def _run_optimize(args: Arguments) -> None:
+    """Run the search pipeline and print result plus usage summary.
+
+    Parameters
+    ----------
+    args : Arguments
+        Parsed command-line options.
+    """
+    pipeline = SearchPipeline(_config(args))
+    _print_result(pipeline.run(args.seed or ""))
+    print(f"usage: {pipeline.client.usage_summary()}")
 
 
 def _run_agent(args: Arguments) -> None:
@@ -322,11 +340,11 @@ def _config(args: Arguments) -> SearchConfig:
         Configured optimization settings.
     """
     return SearchConfig(
-        args.iterations,
-        2,
-        args.target_score,
-        not args.no_docker,
-        not args.no_web,
+        iterations=args.iterations,
+        target_score=args.target_score,
+        use_docker=not args.no_docker,
+        use_web_search=not args.no_web,
+        task_manifest=args.task_manifest,
     )
 
 

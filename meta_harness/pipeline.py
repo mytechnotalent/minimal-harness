@@ -1,12 +1,17 @@
 """Orchestrate proposal, review, testing, adjudication, and cycling."""
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from ._json_util import json_value
+from .chat_model import ChatModel
 from .docker_gate import DockerGate
 from .models import Candidate, SearchConfig, SearchResult
 from .openrouter import OpenRouterClient
+from .prompts import load as _load_prompt
+from .task_evaluator import load_manifest, score_candidate
 from .web_search import WebSearchClient
 
 Proposer = Callable[[str, list[Candidate]], list[Candidate]]
@@ -18,7 +23,7 @@ class SearchPipeline:
     def __init__(
         self,
         config: SearchConfig,
-        client: OpenRouterClient | None = None,
+        client: ChatModel | None = None,
         workspace: Path | str = "runs",
         web_search: WebSearchClient | None = None,
     ) -> None:
@@ -28,8 +33,9 @@ class SearchPipeline:
         ----------
         config : SearchConfig
             Search and gate settings.
-        client : OpenRouterClient or None
-            Optional agent client.
+        client : ChatModel or None
+            Any chat-completion client that satisfies the ``ChatModel``
+            protocol. Defaults to a new ``OpenRouterClient``.
         workspace : pathlib.Path or str
             Artifact directory.
 
@@ -43,6 +49,7 @@ class SearchPipeline:
         self.workspace = Path(workspace)
         self.gate = DockerGate(config.docker_image)
         self.web_search = web_search or WebSearchClient()
+        self._current_iteration = 0
 
     def run(self, seed: str, proposer: Proposer | None = None) -> SearchResult:
         """Cycle candidates until target or budget exhaustion.
@@ -117,11 +124,44 @@ class SearchPipeline:
         tuple[list[Candidate], Candidate or None]
             Updated history and winner.
         """
+        self._current_iteration = iteration
         candidates = self._proposals(seed, history, proposer)
         evaluated = self._evaluate_all(candidates, history, iteration)
         if not evaluated:
             return history, winner
-        selected = self._adjudicate(evaluated, history)
+        return self._advance(evaluated, history, winner, iteration)
+
+    def _advance(
+        self,
+        evaluated: list[Candidate],
+        history: list[Candidate],
+        winner: Candidate | None,
+        iteration: int,
+    ) -> tuple[list[Candidate], Candidate | None]:
+        """Adjudicate + final-gate when survivors exist, else log only.
+
+        Parameters
+        ----------
+        evaluated : list[Candidate]
+            First-gate results.
+        history : list[Candidate]
+            Prior records.
+        winner : Candidate or None
+            Current winner.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        tuple[list[Candidate], Candidate or None]
+            Updated history and winner.
+        """
+        survivors = [
+            item for item in evaluated if item.dynamic_test.get("passed")
+        ]
+        if not survivors:
+            return self._record(evaluated, None, history, winner, iteration)
+        selected = self._adjudicate(survivors, history)
         final = self._final_dynamic_test(selected, iteration)
         return self._record(evaluated, final, history, winner, iteration)
 
@@ -216,9 +256,9 @@ class SearchPipeline:
         context = self._json(
             {"seed": seed, "history": history, "web": self._web(seed)}
         )
-        raw = self.client.complete(
-            "You are a proposer. Return a JSON array of proposals.", context
-        )
+        prompt = _load_prompt("proposer")
+        raw = self.client.complete(prompt, context)
+        self._record_call("proposer", prompt, context, raw)
         return self._proposal_items(history, raw)
 
     def _web(self, seed: str) -> list[dict[str, str]]:
@@ -277,7 +317,7 @@ class SearchPipeline:
             Parsed proposals or one raw-text proposal.
         """
         try:
-            value = self._json_value(raw)
+            value = json_value(raw)
         except ValueError:
             return [raw.strip()]
         return value if isinstance(value, list) else [value]
@@ -321,8 +361,10 @@ class SearchPipeline:
             Decoded review object.
         """
         context = self._json({"candidate": candidate, "history": history})
-        raw = self.client.complete(
-            "You are an adversarial reviewer. Return JSON.", context
+        prompt = _load_prompt("reviewer")
+        raw = self.client.complete(prompt, context)
+        self._record_call(
+            "reviewer", prompt, context, raw, candidate.candidate_id
         )
         return self._review_value(raw)
 
@@ -340,7 +382,7 @@ class SearchPipeline:
             Review result.
         """
         try:
-            value = self._json_value(raw)
+            value = json_value(raw)
         except ValueError:
             return {"passed": False, "blockers": ["invalid JSON"], "tests": []}
         return value if isinstance(value, dict) else {"passed": False}
@@ -420,6 +462,8 @@ class SearchPipeline:
         dict
             First-gate result.
         """
+        if self.config.task_manifest:
+            return self._manifest_result(candidate)
         if not self.config.use_docker:
             return {
                 "passed": True,
@@ -427,6 +471,24 @@ class SearchPipeline:
                 "error": "Docker disabled; no score assigned",
             }
         return self._run_candidate_gate(candidate, iteration)
+
+    def _manifest_result(self, candidate: Candidate) -> dict:
+        """Score the candidate proposal against the task manifest.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate to score.
+
+        Returns
+        -------
+        dict
+            Gate result with pass rate and passed flag.
+        """
+        path = Path(self.config.task_manifest)
+        manifest = load_manifest(path)
+        rate, _ = score_candidate(candidate.proposal, path.parent, manifest)
+        return {"passed": rate > 0.0, "score": rate}
 
     def _run_candidate_gate(
         self, candidate: Candidate, iteration: int
@@ -468,10 +530,10 @@ class SearchPipeline:
         Candidate
             Selected candidate.
         """
-        raw = self.client.complete(
-            "You are the adjudicator. Return JSON.",
-            self._json({"candidates": candidates, "history": history}),
-        )
+        prompt = _load_prompt("adjudicator")
+        context = self._json({"candidates": candidates, "history": history})
+        raw = self.client.complete(prompt, context)
+        self._record_call("adjudicator", prompt, context, raw)
         return self._select(candidates, self._selection_id(raw))
 
     def _selection_id(self, raw: str) -> str | None:
@@ -503,7 +565,7 @@ class SearchPipeline:
             Candidate identifier.
         """
         try:
-            value = self._json_value(raw)
+            value = json_value(raw)
         except ValueError:
             return None
         return self._candidate_id(value)
@@ -526,84 +588,6 @@ class SearchPipeline:
             if isinstance(value, dict)
             else None
         )
-
-    def _json_text(self, raw: str) -> str:
-        """Extract a JSON proposal array from model output.
-
-        Parameters
-        ----------
-        raw : str
-            Model response containing JSON.
-
-        Returns
-        -------
-        str
-            Normalized JSON array text.
-        """
-        value = self._json_value(raw)
-        if not isinstance(value, list):
-            raise ValueError("proposer response must be a JSON array")
-        return json.dumps(value)
-
-    def _json_value(self, raw: str):
-        """Decode JSON embedded in model output.
-
-        Parameters
-        ----------
-        raw : str
-            Model response containing JSON.
-
-        Returns
-        -------
-        object
-            Decoded JSON value.
-        """
-        text = raw.strip().replace("```json", "").replace("```", "")
-        return self._scan_json(text)
-
-    def _scan_json(self, text: str):
-        """Scan text for the first valid JSON value.
-
-        Parameters
-        ----------
-        text : str
-            Cleaned model response.
-
-        Returns
-        -------
-        object
-            Decoded JSON value.
-        """
-        decoder = json.JSONDecoder()
-        for index, character in enumerate(text):
-            if character not in "[{":
-                continue
-            value = self._decode_at(decoder, text, index)
-            if value is not None:
-                return value
-        raise ValueError("model response did not contain valid JSON")
-
-    def _decode_at(self, decoder: json.JSONDecoder, text: str, index: int):
-        """Try to decode JSON beginning at one text position.
-
-        Parameters
-        ----------
-        decoder : json.JSONDecoder
-            Decoder used for the attempt.
-        text : str
-            Response text.
-        index : int
-            Candidate starting position.
-
-        Returns
-        -------
-        object or None
-            Decoded value, or None when decoding fails.
-        """
-        try:
-            return decoder.raw_decode(text[index:])[0]
-        except json.JSONDecodeError:
-            return None
 
     def _select(
         self, candidates: list[Candidate], selected: str | None
@@ -675,7 +659,11 @@ class SearchPipeline:
             if not candidate.dynamic_test.get("passed")
             else self._final_gate(candidate, iteration)
         )
-        return self._with_test(candidate, {**candidate.dynamic_test, **result})
+        return self._with_test(
+            candidate,
+            {**candidate.dynamic_test, **result},
+            candidate.score,
+        )
 
     def _final_gate(self, candidate: Candidate, iteration: int) -> dict:
         """Run or simulate the final dynamic gate.
@@ -692,12 +680,30 @@ class SearchPipeline:
         dict
             Final-gate result.
         """
+        if self.config.task_manifest:
+            return self._final_manifest_result(candidate)
         if not self.config.use_docker:
             return {
                 "final_passed": True,
                 "error": "Docker disabled; final gate simulated",
             }
         return self._final_docker_gate(candidate, iteration)
+
+    def _final_manifest_result(self, candidate: Candidate) -> dict:
+        """Rescore the winner against the task manifest.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate to score.
+
+        Returns
+        -------
+        dict
+            Final-gate result with pass rate and passed flag.
+        """
+        result = self._manifest_result(candidate)
+        return {**result, "final_passed": result["passed"]}
 
     def _final_docker_gate(self, candidate: Candidate, iteration: int) -> dict:
         """Run the final Docker gate.
@@ -723,7 +729,7 @@ class SearchPipeline:
     def _record(
         self,
         evaluated: list[Candidate],
-        final: Candidate,
+        final: Candidate | None,
         history: list[Candidate],
         winner: Candidate | None,
         iteration: int,
@@ -734,8 +740,8 @@ class SearchPipeline:
         ----------
         evaluated : list[Candidate]
             First-gate results.
-        final : Candidate
-            Final-gate result.
+        final : Candidate or None
+            Final-gate result, or ``None`` when no survivor was adjudicated.
         history : list[Candidate]
             Mutable history.
         winner : Candidate or None
@@ -749,12 +755,50 @@ class SearchPipeline:
             Updated history and winner.
         """
         for item in evaluated:
-            completed = (
-                final if item.candidate_id == final.candidate_id else item
-            )
+            completed = self._completed(item, final)
             history.append(completed)
             self._write_artifact(iteration, completed)
-        return history, self._best(winner, final)
+        return history, self._best_or_current(winner, final)
+
+    def _completed(
+        self, item: Candidate, final: Candidate | None
+    ) -> Candidate:
+        """Return the finalized candidate when it matches ``final``.
+
+        Parameters
+        ----------
+        item : Candidate
+            Evaluated candidate.
+        final : Candidate or None
+            Final-gate result.
+
+        Returns
+        -------
+        Candidate
+            ``final`` when the ids match, otherwise ``item``.
+        """
+        if final is None:
+            return item
+        return final if item.candidate_id == final.candidate_id else item
+
+    def _best_or_current(
+        self, winner: Candidate | None, candidate: Candidate | None
+    ) -> Candidate | None:
+        """Update the winner when a valid candidate is present.
+
+        Parameters
+        ----------
+        winner : Candidate or None
+            Current winner.
+        candidate : Candidate or None
+            Candidate to compare, or ``None``.
+
+        Returns
+        -------
+        Candidate or None
+            Updated winner.
+        """
+        return winner if candidate is None else self._best(winner, candidate)
 
     def _best(
         self, winner: Candidate | None, candidate: Candidate
@@ -820,6 +864,65 @@ class SearchPipeline:
         """
         path = self._candidate_dir(candidate, iteration) / "candidate.json"
         path.write_text(json.dumps(candidate.__dict__, indent=2, default=str))
+
+    def _record_call(
+        self,
+        stage: str,
+        prompt: str,
+        context: str,
+        response: str,
+        candidate_id: str | None = None,
+    ) -> None:
+        """Append one model-call entry to the iteration trajectory.
+
+        Parameters
+        ----------
+        stage : str
+            Stage identifier: ``proposer``, ``reviewer``, or ``adjudicator``.
+        prompt : str
+            System prompt sent to the model.
+        context : str
+            User payload sent to the model.
+        response : str
+            Raw model response.
+        candidate_id : str or None
+            Candidate identifier for per-candidate stages.
+
+        Returns
+        -------
+        None
+            Entry appended to ``runs/iteration-N/trajectory.jsonl``.
+        """
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "iteration": self._current_iteration,
+            "stage": stage,
+            "candidate_id": candidate_id,
+            "prompt_system": prompt,
+            "prompt_user": context,
+            "response": response,
+        }
+        self._append_trajectory(entry)
+
+    def _append_trajectory(self, entry: dict) -> None:
+        """Append one trajectory entry to the iteration jsonl file.
+
+        Parameters
+        ----------
+        entry : dict
+            Entry to append.
+
+        Returns
+        -------
+        None
+            Entry written to disk.
+        """
+        directory = self.workspace / f"iteration-{self._current_iteration}"
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / "trajectory.jsonl").open(
+            "a", encoding="utf-8"
+        ) as handle:
+            handle.write(json.dumps(entry) + "\n")
 
     def _target_reached(self, winner: Candidate | None) -> bool:
         """Check whether the target is reached.

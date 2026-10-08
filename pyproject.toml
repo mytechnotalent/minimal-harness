@@ -19,5 +19,8 @@ harness-search = "meta_harness.cli:main"
 pythonpath = ["."]
 testpaths = ["tests"]
 
+[tool.setuptools.package-data]
+meta_harness = ["prompts/*.md"]
+
 [tool.black]
 line-length = 79

@@ -34,6 +34,9 @@ class OpenRouterClient:
         self.site_url = os.getenv("OPENROUTER_SITE_URL", "http://localhost")
         self.app_name = os.getenv("OPENROUTER_APP_NAME", "minimal-harness")
         self.max_retries = int(os.getenv("OPENROUTER_MAX_RETRIES", "2"))
+        self.call_count = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
 
     @property
     def provider(self) -> str:
@@ -220,9 +223,11 @@ class OpenRouterClient:
         Returns
         -------
         str
-            OpenRouter endpoint URL.
+            OpenRouter endpoint URL, overridable via
+            ``OPENROUTER_BASE_URL`` for local testing.
         """
-        return "https://openrouter.ai/api/v1/chat/completions"
+        default = "https://openrouter.ai/api/v1/chat/completions"
+        return os.getenv("OPENROUTER_BASE_URL", default)
 
     def _headers(self) -> dict[str, str]:
         """Return required request headers.
@@ -394,12 +399,40 @@ class OpenRouterClient:
         str
             Completion content.
         """
+        self._record_usage(body)
         try:
             return str(body["choices"][0]["message"]["content"])
         except (KeyError, IndexError, TypeError) as exc:
             raise OpenRouterError(
                 f"Unexpected OpenRouter response: {body}"
             ) from exc
+
+    def _record_usage(self, body: dict[str, Any]) -> None:
+        """Add this response's token counts to the running totals.
+
+        Parameters
+        ----------
+        body : dict[str, Any]
+            Decoded provider response.
+        """
+        usage = body.get("usage") or {}
+        self.call_count += 1
+        self.prompt_tokens += int(usage.get("prompt_tokens", 0) or 0)
+        self.completion_tokens += int(usage.get("completion_tokens", 0) or 0)
+
+    def usage_summary(self) -> str:
+        """Return a one-line summary of accumulated token usage.
+
+        Returns
+        -------
+        str
+            Human-readable summary line.
+        """
+        return (
+            f"calls={self.call_count} "
+            f"prompt_tokens={self.prompt_tokens} "
+            f"completion_tokens={self.completion_tokens}"
+        )
 
 
 def _raise_timeout(signum: int, frame: Any) -> None:

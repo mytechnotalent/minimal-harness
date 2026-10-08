@@ -26,6 +26,7 @@ class SearchConfig:
     docker_image: str = "python:3.12-slim"
     use_docker: bool = True
     use_web_search: bool = True
+    task_manifest: str | None = None
 
 
 @dataclass(frozen=True)
