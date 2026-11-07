@@ -1,11 +1,11 @@
 """Command-line entry point for Minimal Harness."""
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
 from .agent import Agent
+from .env import load_env
 from .inspector import print_run
 from .models import SearchConfig
 from .openrouter import OpenRouterClient, OpenRouterError
@@ -13,7 +13,6 @@ from .pipeline import SearchPipeline
 from .progress import ProgressTUI
 from .provider import ProviderCatalog
 from .session import Session
-from .tui import TUI
 
 
 class Arguments(argparse.Namespace):
@@ -229,6 +228,8 @@ def _frontend(args: Arguments, agent: Agent) -> None:
         Selected frontend runs in place.
     """
     if args.tui:
+        from .tui import TUI
+
         TUI(agent).run()
     elif args.interactive:
         _repl(agent)
@@ -406,29 +407,7 @@ def _load_env() -> None:
     None
         Environment is updated without overriding shell values.
     """
-    path = Path(".env")
-    if path.exists():
-        for line in path.read_text().splitlines():
-            _load_env_line(line)
-
-
-def _load_env_line(line: str) -> None:
-    """Load one environment assignment.
-
-    Parameters
-    ----------
-    line : str
-        Environment file line.
-
-    Returns
-    -------
-    None
-        A valid assignment is loaded.
-    """
-    text = line.strip()
-    if "=" in text and not text.startswith("#"):
-        key, value = text.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+    load_env()
 
 
 def _config(args: Arguments) -> SearchConfig:

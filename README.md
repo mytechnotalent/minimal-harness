@@ -160,6 +160,56 @@ mkdir -p e2e-workspaces/new-site
 python3 -m meta_harness.cli --workspace e2e-workspaces/new-site "Build a complete responsive website here. Create index.html, styles.css, and app.js, then use bash to verify them."
 ```
 
+### Desktop App and Voice Mode
+
+The PySide6 desktop shell has two modes, selected in `.env`:
+
+```dotenv
+HARNESS_UI_MODE=classic   # default: light typed interface (unchanged)
+# HARNESS_UI_MODE=cyber  # dark neon voice interface
+```
+
+Classic mode preserves the existing light `sage` interface and adds no voice
+controls. Cyber mode uses a dark hacker theme and adds push-to-talk voice, so
+opting in does not change MaryAnn's workspace.
+
+Install the voice extras:
+
+```bash
+pip install -e ".[voice]"
+```
+
+Launch the desktop shell:
+
+```bash
+harness-gui
+```
+
+In cyber mode, press and hold **Hold to Talk** in either panel, speak, and
+release. The transcript is submitted automatically. Final replies and `ask`
+questions are spoken when **Speak replies** is checked. Audio is transcribed on
+device with `faster-whisper`; only the resulting text is sent to the model
+endpoint. The first run downloads the `base.en` model (override with
+`HARNESS_WHISPER_MODEL`). Text-to-speech uses `edge-tts` and needs internet;
+the default voice is the female `en-US-AriaNeural` (override with
+`HARNESS_VOICE`, for example `en-US-JennyNeural` or `en-GB-SoniaNeural`).
+
+macOS and Windows prompt for microphone permission the first time. On Linux,
+ensure PortAudio is installed (for example `sudo apt install libportaudio2`).
+
+To use OpenCode Go instead of OpenRouter, set:
+
+```dotenv
+HARNESS_PROVIDER=opencode
+OPENCODE_API_KEY=your-opencode-go-key
+OPENCODE_MODEL=deepseek-v4.1-flash
+# OPENCODE_BASE_URL=https://opencode.ai/inference/go/openai/v1/chat/completions
+```
+
+OpenRouter remains the default; `HARNESS_PROVIDER=openrouter` keeps the
+existing `OPENROUTER_*` settings. A custom proxy can still override the
+endpoint with `OPENCODE_BASE_URL` or `OPENROUTER_BASE_URL`.
+
 ### Optimize Mode
 
 The original modified search loop is explicit with `--optimize`:
@@ -196,18 +246,33 @@ The optimizer currently produces proposal artifacts and is separate from the int
 
 The interactive agent can invoke `evaluate_app` for deterministic checks of `index.html`, `styles.css`, `app.js`, HTML structure, and Node JavaScript syntax. It can invoke `browser_assert` to require visible page text before accepting a browser check.
 
-## OpenRouter Setup
+## Provider Setup
 
-1. Create an API key at <https://openrouter.ai/settings/keys>.
-2. Create `.env` in the repository root.
-3. Never commit `.env` or place a real key in `.env.example`.
+The client supports OpenRouter (default) and OpenCode Go. Create `.env` in the
+repository root and never commit it or place a real key in `.env.example`.
+
+OpenRouter:
 
 ```dotenv
+HARNESS_PROVIDER=openrouter
 OPENROUTER_API_KEY=replace_with_your_key
 OPENROUTER_MODEL=openrouter/free
 OPENROUTER_SITE_URL=http://localhost
 OPENROUTER_APP_NAME=minimal-harness
 ```
+
+OpenCode Go (subscribe at <https://opencode.ai/console>):
+
+```dotenv
+HARNESS_PROVIDER=opencode
+OPENCODE_API_KEY=replace_with_your_opencode_go_key
+OPENCODE_MODEL=deepseek-v4.1-flash
+OPENCODE_BASE_URL=https://opencode.ai/inference/go/openai/v1/chat/completions
+```
+
+`OPENCODE_BASE_URL` defaults to that endpoint, so it can be omitted. A base URL
+ending in `/v1` is also accepted. `OPENCODE_GO_API_KEY` works as an alternate
+key variable.
 
 `openrouter/free` routes requests to an available free model. Free requests may show no paid usage. Provider availability, rate limits, and output formats can change.
 
@@ -345,6 +410,11 @@ Stop a running process with `Ctrl-C`.
 - `meta_harness/progress.py`: live full-screen optimization dashboard.
 - `meta_harness/docker_gate.py`: constrained Docker execution.
 - `meta_harness/models.py`: data models.
+- `meta_harness/voice.py`: cross-platform microphone capture, Whisper transcription, and edge-tts playback.
+- `meta_harness/voice_text.py`: speakable-text cleanup and spoken-option matching.
+- `meta_harness/app_mode.py`: classic/cyber interface selection from `.env`.
+- `meta_harness/env.py`: `.env` loading shared by the CLI and desktop shell.
+- `gui/cyber_style.py`: dark neon stylesheet for cyber mode.
 - `tests/`: offline tests.
 - `runs/`: generated candidate artifacts.
 

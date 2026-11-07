@@ -10,6 +10,7 @@ class Settings:
     defaults = {
         "show_commands": False,
         "show_tools": False,
+        "speak_replies": True,
     }
 
     def __init__(self, path: Path | str = "runs/gui-settings.json") -> None:

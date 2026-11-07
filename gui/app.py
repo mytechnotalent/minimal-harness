@@ -2,6 +2,7 @@
 
 import sys
 import json
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, Signal
@@ -34,8 +35,13 @@ from PySide6.QtWidgets import (
 )
 
 from meta_harness.agent import Agent
+from meta_harness.app_mode import ui_mode, voice_enabled
+from meta_harness.env import load_env
 from meta_harness.session import Session
+from meta_harness.voice import VoiceEngine, missing_dependencies
+from meta_harness.voice_text import speech_text
 
+from .cyber_style import AGENT_BUBBLE, TOOL_BUBBLE, USER_BUBBLE
 from .store import SessionRecord, SessionStore
 from .context import snapshot
 from .worker import AgentWorker, QuestionBridge
@@ -159,6 +165,7 @@ class ChatPanel(QWidget):
     """One agent chat panel with header, log, and input."""
 
     posted = Signal()
+    heard = Signal(str)
 
     def __init__(
         self,
@@ -167,6 +174,9 @@ class ChatPanel(QWidget):
         context=None,
         show_notes_toggle: bool = False,
         show_tools: bool = False,
+        settings=None,
+        voice_on: bool = False,
+        theme: str = "classic",
     ) -> None:
         """Build the panel and start its background worker.
 
@@ -182,6 +192,12 @@ class ChatPanel(QWidget):
             Whether to show the notes context checkbox.
         show_tools : bool
             Whether to render tool activity in the log.
+        settings : Settings or None
+            Optional persisted interface settings.
+        voice_on : bool
+            Whether to build voice controls.
+        theme : str
+            Active theme name (``classic`` or ``cyber``).
 
         Returns
         -------
@@ -192,7 +208,16 @@ class ChatPanel(QWidget):
         self._agent = agent
         self._context = context
         self._show_tools = show_tools
+        self._settings = settings
+        self._theme = theme
+        self._voice_on = voice_on
         self._notes_included = False
+        self._voice_missing: list[str] = []
+        self._voice = None
+        if voice_on:
+            self._voice_missing = missing_dependencies()
+            if not self._voice_missing:
+                self._voice = VoiceEngine()
         self._timer = QTimer(self)
         self._timer.setInterval(250)
         self._timer.timeout.connect(self._animate)
@@ -224,6 +249,7 @@ class ChatPanel(QWidget):
         self._status.setObjectName("statusLabel")
         self._tick = 0
         self._layout.addWidget(self._status)
+        self._build_voice_status()
         self._log = QTextEdit(self)
         self._log.setReadOnly(True)
         self._log.setLineWrapMode(QTextEdit.WidgetWidth)
@@ -236,16 +262,89 @@ class ChatPanel(QWidget):
             self._notes.stateChanged.connect(self._on_notes)
         self._input = PromptInput(self)
         self._send = QPushButton("Ask", self)
+        self._build_voice_widgets()
         row = QHBoxLayout()
         row.addWidget(self._input)
+        self._add_talk(row)
         row.addWidget(self._send)
         self._layout.addWidget(self._log)
         if self._notes is not None:
             self._layout.addWidget(self._notes)
+        self._add_speak_toggle()
         self._layout.addLayout(row)
         self._send.clicked.connect(self._submit)
         self._input.submitted.connect(self._submit)
+        self._connect_voice()
         self._pending: QuestionBridge | None = None
+
+    def _build_voice_status(self) -> None:
+        """Add the voice status label only in voice mode.
+
+        Returns
+        -------
+        None
+            The label is created when voice is enabled.
+        """
+        self._voice_status = None
+        if not self._voice_on:
+            return
+        self._voice_status = QLabel("", self)
+        self._voice_status.setObjectName("voiceStatus")
+        self._layout.addWidget(self._voice_status)
+
+    def _build_voice_widgets(self) -> None:
+        """Create voice widgets only in voice mode.
+
+        Returns
+        -------
+        None
+            Widgets are created when voice is enabled.
+        """
+        self._talk = None
+        self._speak_toggle = None
+        if not self._voice_on:
+            return
+        self._talk = QPushButton("Hold to Talk", self)
+        self._speak_toggle = QCheckBox("Speak replies", self)
+        self._build_voice()
+
+    def _add_talk(self, row: QHBoxLayout) -> None:
+        """Place the talk button in the input row.
+
+        Parameters
+        ----------
+        row : QHBoxLayout
+            Input row layout.
+
+        Returns
+        -------
+        None
+            The button is added when present.
+        """
+        if self._talk is not None:
+            row.addWidget(self._talk)
+
+    def _add_speak_toggle(self) -> None:
+        """Place the speak toggle above the input row.
+
+        Returns
+        -------
+        None
+            The toggle is added when present.
+        """
+        if self._speak_toggle is not None:
+            self._layout.addWidget(self._speak_toggle)
+
+    def _connect_voice(self) -> None:
+        """Connect voice signals only in voice mode.
+
+        Returns
+        -------
+        None
+            The recognition signal is connected when enabled.
+        """
+        if self._voice_on:
+            self.heard.connect(self._on_heard)
 
     def _on_notes(self, state: int) -> None:
         """Toggle whether notes join the context.
@@ -261,6 +360,180 @@ class ChatPanel(QWidget):
             The note flag is updated.
         """
         self._notes_included = state == Qt.CheckState.Checked.value
+
+    def _build_voice(self) -> None:
+        """Configure the voice controls for this environment.
+
+        Returns
+        -------
+        None
+            Controls are enabled or annotated in place.
+        """
+        enabled = self._voice is not None
+        self._voice_controls(enabled)
+        self._voice_hints(enabled)
+        self._wire_voice()
+
+    def _voice_controls(self, enabled: bool) -> None:
+        """Enable or disable the voice widgets.
+
+        Parameters
+        ----------
+        enabled : bool
+            Whether voice dependencies are available.
+
+        Returns
+        -------
+        None
+            Widget state is updated.
+        """
+        self._talk.setEnabled(enabled)
+        self._speak_toggle.setEnabled(enabled)
+        self._speak_toggle.setChecked(enabled and self._speak_default())
+
+    def _voice_hints(self, enabled: bool) -> None:
+        """Attach install hints when voice is unavailable.
+
+        Parameters
+        ----------
+        enabled : bool
+            Whether voice dependencies are available.
+
+        Returns
+        -------
+        None
+            Tooltips are set when needed.
+        """
+        if enabled:
+            return
+        missing = ", ".join(self._voice_missing)
+        self._talk.setToolTip("Missing voice modules: " + missing)
+        self._speak_toggle.setToolTip("pip install -e '.[voice]'")
+
+    def _speak_default(self) -> bool:
+        """Return whether replies should be spoken by default.
+
+        Returns
+        -------
+        bool
+            Stored setting, or ``True`` without settings.
+        """
+        if self._settings is None:
+            return True
+        return self._settings.get("speak_replies")
+
+    def _wire_voice(self) -> None:
+        """Connect voice button and toggle signals.
+
+        Returns
+        -------
+        None
+            Signals are connected.
+        """
+        self._talk.pressed.connect(self._start_talk)
+        self._talk.released.connect(self._stop_talk)
+        self._speak_toggle.toggled.connect(self._on_speak)
+
+    def _on_speak(self, checked: bool) -> None:
+        """Persist the speak toggle and cancel active speech.
+
+        Parameters
+        ----------
+        checked : bool
+            New checkbox state.
+
+        Returns
+        -------
+        None
+            The setting is stored and playback may stop.
+        """
+        if self._settings is not None:
+            self._settings.set("speak_replies", checked)
+        if not checked and self._voice is not None:
+            self._voice.stop_speaking()
+
+    def _start_talk(self) -> None:
+        """Begin push-to-talk microphone capture.
+
+        Returns
+        -------
+        None
+            Recording starts or an error is shown.
+        """
+        if self._voice is None:
+            self._voice_status.setText("voice unavailable")
+            return
+        try:
+            self._voice.stop_speaking()
+            self._voice.start_recording()
+        except Exception as exc:
+            self._voice_status.setText(f"mic error: {exc}")
+            return
+        self._voice_status.setText("listening...")
+
+    def _stop_talk(self) -> None:
+        """Stop capture and transcribe on a background thread.
+
+        Returns
+        -------
+        None
+            Transcription is queued.
+        """
+        if self._voice is None or not self._voice.recording:
+            return
+        self._voice_status.setText("transcribing...")
+        threading.Thread(target=self._hear, daemon=True).start()
+
+    def _hear(self) -> None:
+        """Transcribe the captured utterance and report it.
+
+        Returns
+        -------
+        None
+            Recognized text is emitted, even when empty.
+        """
+        try:
+            text = self._voice.stop_recording()
+        except Exception:
+            text = ""
+        self.heard.emit(text)
+
+    def _on_heard(self, text: str) -> None:
+        """Submit a recognized utterance.
+
+        Parameters
+        ----------
+        text : str
+            Recognized speech.
+
+        Returns
+        -------
+        None
+            The prompt is submitted when text was heard.
+        """
+        if not text.strip():
+            self._voice_status.setText("didn't catch that")
+            return
+        self._voice_status.setText("")
+        self._input.setPlainText(text)
+        self._submit()
+
+    def _speak_answer(self, text: str) -> None:
+        """Speak text when the toggle is on and voice is available.
+
+        Parameters
+        ----------
+        text : str
+            Assistant or question text.
+
+        Returns
+        -------
+        None
+            Speech is queued when enabled.
+        """
+        if self._voice is None or not self._speak_toggle.isChecked():
+            return
+        self._voice.speak(speech_text(text))
 
     def _build_header(self, title: str) -> QHBoxLayout:
         """Compose the top information bar.
@@ -410,13 +683,12 @@ class ChatPanel(QWidget):
             Block formats are applied in place.
         """
         fmt = QTextBlockFormat()
+        fmt.setBackground(QColor(self._bubble_color(user, tool)))
         if tool:
             fmt.setAlignment(Qt.AlignLeft)
-            fmt.setBackground(QColor("#EFEFEF"))
             fmt.setRightMargin(self._bubble_margin())
         else:
             fmt.setAlignment(Qt.AlignRight if user else Qt.AlignLeft)
-            fmt.setBackground(QColor("#D2DBD6" if user else "#D6E0E6"))
             if user:
                 fmt.setLeftMargin(self._bubble_margin())
             else:
@@ -430,6 +702,29 @@ class ChatPanel(QWidget):
             cursor.setBlockFormat(first if count == 0 else fmt)
             block = block.next()
             count += 1
+
+    def _bubble_color(self, user: bool, tool: bool) -> str:
+        """Return the bubble background for the active theme.
+
+        Parameters
+        ----------
+        user : bool
+            Whether the bubble is the user's.
+        tool : bool
+            Whether the bubble is a tool step.
+
+        Returns
+        -------
+        str
+            Hex color string.
+        """
+        if self._theme != "cyber":
+            if tool:
+                return "#EFEFEF"
+            return "#D2DBD6" if user else "#D6E0E6"
+        if tool:
+            return TOOL_BUBBLE
+        return USER_BUBBLE if user else AGENT_BUBBLE
 
     def _bubble_margin(self) -> int:
         """Compute the inward bubble offset.
@@ -490,6 +785,7 @@ class ChatPanel(QWidget):
         """
         self._stop_thinking()
         self._append_log("agent", answer)
+        self._speak_answer(answer)
 
     def on_tool(self, name: str, arguments: dict, content: str) -> None:
         """Show tool activity when enabled.
@@ -569,6 +865,7 @@ class ChatPanel(QWidget):
             The bridge resolves with the user's choice.
         """
         self._pending = bridge
+        self._speak_answer(question)
         choice, ok = QInputDialog.getItem(
             self, "Minimal Harness", question, options, 0, True
         )
@@ -586,6 +883,8 @@ class ChatPanel(QWidget):
         """
         self._thread.quit()
         self._thread.wait(2000)
+        if self._voice is not None:
+            self._voice.stop_speaking()
 
 
 class MainWindow(QMainWindow):
@@ -614,9 +913,15 @@ class MainWindow(QMainWindow):
         self._settings = settings or Settings()
         self._store = store
         self._root = root
+        self._voice_on = voice_enabled()
+        self._theme = ui_mode()
         self._record: SessionRecord | None = None
         self._command_panel = ChatPanel(
-            self._make_agent(), show_tools=self._settings.get("show_tools")
+            self._make_agent(),
+            show_tools=self._settings.get("show_tools"),
+            settings=self._settings,
+            voice_on=self._voice_on,
+            theme=self._theme,
         )
         self._command_panel.posted.connect(self._on_posted)
         ideas_context = self._make_ideas_context
@@ -626,6 +931,9 @@ class MainWindow(QMainWindow):
             context=ideas_context,
             show_notes_toggle=True,
             show_tools=self._settings.get("show_tools"),
+            settings=self._settings,
+            voice_on=self._voice_on,
+            theme=self._theme,
         )
         self._ideas_panel.posted.connect(self._on_posted)
         self._ideas_card = self._card(self._ideas_panel)
@@ -1211,10 +1519,9 @@ def main() -> None:
     None
         The application runs until the window closes.
     """
+    load_env()
     app = QApplication(sys.argv)
-    from .style import apply_palette
-
-    apply_palette(app)
+    _apply_theme(app)
     store = SessionStore(Path("runs/sessions"))
     if not any(store.root.iterdir()):
         store.create(kind="session")
@@ -1223,6 +1530,26 @@ def main() -> None:
     window = MainWindow(store, Path("."), Settings())
     window.show()
     sys.exit(app.exec())
+
+
+def _apply_theme(app: QApplication) -> None:
+    """Apply the classic or cyber stylesheet.
+
+    Parameters
+    ----------
+    app : QApplication
+        Application receiving the stylesheet.
+
+    Returns
+    -------
+    None
+        The selected stylesheet is applied.
+    """
+    if ui_mode() == "cyber":
+        from .cyber_style import apply_palette
+    else:
+        from .style import apply_palette
+    apply_palette(app)
 
 
 if __name__ == "__main__":

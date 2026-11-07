@@ -7,7 +7,101 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from typing import Any
+
+
+def _provider_name() -> str:
+    """Return the configured model provider.
+
+    Returns
+    -------
+    str
+        ``"opencode"`` or ``"openrouter"``.
+    """
+    value = os.getenv("HARNESS_PROVIDER", "openrouter")
+    if value.strip().lower() in ("opencode", "opencode-go", "go"):
+        return "opencode"
+    return "openrouter"
+
+
+def _provider_key(provider: str) -> str | None:
+    """Return the API key for a provider.
+
+    Parameters
+    ----------
+    provider : str
+        Provider name.
+
+    Returns
+    -------
+    str or None
+        Configured API key.
+    """
+    if provider == "opencode":
+        return os.getenv("OPENCODE_API_KEY") or os.getenv(
+            "OPENCODE_GO_API_KEY"
+        )
+    return os.getenv("OPENROUTER_API_KEY")
+
+
+def _provider_model(provider: str) -> str:
+    """Return the default model for a provider.
+
+    Parameters
+    ----------
+    provider : str
+        Provider name.
+
+    Returns
+    -------
+    str
+        Configured or default model identifier.
+    """
+    if provider == "opencode":
+        return os.getenv("OPENCODE_MODEL", "deepseek-v4.1-flash")
+    return os.getenv("OPENROUTER_MODEL", "openrouter/free")
+
+
+def _provider_url(provider: str) -> str:
+    """Return the chat-completions endpoint for a provider.
+
+    Parameters
+    ----------
+    provider : str
+        Provider name.
+
+    Returns
+    -------
+    str
+        Configured or default endpoint URL.
+    """
+    if provider == "opencode":
+        default = "https://opencode.ai/inference/go/openai/v1/chat/completions"
+        return _chat_url(os.getenv("OPENCODE_BASE_URL") or default)
+    default = "https://openrouter.ai/api/v1/chat/completions"
+    return os.getenv("OPENROUTER_BASE_URL") or default
+
+
+def _chat_url(url: str) -> str:
+    """Complete a base URL with the chat-completions path.
+
+    Parameters
+    ----------
+    url : str
+        Full endpoint or base URL.
+
+    Returns
+    -------
+    str
+        Endpoint ending in ``/chat/completions``.
+    """
+    base = url.rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    if base.endswith("/v1") or base.endswith("/openai/v1"):
+        return base + "/chat/completions"
+    return base
 
 
 class OpenRouterError(RuntimeError):
@@ -30,10 +124,15 @@ class OpenRouterClient:
         None
             This initializer mutates the client instance.
         """
-        self.api_key = os.getenv("OPENROUTER_API_KEY")
-        self.model = model or os.getenv("OPENROUTER_MODEL", "openrouter/free")
+        self._provider = _provider_name()
+        self.api_key = _provider_key(self._provider)
+        self.model = model or _provider_model(self._provider)
         self.site_url = os.getenv("OPENROUTER_SITE_URL", "http://localhost")
         self.app_name = os.getenv("OPENROUTER_APP_NAME", "minimal-harness")
+        self.user_agent = os.getenv(
+            "HARNESS_USER_AGENT", "minimal-harness/0.1"
+        )
+        self.session_id = uuid.uuid4().hex
         self.max_retries = int(os.getenv("OPENROUTER_MAX_RETRIES", "2"))
         self.call_count = 0
         self.prompt_tokens = 0
@@ -48,7 +147,7 @@ class OpenRouterClient:
         str
             Provider identifier.
         """
-        return "openrouter"
+        return self._provider
 
     def complete(
         self, system: str, user: str, temperature: float = 0.2
@@ -144,7 +243,19 @@ class OpenRouterClient:
             This method returns after validation.
         """
         if not self.api_key:
-            raise OpenRouterError("OPENROUTER_API_KEY is not set.")
+            raise OpenRouterError(self._missing_key_message())
+
+    def _missing_key_message(self) -> str:
+        """Return the missing-key error for the active provider.
+
+        Returns
+        -------
+        str
+            Human-readable error message.
+        """
+        if self._provider == "opencode":
+            return "OPENCODE_API_KEY is not set."
+        return "OPENROUTER_API_KEY is not set."
 
     def _build_request(
         self, system: str, user: str, temperature: float
@@ -224,11 +335,10 @@ class OpenRouterClient:
         Returns
         -------
         str
-            OpenRouter endpoint URL, overridable via
-            ``OPENROUTER_BASE_URL`` for local testing.
+            Provider endpoint URL, overridable via provider-specific
+            environment variables.
         """
-        default = "https://openrouter.ai/api/v1/chat/completions"
-        return os.getenv("OPENROUTER_BASE_URL", default)
+        return _provider_url(self._provider)
 
     def _headers(self) -> dict[str, str]:
         """Return required request headers.
@@ -241,8 +351,10 @@ class OpenRouterClient:
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            "User-Agent": self.user_agent,
             "HTTP-Referer": self.site_url,
             "X-Title": self.app_name,
+            "x-opencode-session": self.session_id,
         }
 
     def _send(self, request: urllib.request.Request) -> dict[str, Any]:
@@ -274,10 +386,12 @@ class OpenRouterClient:
         -------
         bool
             ``True`` when an alarm was set and must be cleared. Worker
-            threads cannot install signal handlers, so they rely on the
-            socket timeout instead.
+            threads cannot install signal handlers, and Windows has no
+            ``SIGALRM``, so those cases rely on the socket timeout.
         """
         if threading.current_thread() is not threading.main_thread():
+            return False
+        if not hasattr(signal, "SIGALRM"):
             return False
         signal.signal(signal.SIGALRM, _raise_timeout)
         signal.alarm(120)

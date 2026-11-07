@@ -1000,13 +1000,35 @@ class TUI:
         bool
             Whether a wheel event was handled.
         """
-        if state & curses.BUTTON4_PRESSED:
+        if state & self._wheel_up():
             self.scroll = self._clamp_scroll(self.scroll + 3)
             return True
-        if state & curses.BUTTON5_PRESSED:
+        if state & self._wheel_down():
             self.scroll = self._clamp_scroll(self.scroll - 3)
             return True
         return False
+
+    @staticmethod
+    def _wheel_up() -> int:
+        """Return the scroll-up mouse mask for this platform.
+
+        Returns
+        -------
+        int
+            Wheel-up event bit, or zero when unsupported.
+        """
+        return getattr(curses, "BUTTON4_PRESSED", 0)
+
+    @staticmethod
+    def _wheel_down() -> int:
+        """Return the scroll-down mouse mask for this platform.
+
+        Returns
+        -------
+        int
+            Wheel-down event bit, or zero when unsupported.
+        """
+        return getattr(curses, "BUTTON5_PRESSED", 0)
 
     def _click_suggestion(self, row: int, state: int) -> bool:
         """Run the suggestion under a left click.
