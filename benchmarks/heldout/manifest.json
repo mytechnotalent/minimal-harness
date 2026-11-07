@@ -1,0 +1,50 @@
+[
+  {
+    "id": "double",
+    "function": "double",
+    "prompt": "Held-out check: Implement double(x).",
+    "test": "tasks/double/test_double.py"
+  },
+  {
+    "id": "reverse",
+    "function": "reverse",
+    "prompt": "Held-out check: Implement reverse(s).",
+    "test": "tasks/reverse/test_reverse.py"
+  },
+  {
+    "id": "is_even",
+    "function": "is_even",
+    "prompt": "Held-out check: Implement is_even(x).",
+    "test": "tasks/is_even/test_is_even.py"
+  },
+  {
+    "id": "palindrome",
+    "function": "palindrome",
+    "prompt": "Held-out check: Implement palindrome(s).",
+    "test": "tasks/palindrome/test_palindrome.py"
+  },
+  {
+    "id": "sum_list",
+    "function": "sum_list",
+    "prompt": "Held-out check: Implement sum_list(xs).",
+    "test": "tasks/sum_list/test_sum_list.py"
+  },
+  {
+    "id": "fibonacci",
+    "function": "fibonacci",
+    "prompt": "Held-out check: Implement fibonacci(n).",
+    "test": "tasks/fibonacci/test_fibonacci.py"
+  },
+  {
+    "id": "gcd",
+    "function": "gcd",
+    "prompt": "Held-out check: Implement gcd(a, b).",
+    "test": "tasks/gcd/test_gcd.py"
+  },
+  {
+    "id": "fizz_buzz",
+    "function": "fizz_buzz",
+    "prompt": "Held-out check: Implement fizz_buzz(n).",
+    "test": "tasks/fizz_buzz/test_fizz_buzz.py"
+  }
+]

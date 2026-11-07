@@ -35,6 +35,14 @@ QMainWindow, QWidget {{
     border: 1px solid {BORDER};
     border-radius: 8px;
 }}
+#QuestionCard {{
+    background-color: {PANEL_ALT};
+    border: 1px solid {NEON};
+    border-radius: 6px;
+}}
+#QuestionCard QLabel {{
+    color: {TEXT};
+}}
 #Sidebar {{
     background-color: {PANEL};
     border: 1px solid {BORDER};
@@ -67,6 +75,9 @@ QLabel {{
 }}
 #voiceStatus {{
     color: {MAGENTA};
+}}
+#workspaceLabel {{
+    color: {MUTED};
 }}
 QTextEdit {{
     background-color: {PANEL_ALT};

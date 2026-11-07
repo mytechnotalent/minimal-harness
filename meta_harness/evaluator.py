@@ -86,9 +86,12 @@ class AppEvaluator:
             files["index.html"]
             and "<html" in (root / "index.html").read_text().lower()
         )
-        return {"javascript_syntax": javascript, "html_structure": html}
+        checks = {"html_structure": html}
+        if javascript is not None:
+            checks["javascript_syntax"] = javascript
+        return checks
 
-    def _node_ok(self, path: Path) -> bool:
+    def _node_ok(self, path: Path) -> bool | None:
         """Check JavaScript syntax with Node.
 
         Parameters
@@ -98,12 +101,12 @@ class AppEvaluator:
 
         Returns
         -------
-        bool
-            Whether Node accepts the file.
+        bool or None
+            Whether Node accepts the file, or ``None`` when Node is absent.
         """
         return self._node_result(path)
 
-    def _node_result(self, path: Path) -> bool:
+    def _node_result(self, path: Path) -> bool | None:
         """Run Node syntax validation.
 
         Parameters
@@ -113,11 +116,13 @@ class AppEvaluator:
 
         Returns
         -------
-        bool
-            Whether Node accepts the file.
+        bool or None
+            Whether Node accepts the file, or ``None`` when Node is absent.
         """
         try:
             return self._node_process(path).returncode == 0
+        except FileNotFoundError:
+            return None
         except (OSError, subprocess.TimeoutExpired):
             return False
 

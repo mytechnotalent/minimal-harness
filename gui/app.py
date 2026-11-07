@@ -17,10 +17,12 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QFrame,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -39,12 +41,13 @@ from meta_harness.app_mode import ui_mode, voice_enabled
 from meta_harness.env import load_env
 from meta_harness.session import Session
 from meta_harness.voice import VoiceEngine, missing_dependencies
-from meta_harness.voice_text import speech_text
+from meta_harness.voice_text import match_option, speech_text
 
 from .cyber_style import AGENT_BUBBLE, TOOL_BUBBLE, USER_BUBBLE
 from .store import SessionRecord, SessionStore
 from .context import snapshot
 from .worker import AgentWorker, QuestionBridge
+from .workspace import workspace_root
 
 
 class Bridge(QObject):
@@ -66,6 +69,7 @@ class Bridge(QObject):
             Signals are wired.
         """
         super().__init__()
+        worker.prompt_started.connect(panel.on_prompt_started)
         worker.started.connect(panel.on_started)
         worker.tool.connect(panel.on_tool)
         worker.answered.connect(panel.on_answered)
@@ -212,6 +216,8 @@ class ChatPanel(QWidget):
         self._theme = theme
         self._voice_on = voice_on
         self._notes_included = False
+        self._outgoing: list[str] = []
+        self._queued = 0
         self._voice_missing: list[str] = []
         self._voice = None
         if voice_on:
@@ -268,6 +274,7 @@ class ChatPanel(QWidget):
         self._add_talk(row)
         row.addWidget(self._send)
         self._layout.addWidget(self._log)
+        self._build_question_card()
         if self._notes is not None:
             self._layout.addWidget(self._notes)
         self._add_speak_toggle()
@@ -345,6 +352,159 @@ class ChatPanel(QWidget):
         """
         if self._voice_on:
             self.heard.connect(self._on_heard)
+
+    def _build_question_card(self) -> None:
+        """Build the inline agent-question panel.
+
+        Returns
+        -------
+        None
+            The hidden card is added to the layout.
+        """
+        self._question_card = QWidget(self)
+        self._question_card.setObjectName("QuestionCard")
+        box = QVBoxLayout(self._question_card)
+        box.setContentsMargins(6, 6, 6, 6)
+        self._question_label = QLabel("", self._question_card)
+        self._question_label.setWordWrap(True)
+        self._question_options = QHBoxLayout()
+        self._question_input = QLineEdit(self._question_card)
+        self._question_send = QPushButton("Answer", self._question_card)
+        box.addWidget(self._question_label)
+        box.addLayout(self._question_options)
+        box.addLayout(self._question_row())
+        self._question_card.hide()
+        self._layout.addWidget(self._question_card)
+        self._question_send.clicked.connect(self._answer_typed)
+        self._question_input.returnPressed.connect(self._answer_typed)
+
+    def _question_row(self) -> QHBoxLayout:
+        """Build the free-text answer row.
+
+        Returns
+        -------
+        QHBoxLayout
+            Input and answer button row.
+        """
+        row = QHBoxLayout()
+        row.addWidget(self._question_input)
+        row.addWidget(self._question_send)
+        return row
+
+    def _show_question(self, question: str, options: list[str]) -> None:
+        """Render a non-modal question with option buttons.
+
+        Parameters
+        ----------
+        question : str
+            Question text.
+        options : list[str]
+            Suggested answers.
+
+        Returns
+        -------
+        None
+            The question card is shown.
+        """
+        self._question_label.setText(question)
+        self._clear_options()
+        self._option_buttons(options)
+        self._question_input.clear()
+        self._question_card.show()
+
+    def _option_buttons(self, options: list[str]) -> None:
+        """Create one button per suggested answer.
+
+        Parameters
+        ----------
+        options : list[str]
+            Suggested answers.
+
+        Returns
+        -------
+        None
+            Buttons are added to the options row.
+        """
+        for option in options:
+            button = QPushButton(option, self._question_card)
+            button.clicked.connect(
+                lambda _checked=False, text=option: self._answer_question(text)
+            )
+            self._question_options.addWidget(button)
+
+    def _clear_options(self) -> None:
+        """Remove option buttons from the previous question.
+
+        Returns
+        -------
+        None
+            The options row is emptied.
+        """
+        while self._question_options.count():
+            widget = self._question_options.takeAt(0).widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _answer_typed(self) -> None:
+        """Submit the free-text answer field.
+
+        Returns
+        -------
+        None
+            The typed answer resolves the pending question.
+        """
+        text = self._question_input.text().strip()
+        if text:
+            self._answer_question(text)
+
+    def _answer_question(self, answer: str) -> None:
+        """Resolve the pending agent question.
+
+        Parameters
+        ----------
+        answer : str
+            Selected or typed answer.
+
+        Returns
+        -------
+        None
+            The bridge is resolved and the card is hidden.
+        """
+        if self._pending is None:
+            return
+        bridge = self._pending
+        self._pending = None
+        text = answer.strip() or "no answer"
+        self._append_log("you", text)
+        self._hide_question()
+        self._worker.resolve(bridge, text)
+
+    def _cancel_question(self) -> None:
+        """Resolve a pending question with no answer.
+
+        Returns
+        -------
+        None
+            The pending bridge is released.
+        """
+        if self._pending is None:
+            return
+        bridge = self._pending
+        self._pending = None
+        self._hide_question()
+        self._worker.resolve(bridge, "no answer")
+
+    def _hide_question(self) -> None:
+        """Hide and clear the inline question card.
+
+        Returns
+        -------
+        None
+            The card is hidden and options are removed.
+        """
+        self._clear_options()
+        self._question_input.clear()
+        self._question_card.hide()
 
     def _on_notes(self, state: int) -> None:
         """Toggle whether notes join the context.
@@ -515,8 +675,27 @@ class ChatPanel(QWidget):
             self._voice_status.setText("didn't catch that")
             return
         self._voice_status.setText("")
+        if self._pending is not None:
+            self._answer_voice(text)
+            return
         self._input.setPlainText(text)
         self._submit()
+
+    def _answer_voice(self, text: str) -> None:
+        """Resolve a pending question from spoken input.
+
+        Parameters
+        ----------
+        text : str
+            Recognized speech.
+
+        Returns
+        -------
+        None
+            The matched option or spoken text is submitted.
+        """
+        options = self._pending.options if self._pending else []
+        self._answer_question(match_option(text, options))
 
     def _speak_answer(self, text: str) -> None:
         """Speak text when the toggle is on and voice is available.
@@ -584,7 +763,12 @@ class ChatPanel(QWidget):
         prompt = prompt.strip()
         if not prompt:
             return
-        self._append_log("you", prompt)
+        if self._pending is not None:
+            self._input.clear()
+            self._answer_question(prompt)
+            return
+        self._outgoing.append(prompt)
+        self._queued = len(self._outgoing)
         self._input.clear()
         if self._context is not None:
             prompt = self._context() + "\n\n" + prompt
@@ -604,6 +788,7 @@ class ChatPanel(QWidget):
         None
             The session is bound and the log reloaded.
         """
+        self._cancel_question()
         self._agent.session = session
         self._agent.messages = self._agent._initial_messages(session)
         self._log.clear()
@@ -736,6 +921,23 @@ class ChatPanel(QWidget):
         """
         return max(30, int(self._log.viewport().width() * 0.4))
 
+    def on_prompt_started(self, prompt: str) -> None:
+        """Show the user prompt when the worker actually begins it.
+
+        Parameters
+        ----------
+        prompt : str
+            Prompt delivered to the worker.
+
+        Returns
+        -------
+        None
+            The user bubble appears in processing order.
+        """
+        display = self._outgoing.pop(0) if self._outgoing else prompt
+        self._queued = len(self._outgoing)
+        self._append_log("you", display)
+
     def on_started(self) -> None:
         """Begin the moving thinking indicator.
 
@@ -754,10 +956,13 @@ class ChatPanel(QWidget):
         Returns
         -------
         None
-            The status label cycles through dot counts.
+            The status label cycles through dot counts and queue size.
         """
         self._tick = (self._tick + 1) % 4
-        self._status.setText("thinking" + "." * self._tick)
+        text = "thinking" + "." * self._tick
+        if self._queued:
+            text += f"  ({self._queued} queued)"
+        self._status.setText(text)
 
     def _stop_thinking(self) -> None:
         """Clear the thinking indicator.
@@ -843,12 +1048,13 @@ class ChatPanel(QWidget):
             An error dialog is displayed.
         """
         self._stop_thinking()
-        QMessageBox.critical(self, "Minimal Harness", message)
+        self._append_log("agent", f"Error: {message}")
+        self._status.setText("error")
 
     def on_asked(
         self, question: str, options: list[str], bridge: QuestionBridge
     ) -> None:
-        """Present an agent question and resolve it.
+        """Present an agent question inline without a modal dialog.
 
         Parameters
         ----------
@@ -862,16 +1068,11 @@ class ChatPanel(QWidget):
         Returns
         -------
         None
-            The bridge resolves with the user's choice.
+            The question card is shown and the worker stays blocked.
         """
         self._pending = bridge
         self._speak_answer(question)
-        choice, ok = QInputDialog.getItem(
-            self, "Minimal Harness", question, options, 0, True
-        )
-        if not ok or not choice:
-            choice = "no answer"
-        self._worker.resolve(bridge, choice)
+        self._show_question(question, options)
 
     def stop(self) -> None:
         """Stop the panel worker thread.
@@ -881,6 +1082,7 @@ class ChatPanel(QWidget):
         None
             The thread stops.
         """
+        self._cancel_question()
         self._thread.quit()
         self._thread.wait(2000)
         if self._voice is not None:
@@ -967,10 +1169,12 @@ class MainWindow(QMainWindow):
         Agent
             Agent bound to the working session.
         """
-        return Agent(
+        agent = Agent(
             root=self._root,
             session=Session(self._active_path()),
         )
+        agent.tools.require_project_folder = True
+        return agent
 
     def _active_path(self) -> Path:
         """Return the active session transcript path.
@@ -1351,6 +1555,12 @@ class MainWindow(QMainWindow):
             Bar with checkboxes and the ideas button.
         """
         bar = QHBoxLayout()
+        self._workspace_label = QLabel("", self)
+        self._workspace_label.setObjectName("workspaceLabel")
+        bar.addWidget(self._workspace_label)
+        change = QPushButton("Change Folder", self)
+        change.clicked.connect(self._choose_workspace)
+        bar.addWidget(change)
         bar.addStretch(1)
         self._show_commands = QCheckBox("Show commands", self)
         self._show_commands.setChecked(self._settings.get("show_commands"))
@@ -1363,7 +1573,54 @@ class MainWindow(QMainWindow):
         self._toggle = QPushButton("Open Ideas", self)
         self._toggle.clicked.connect(self.toggle_ideas)
         bar.addWidget(self._toggle)
+        self._update_workspace_label()
         return bar
+
+    def _update_workspace_label(self) -> None:
+        """Show the active projects folder.
+
+        Returns
+        -------
+        None
+            The label text and tooltip are updated.
+        """
+        self._workspace_label.setText("Projects: " + str(self._root))
+        self._workspace_label.setToolTip(str(self._root))
+
+    def _choose_workspace(self) -> None:
+        """Ask for a new projects folder and apply it.
+
+        Returns
+        -------
+        None
+            The selected folder becomes the workspace root.
+        """
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Choose project folder", str(self._root)
+        )
+        if chosen:
+            self._set_workspace(Path(chosen))
+
+    def _set_workspace(self, root: Path) -> None:
+        """Rebind tools to a new projects folder.
+
+        Parameters
+        ----------
+        root : pathlib.Path
+            New workspace root.
+
+        Returns
+        -------
+        None
+            Settings, tools, and the label are updated.
+        """
+        root = root.expanduser().resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        self._root = root
+        self._settings.set("workspace", str(root))
+        self._command_panel._agent.tools.root = root
+        self._ideas_panel._agent.tools.root = root
+        self._update_workspace_label()
 
     def _on_show_commands(self, checked: bool) -> None:
         """Persist and apply the commands toggle.
@@ -1522,14 +1779,88 @@ def main() -> None:
     load_env()
     app = QApplication(sys.argv)
     _apply_theme(app)
+    if ui_mode() == "hal":
+        _apply_hal_identity(app)
     store = SessionStore(Path("runs/sessions"))
     if not any(store.root.iterdir()):
         store.create(kind="session")
     from .settings import Settings
 
-    window = MainWindow(store, Path("."), Settings())
+    settings = Settings()
+    window = _main_window(store, workspace_root(settings), settings)
     window.show()
     sys.exit(app.exec())
+
+
+def _apply_hal_identity(app: QApplication) -> None:
+    """Set the HAL application name and red-eye icon.
+
+    Parameters
+    ----------
+    app : QApplication
+        Running application.
+
+    Returns
+    -------
+    None
+        Name and icon are applied.
+    """
+    from .hal import hal_icon, set_macos_dock_icon
+
+    icon = hal_icon()
+    app.setApplicationName("Minimal Harness")
+    app.setApplicationDisplayName("Minimal Harness")
+    app.setWindowIcon(icon)
+    set_macos_dock_icon(icon)
+    _set_process_name("Minimal Harness")
+
+
+def _set_process_name(name: str) -> None:
+    """Set the macOS process and menu name.
+
+    Parameters
+    ----------
+    name : str
+        Display name.
+
+    Returns
+    -------
+    None
+        The name is applied when AppKit is available.
+    """
+    try:
+        from AppKit import NSApplication
+        from Foundation import NSProcessInfo
+    except Exception:
+        return
+    NSProcessInfo.processInfo().setProcessName_(name)
+    menu = NSApplication.sharedApplication().mainMenu()
+    if menu is not None and menu.numberOfItems() > 0:
+        menu.itemAtIndex_(0).setTitle_(name)
+
+
+def _main_window(store: SessionStore, root: Path, settings):
+    """Build the window for the configured interface mode.
+
+    Parameters
+    ----------
+    store : SessionStore
+        Session backend.
+    root : pathlib.Path
+        Project workspace root.
+    settings : Settings
+        Persisted interface settings.
+
+    Returns
+    -------
+    QMainWindow
+        Chat or HAL window.
+    """
+    if ui_mode() == "hal":
+        from .hal import HalWindow
+
+        return HalWindow(store, root, settings)
+    return MainWindow(store, root, settings)
 
 
 def _apply_theme(app: QApplication) -> None:
@@ -1545,7 +1876,7 @@ def _apply_theme(app: QApplication) -> None:
     None
         The selected stylesheet is applied.
     """
-    if ui_mode() == "cyber":
+    if ui_mode() in ("cyber", "hal"):
         from .cyber_style import apply_palette
     else:
         from .style import apply_palette

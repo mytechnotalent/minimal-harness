@@ -46,6 +46,20 @@ class ParityFeatureTests(unittest.TestCase):
             result = AppEvaluator().evaluate(root)
         self.assertEqual(result["score"], 1.0)
 
+    def test_app_evaluator_skips_missing_node(self) -> None:
+        """Missing Node does not fail an otherwise valid app."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "index.html").write_text("<html></html>")
+            (root / "styles.css").write_text("body {}")
+            (root / "app.js").write_text("console.log('ok');")
+            with patch.object(
+                AppEvaluator, "_node_process", side_effect=FileNotFoundError
+            ):
+                result = AppEvaluator().evaluate(root)
+        self.assertEqual(result["score"], 1.0)
+        self.assertNotIn("javascript_syntax", result["checks"])
+
     def test_free_model_filter(self) -> None:
         """Filter provider records by zero pricing.
 

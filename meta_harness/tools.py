@@ -11,6 +11,8 @@ from .browser import BrowserClient
 from .evaluator import AppEvaluator
 from .provider import ProviderCatalog
 
+PROTECTED_DIRS = {"meta_harness", "gui", "tests", "docs", "benchmarks", ".git"}
+
 TOOL_SCHEMAS = {
     "read": {"path": {"type": "string"}},
     "write": {"path": {"type": "string"}, "content": {"type": "string"}},
@@ -29,11 +31,38 @@ TOOL_SCHEMAS = {
     "browser_assert": {"url": {"type": "string"}, "text": {"type": "string"}},
     "evaluate_app": {"path": {"type": "string"}},
     "ask": {
-        "question": {"type": "string"},
-        "options": {"type": "array", "items": {"type": "string"}},
+        "question": {
+            "type": "string",
+            "description": "The single question to ask.",
+        },
+        "options": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Two to five suggested answers.",
+        },
     },
-    "suggest": {"options": {"type": "array", "items": {"type": "string"}}},
+    "suggest": {
+        "options": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Short next-step labels, under the options key.",
+        }
+    },
     "list_models": {"free_only": {"type": "boolean"}},
+}
+
+
+TOOL_DESCRIPTIONS = {
+    "read": "Read a workspace file path; URLs are not valid here.",
+    "web_search": (
+        "Search the public web and return titles, URLs, and snippets."
+    ),
+    "browser_open": "Open a web URL and return its title and visible text.",
+    "browser_assert": (
+        "Open a URL and check that specific visible text is present."
+    ),
+    "ask": ("Ask the user one question. Call with question and options."),
+    "suggest": ("Record short next-step labels. Call with an options array."),
 }
 
 
@@ -56,7 +85,9 @@ def _tool_schema(name: str, properties: dict[str, Any]) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": name,
-            "description": f"Minimal Harness {name} tool",
+            "description": TOOL_DESCRIPTIONS.get(
+                name, f"Minimal Harness {name} tool"
+            ),
             "parameters": {"type": "object", "properties": properties},
         },
     }
@@ -73,6 +104,7 @@ class ToolRegistry:
         self,
         root: Path | str = ".",
         questioner: Callable[[str, list[str]], str] | None = None,
+        require_project_folder: bool = False,
     ) -> None:
         """Initialize tools rooted at one workspace.
 
@@ -84,6 +116,8 @@ class ToolRegistry:
             Optional callback that presents a question with options and
             returns the user's chosen answer. When absent, the ``ask``
             tool is not advertised.
+        require_project_folder : bool
+            Refuse new root-level files and harness source files.
 
         Returns
         -------
@@ -92,6 +126,7 @@ class ToolRegistry:
         """
         self.root = Path(root).resolve()
         self.questioner = questioner
+        self.require_project_folder = require_project_folder
         self.suggestions: list[str] = []
         self.tools = self._tool_map()
 
@@ -119,6 +154,16 @@ class ToolRegistry:
             if name not in ("ask", "suggest") or self.questioner is not None
         ]
 
+    def _advertised_names(self) -> set[str]:
+        """Return currently advertised tool names.
+
+        Returns
+        -------
+        set[str]
+            Tool names exposed to the model.
+        """
+        return {item["function"]["name"] for item in self.schema()}
+
     def execute(self, name: str, arguments: dict[str, Any]) -> str:
         """Execute one named tool.
 
@@ -134,8 +179,8 @@ class ToolRegistry:
         str
             JSON result or error message.
         """
-        if name not in self.tools:
-            raise ToolError(f"Unknown tool: {name}")
+        if name not in self._advertised_names():
+            raise ToolError(f"Tool not available: {name}")
         try:
             return json.dumps(self.tools[name](**arguments), default=str)
         except Exception as exc:
@@ -173,9 +218,31 @@ class ToolRegistry:
             Written path and byte count.
         """
         target = self._path(path)
+        self._check_project_path(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
         return {"path": path, "bytes": len(content.encode())}
+
+    def _check_project_path(self, target: Path) -> None:
+        """Enforce the project-folder rule for new files.
+
+        Parameters
+        ----------
+        target : pathlib.Path
+            Resolved file path.
+
+        Returns
+        -------
+        None
+            The write is allowed or a ``ToolError`` is raised.
+        """
+        if not self.require_project_folder or target.exists():
+            return
+        relative = target.relative_to(self.root)
+        if len(relative.parts) < 2:
+            raise ToolError("Create a named project folder before writing.")
+        if relative.parts[0] in PROTECTED_DIRS:
+            raise ToolError("Do not create files in the harness source tree.")
 
     def edit(self, path: str, old: str, new: str) -> dict[str, Any]:
         """Replace one exact text fragment in a workspace file.
@@ -235,12 +302,12 @@ class ToolRegistry:
             Whether the command installs packages.
         """
         text = command.lower()
-        return bool(
-            re.search(
-                r"\b(pip|pip3|npm|apt|apt-get|brew|cargo|go)\s+(install)\b",
-                text,
-            )
+        pattern = (
+            r"\b(pip3?|python\d*(?:\.\d+)?\s+-m\s+pip|npm|yarn|pnpm|"
+            r"apt|apt-get|dnf|yum|pacman|brew|choco|winget|cargo|go|"
+            r"gem|conda|playwright)\s+(install|i|add|-s)\b"
         )
+        return bool(re.search(pattern, text))
 
     def _require_install_ok(self) -> None:
         """Ask the user to approve a package install.

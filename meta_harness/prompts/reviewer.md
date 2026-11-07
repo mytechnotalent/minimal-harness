@@ -11,6 +11,10 @@ Return your answer as a single JSON object with these fields:
 Do not include markdown fences, explanations, or extra prose. Emit only the
 JSON object.
 
+The benchmark tasks are provided in the context under `tasks`. Judge the
+candidate only against those prompts and ordinary correctness. Do not block
+for behavior the tasks do not specify, and do not invent extra requirements.
+
 Check every candidate for:
 - Missing or misnamed functions.
 - Signatures that do not match what the benchmark asked for.

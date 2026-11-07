@@ -1,6 +1,7 @@
 """Tests for OpenRouter request resilience."""
 
 import io
+import os
 import threading
 import unittest
 import urllib.error
@@ -53,6 +54,23 @@ class OpenRouterTests(unittest.TestCase):
         with patch.object(client, "_open", side_effect=[error, {"ok": True}]):
             with patch("meta_harness.openrouter.time.sleep") as sleeper:
                 return client._retry_open(request), sleeper
+
+    def test_timeout_retries_then_succeeds(self) -> None:
+        """Retry a socket timeout and return the later response."""
+        client = OpenRouterClient()
+        request = client._build_request("system", "user", 0.0)
+        with patch.object(
+            client, "_open", side_effect=[TimeoutError("slow"), {"ok": True}]
+        ):
+            with patch("meta_harness.openrouter.time.sleep") as sleeper:
+                result = client._retry_open(request)
+        self.assertEqual(result, {"ok": True})
+        sleeper.assert_called_once()
+
+    def test_model_timeout_is_configurable(self) -> None:
+        """The model timeout can be raised from the environment."""
+        with patch.dict(os.environ, {"HARNESS_MODEL_TIMEOUT": "240"}):
+            self.assertEqual(OpenRouterClient().timeout, 240)
 
     def test_send_runs_off_the_main_thread(self) -> None:
         """A worker thread can send without installing a signal handler.

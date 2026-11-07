@@ -10,8 +10,13 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["black>=26.5", "playwright>=1.50"]
+dev = [
+    "black>=26.5",
+    "playwright>=1.50",
+    "py2app>=0.28; sys_platform == 'darwin'",
+]
 gui = ["PySide6>=6.7"]
+browser = ["playwright>=1.50"]
 voice = [
     "PySide6>=6.7",
     "numpy>=1.26",
@@ -19,6 +24,7 @@ voice = [
     "faster-whisper>=1.0",
     "edge-tts>=6.1",
     "miniaudio>=1.61",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
 ]
 
 [project.scripts]

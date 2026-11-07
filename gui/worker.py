@@ -34,6 +34,7 @@ class AgentWorker(QObject):
     """Run blocking agent turns without freezing the event loop."""
 
     prompt_ready = Signal(str)
+    prompt_started = Signal(str)
     started = Signal()
     tool = Signal(str, dict, str)
     answered = Signal(str)
@@ -91,6 +92,7 @@ class AgentWorker(QObject):
             Output is broadcast through signals.
         """
         self._agent.tools.questioner = self._ask
+        self.prompt_started.emit(prompt)
         self.started.emit()
         try:
             answer = self._agent.run(prompt)

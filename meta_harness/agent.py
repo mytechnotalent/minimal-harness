@@ -1,9 +1,11 @@
 """Pi-like stateful tool-calling agent runtime."""
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
+from ._json_util import json_value
 from .openrouter import OpenRouterClient
 from .prompts import load as _load_prompt
 from .session import Session
@@ -68,9 +70,10 @@ class Agent:
         messages = session.messages[:] if session else []
         if messages and messages[0].get("role") == "system":
             return messages
-        return [
-            {"role": "system", "content": _load_prompt("agent")}
-        ] + messages
+        system = (
+            _load_prompt("agent") + "\n\n" + _load_prompt("coding_standards")
+        )
+        return [{"role": "system", "content": system}] + messages
 
     def run(self, prompt: str) -> str:
         """Run the agent until final text or turn limit.
@@ -86,7 +89,110 @@ class Agent:
             Final assistant response.
         """
         self._append({"role": "user", "content": prompt})
-        return self._loop()
+        return self._review_answer(prompt, self._loop())
+
+    def _review_answer(self, prompt: str, answer: str) -> str:
+        """Adversarially review and possibly revise a final answer.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft final answer.
+
+        Returns
+        -------
+        str
+            Approved answer or a revised answer.
+        """
+        if not self._review_enabled():
+            return answer
+        review = self._answer_review(prompt, answer)
+        revised = review.get("revised_answer")
+        if self._rejected(review) and isinstance(revised, str):
+            return revised.strip() or answer
+        return answer
+
+    def _review_enabled(self) -> bool:
+        """Return whether answer review is enabled.
+
+        Returns
+        -------
+        bool
+            ``True`` when configured and the client supports completion.
+        """
+        value = os.getenv("HARNESS_ANSWER_REVIEW", "1").strip().lower()
+        enabled = value not in ("0", "false", "no")
+        return enabled and hasattr(self.client, "complete")
+
+    def _answer_review(self, prompt: str, answer: str) -> dict:
+        """Request one structured answer review.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft final answer.
+
+        Returns
+        -------
+        dict
+            Decoded review, or an empty dict on failure.
+        """
+        try:
+            raw = self.client.complete(
+                _load_prompt("answer_reviewer"),
+                self._review_context(prompt, answer),
+            )
+            value = json_value(raw)
+        except Exception:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def _rejected(self, review: dict) -> bool:
+        """Return whether a review rejects the answer.
+
+        Parameters
+        ----------
+        review : dict
+            Decoded review.
+
+        Returns
+        -------
+        bool
+            ``True`` when approval is explicitly false.
+        """
+        return review.get("approved") is False
+
+    def _review_context(self, prompt: str, answer: str) -> str:
+        """Build the reviewer payload from the answer and tool evidence.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft final answer.
+
+        Returns
+        -------
+        str
+            JSON review context.
+        """
+        evidence = [
+            str(message.get("content", ""))[-500:]
+            for message in self.messages
+            if message.get("role") == "tool"
+        ][-8:]
+        return json.dumps(
+            {
+                "question": prompt,
+                "answer": answer,
+                "tool_evidence": evidence,
+            }
+        )
 
     def steer(self, prompt: str) -> None:
         """Queue a message to guide the next agent turn.
@@ -152,7 +258,32 @@ class Agent:
             if not message.get("tool_calls"):
                 return str(message.get("content", ""))
             self._execute_calls(message["tool_calls"])
-        return "Agent stopped after reaching the turn limit."
+        return self._finalize()
+
+    def _finalize(self) -> str:
+        """Request a final answer without tools after the turn limit.
+
+        Returns
+        -------
+        str
+            Final assistant text, or a fallback message.
+        """
+        self._append(
+            {
+                "role": "system",
+                "content": (
+                    "Turn limit reached. Answer now using the information "
+                    "already gathered. Do not call tools."
+                ),
+            }
+        )
+        response = self.client.chat(self.messages, [])
+        message = response["choices"][0]["message"]
+        self._append(message)
+        return str(
+            message.get("content")
+            or "Agent stopped after reaching the turn limit."
+        )
 
     def _message(self) -> dict[str, Any]:
         """Request and append one assistant message.

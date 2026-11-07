@@ -9,6 +9,18 @@ import urllib.error
 import urllib.request
 import uuid
 from typing import Any
+from urllib.parse import urlparse
+
+_LOCAL_NAMES = (
+    "local",
+    "ollama",
+    "lmstudio",
+    "llama.cpp",
+    "llamacpp",
+    "vllm",
+    "openai-compatible",
+    "openai_compatible",
+)
 
 
 def _provider_name() -> str:
@@ -17,11 +29,13 @@ def _provider_name() -> str:
     Returns
     -------
     str
-        ``"opencode"`` or ``"openrouter"``.
+        ``"opencode"``, ``"local"``, or ``"openrouter"``.
     """
-    value = os.getenv("HARNESS_PROVIDER", "openrouter")
-    if value.strip().lower() in ("opencode", "opencode-go", "go"):
+    value = os.getenv("HARNESS_PROVIDER", "openrouter").strip().lower()
+    if value in ("opencode", "opencode-go", "go"):
         return "opencode"
+    if value in _LOCAL_NAMES:
+        return "local"
     return "openrouter"
 
 
@@ -42,6 +56,8 @@ def _provider_key(provider: str) -> str | None:
         return os.getenv("OPENCODE_API_KEY") or os.getenv(
             "OPENCODE_GO_API_KEY"
         )
+    if provider == "local":
+        return os.getenv("LOCAL_API_KEY") or "local"
     return os.getenv("OPENROUTER_API_KEY")
 
 
@@ -60,6 +76,12 @@ def _provider_model(provider: str) -> str:
     """
     if provider == "opencode":
         return os.getenv("OPENCODE_MODEL", "deepseek-v4.1-flash")
+    if provider == "local":
+        return (
+            os.getenv("LOCAL_MODEL")
+            or os.getenv("HARNESS_MODEL")
+            or "local-model"
+        )
     return os.getenv("OPENROUTER_MODEL", "openrouter/free")
 
 
@@ -79,6 +101,9 @@ def _provider_url(provider: str) -> str:
     if provider == "opencode":
         default = "https://opencode.ai/inference/go/openai/v1/chat/completions"
         return _chat_url(os.getenv("OPENCODE_BASE_URL") or default)
+    if provider == "local":
+        default = "http://localhost:11434/v1/chat/completions"
+        return _chat_url(os.getenv("LOCAL_BASE_URL") or default)
     default = "https://openrouter.ai/api/v1/chat/completions"
     return os.getenv("OPENROUTER_BASE_URL") or default
 
@@ -101,6 +126,8 @@ def _chat_url(url: str) -> str:
         return base
     if base.endswith("/v1") or base.endswith("/openai/v1"):
         return base + "/chat/completions"
+    if not urlparse(base).path:
+        return base + "/v1/chat/completions"
     return base
 
 
@@ -134,6 +161,7 @@ class OpenRouterClient:
         )
         self.session_id = uuid.uuid4().hex
         self.max_retries = int(os.getenv("OPENROUTER_MAX_RETRIES", "2"))
+        self.timeout = int(os.getenv("HARNESS_MODEL_TIMEOUT", "180"))
         self.call_count = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
@@ -394,7 +422,7 @@ class OpenRouterClient:
         if not hasattr(signal, "SIGALRM"):
             return False
         signal.signal(signal.SIGALRM, _raise_timeout)
-        signal.alarm(120)
+        signal.alarm(self.timeout)
         return True
 
     def _request_error(self, exc: Exception) -> OpenRouterError:
@@ -411,7 +439,9 @@ class OpenRouterClient:
             Normalized error.
         """
         if isinstance(exc, TimeoutError):
-            return OpenRouterError("OpenRouter request exceeded 120 seconds.")
+            return OpenRouterError(
+                f"OpenRouter request exceeded {self.timeout} seconds."
+            )
         return OpenRouterError(f"OpenRouter request failed: {exc}")
 
     def _send_body(self, request: urllib.request.Request) -> dict[str, Any]:
@@ -464,6 +494,10 @@ class OpenRouterClient:
                 if not self._retryable(exc) or attempt == self.max_retries:
                     raise
                 time.sleep(self._retry_delay(exc, attempt))
+            except (urllib.error.URLError, TimeoutError):
+                if attempt == self.max_retries:
+                    raise
+                time.sleep(min(2**attempt, 8.0))
         raise OpenRouterError("OpenRouter retry loop ended unexpectedly.")
 
     def _retryable(self, error: urllib.error.HTTPError) -> bool:
@@ -514,7 +548,7 @@ class OpenRouterClient:
         dict[str, Any]
             Decoded response body.
         """
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
             return json.load(response)
 
     def _extract_content(self, body: dict[str, Any]) -> str:

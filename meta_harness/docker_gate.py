@@ -171,6 +171,68 @@ class DockerGate:
         }
 
 
+class LocalGate:
+    """Run a gate command on the host without container isolation."""
+
+    def run(self, candidate_dir: Path, command: str) -> dict[str, Any]:
+        """Execute a shell command in a candidate directory.
+
+        Parameters
+        ----------
+        candidate_dir : pathlib.Path
+            Directory to run the command in.
+        command : str
+            Shell command to execute.
+
+        Returns
+        -------
+        dict[str, Any]
+            Gate status, score, output, and an isolation marker.
+        """
+        try:
+            result = subprocess.run(
+                command,
+                cwd=candidate_dir,
+                capture_output=True,
+                text=True,
+                timeout=180,
+                shell=True,
+            )
+        except Exception as exc:
+            return {
+                "passed": False,
+                "score": 0.0,
+                "error": str(exc),
+                "isolated": False,
+            }
+        return self._result(result)
+
+    def _result(
+        self, result: subprocess.CompletedProcess[str]
+    ) -> dict[str, Any]:
+        """Convert a host process into a gate result.
+
+        Parameters
+        ----------
+        result : subprocess.CompletedProcess[str]
+            Completed host process.
+
+        Returns
+        -------
+        dict[str, Any]
+            Normalized pass/fail result marked as non-isolated.
+        """
+        passed = result.returncode == 0
+        return {
+            "passed": passed,
+            "score": float(passed),
+            "returncode": result.returncode,
+            "stdout": result.stdout[-10000:],
+            "stderr": result.stderr[-10000:],
+            "isolated": False,
+        }
+
+
 def load_gate_result(path: Path) -> dict[str, Any]:
     """Load a JSON gate result.
 

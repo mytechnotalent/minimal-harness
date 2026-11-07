@@ -23,10 +23,17 @@ class SearchConfig:
     iterations: int = 5
     proposers_per_iteration: int = 2
     target_score: float = 1.0
+    gate_threshold: float = 1.0
     docker_image: str = "python:3.12-slim"
     use_docker: bool = True
     use_web_search: bool = True
     task_manifest: str | None = None
+    gate_command: str | None = None
+    final_gate_command: str | None = None
+    final_task_manifest: str | None = None
+    held_out_manifest: str | None = None
+    allow_local_gate: bool = False
+    baseline: bool = False
 
 
 @dataclass(frozen=True)
@@ -37,3 +44,4 @@ class SearchResult:
     history: tuple[Candidate, ...]
     stopped_on_target: bool
     stop_reason: str
+    held_out_score: float | None = None

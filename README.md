@@ -135,6 +135,13 @@ to mention are delivered through the `suggest` tool and shown under a
 "Suggestions:" heading as short, mouse-clickable entries in the TUI (numbered
 in `--interactive`); clicking one runs it as your next message.
 
+### Answer review
+
+Every final Q&A answer is passed through a second adversarial model call
+before it is returned or spoken. The reviewer receives the question, the draft
+answer, and the tool evidence, and removes or revises unsupported claims. Set
+`HARNESS_ANSWER_REVIEW=0` to disable it.
+
 The live tool loop has been tested with OpenRouter prompts that caused the agent to create files, run bash verification, invoke `web_search`, and create a website.
 
 Run an interactive session with a persistent JSONL transcript:
@@ -162,21 +169,38 @@ python3 -m meta_harness.cli --workspace e2e-workspaces/new-site "Build a complet
 
 ### Desktop App and Voice Mode
 
-The PySide6 desktop shell has two modes, selected in `.env`:
+The PySide6 desktop shell has two primary modes, plus an optional cyber theme:
+
+| Mode | `.env` | What you get |
+| --- | --- | --- |
+| **Classic** | `HARNESS_UI_MODE=classic` | MaryAnn's light typed interface, no voice. Unchanged. |
+| **HAL** | `HARNESS_UI_MODE=hal` | Black window, glowing red eye, one round **TALK** button, no text. Push-to-talk with spoken answers. |
+| **Cyber** | `HARNESS_UI_MODE=cyber` | Dark neon typed and voice interface. |
+
+Set the mode in `.env`:
 
 ```dotenv
-HARNESS_UI_MODE=classic   # default: light typed interface (unchanged)
-# HARNESS_UI_MODE=cyber  # dark neon voice interface
+# MaryAnn's workspace
+HARNESS_UI_MODE=classic
+
+# HAL voice interface
+# HARNESS_UI_MODE=hal
+
+# Cyber voice interface
+# HARNESS_UI_MODE=cyber
 ```
 
 Classic mode preserves the existing light `sage` interface and adds no voice
-controls. Cyber mode uses a dark hacker theme and adds push-to-talk voice, so
-opting in does not change MaryAnn's workspace.
+controls, so opting into HAL or cyber does not change MaryAnn's workspace. HAL
+mode has no text input: hold the button to speak, release to send. Answers and
+agent questions are spoken, and you answer questions by holding **TALK** and
+saying an option number or text.
 
-Install the voice extras:
+Install the voice and browser extras:
 
 ```bash
-pip install -e ".[voice]"
+pip install -e ".[voice,browser]"
+playwright install chromium
 ```
 
 Launch the desktop shell:
@@ -185,9 +209,21 @@ Launch the desktop shell:
 harness-gui
 ```
 
+Or launch a specific mode without editing `.env`:
+
+```bash
+HARNESS_UI_MODE=classic harness-gui   # MaryAnn's mode
+HARNESS_UI_MODE=hal harness-gui       # HAL mode
+HARNESS_UI_MODE=cyber harness-gui     # cyber mode
+```
+
 In cyber mode, press and hold **Hold to Talk** in either panel, speak, and
 release. The transcript is submitted automatically. Final replies and `ask`
-questions are spoken when **Speak replies** is checked. Audio is transcribed on
+questions are spoken when **Speak replies** is checked. Agent questions appear
+inline in the panel (no modal dialogs): click an option, type an answer, or
+hold **Hold to Talk** and say the option number or text. Prompts typed while a
+reply is still running are queued and displayed in processing order; the status
+line shows how many are waiting, so messages no longer look out of sequence. Audio is transcribed on
 device with `faster-whisper`; only the resulting text is sent to the model
 endpoint. The first run downloads the `base.en` model (override with
 `HARNESS_WHISPER_MODEL`). Text-to-speech uses `edge-tts` and needs internet;
@@ -196,6 +232,30 @@ the default voice is the female `en-US-AriaNeural` (override with
 
 macOS and Windows prompt for microphone permission the first time. On Linux,
 ensure PortAudio is installed (for example `sudo apt install libportaudio2`).
+
+### macOS app bundle
+
+Build and install the real `.app` so the Dock and menu bar say **Minimal
+Harness** and use the red-eye icon:
+
+```bash
+python scripts/build_macos_app.py
+open "$HOME/Applications/Minimal Harness.app"
+```
+
+The bundle uses py2app alias mode and points at this repository's `.venv`.
+Rebuild it after moving the repository.
+
+### Project folders
+
+New code does not default into the Minimal Harness repository. The desktop app
+creates projects under `~/HarnessProjects` unless `HARNESS_WORKSPACE` is set,
+and the **Change Folder** button switches the active projects folder. Before
+writing a new project, the agent asks which subfolder to create and keeps every
+generated file inside it. This is enforced, not just instructed: the write tool
+rejects new root-level files and new files under `meta_harness/`, `gui/`,
+`tests/`, `docs/`, `benchmarks/`, or `.git/`. Package-install commands in the
+`bash` tool also require an explicit approval before they run.
 
 To use OpenCode Go instead of OpenRouter, set:
 
@@ -242,14 +302,47 @@ Discover current OpenRouter models without a seed prompt:
 python3 -m meta_harness.cli --list-models --free-only
 ```
 
-The optimizer currently produces proposal artifacts and is separate from the interactive coding loop. The tool loop can create files and run commands. The optimizer's Docker gate now includes stronger container restrictions, but its task score remains a placeholder unless you replace the command with a domain evaluator.
+The optimizer currently produces proposal artifacts and is separate from the interactive coding loop. The tool loop can create files and run commands. Gates now **fail closed**: a Docker run with no configured evaluator produces no score and cannot select a winner. Provide either a task manifest (deterministic `unittest` scoring) or a Docker gate command:
+
+```bash
+python3 -m meta_harness.cli --optimize --iterations 3 \
+  --task-manifest benchmarks/starter/manifest.json \
+  --final-task-manifest benchmarks/validation/manifest.json \
+  --held-out-manifest benchmarks/heldout/manifest.json \
+  "Improve the starter solution"
+```
+
+The three manifests are a strict split:
+
+- `--task-manifest` is the search split. Its task prompts are sent to the proposer; the proposals are scored on it for gate 1.
+- `--final-task-manifest` is the validation split for gate 2. It uses unseen test cases and is never shown to the proposer.
+- `--held-out-manifest` is scored only after the winner is chosen. It never influences selection.
+
+For a Docker command instead, use `--gate-command '...'` and, optionally, `--final-gate-command '...'`. The target score stops the loop as soon as a winner reaches it. If Docker is unavailable, `--local-gate` runs the command on the host with no isolation; it is opt-in and clearly marked `isolated: false`.
+
+`--proposers N` controls how many candidates each iteration requests (default 2). `--gate-threshold` is the minimum pass rate for a manifest gate (default `1.0`); a candidate that misses even one task is rejected. `HARNESS_MODEL_TIMEOUT` bounds a model call in seconds (default 180) and retries one transient timeout. A live one-iteration run against OpenCode Go completed with `winner=candidate-1 score=1.0` and `held_out=1.0` using one proposer, one reviewer, and one adjudicator call.
+
+### Hard benchmark and evidence
+
+`benchmarks/hard/` is a seven-task benchmark with deliberately weaker search tests and stricter validation and held-out tests:
+
+```bash
+python3 -m meta_harness.cli --optimize --iterations 2 \
+  --task-manifest benchmarks/hard/search/manifest.json \
+  --final-task-manifest benchmarks/hard/validation/manifest.json \
+  --held-out-manifest benchmarks/hard/heldout/manifest.json \
+  --gate-threshold 1.0 --no-web "Implement every task"
+```
+
+A controlled ablation proves the gate-2 mechanism: a candidate that passes all search tests but fails validation is selected by the baseline (held-out `6/7`), while the adversarial loop rejects it at gate 2 and selects the correct candidate on the next iteration (held-out `7/7`). In real-model A/B runs with `deepseek-v4.1-flash` and `glm-5.3-flash`, all generated candidates reached the same held-out rate, so the adversarial loop added cost without a measured gain on those runs. The benchmark difficulty and reviewer calibration remain the limiting factors, not the control flow.
 
 The interactive agent can invoke `evaluate_app` for deterministic checks of `index.html`, `styles.css`, `app.js`, HTML structure, and Node JavaScript syntax. It can invoke `browser_assert` to require visible page text before accepting a browser check.
 
 ## Provider Setup
 
-The client supports OpenRouter (default) and OpenCode Go. Create `.env` in the
-repository root and never commit it or place a real key in `.env.example`.
+The client supports OpenRouter (default), OpenCode Go, and any
+OpenAI-compatible local server. Create `.env` in the repository root and never
+commit it or place a real key in `.env.example`.
 
 OpenRouter:
 
@@ -274,6 +367,34 @@ OPENCODE_BASE_URL=https://opencode.ai/inference/go/openai/v1/chat/completions
 ending in `/v1` is also accepted. `OPENCODE_GO_API_KEY` works as an alternate
 key variable.
 
+Local model (Ollama, LM Studio, llama.cpp, or vLLM):
+
+```dotenv
+HARNESS_PROVIDER=local
+LOCAL_BASE_URL=http://localhost:11434/v1/chat/completions
+LOCAL_MODEL=qwen2.5-coder:7b
+LOCAL_API_KEY=
+```
+
+Start Ollama first and pull a model:
+
+```bash
+ollama serve
+ollama pull qwen2.5-coder:7b
+```
+
+For other servers, use their OpenAI-compatible base URL:
+
+- LM Studio: `http://localhost:1234/v1/chat/completions`
+- llama.cpp: `http://localhost:8080/v1/chat/completions`
+- vLLM: `http://localhost:8000/v1/chat/completions`
+
+`LOCAL_BASE_URL` defaults to the Ollama endpoint. A bare host URL, a URL ending
+in `/v1`, and a full `/chat/completions` URL are all accepted. `LOCAL_API_KEY`
+is optional; the client sends a local placeholder when it is empty. The
+interactive agent needs a local model that supports OpenAI-compatible tool
+calling; the optimizer only needs chat completions.
+
 `openrouter/free` routes requests to an available free model. Free requests may show no paid usage. Provider availability, rate limits, and output formats can change.
 
 The client retries HTTP `429` and `5xx` responses with bounded backoff. Provider error responses are reported as `OpenRouter error: ...` with a nonzero exit status instead of a raw traceback.
@@ -286,17 +407,19 @@ source .env
 set +a
 ```
 
-The client calls:
+The client calls the configured provider endpoint. Defaults:
 
 ```text
-https://openrouter.ai/api/v1/chat/completions
+OpenRouter:  https://openrouter.ai/api/v1/chat/completions
+OpenCode Go: https://opencode.ai/inference/go/openai/v1/chat/completions
+Local:       http://localhost:11434/v1/chat/completions
 ```
 
 ## Web Retrieval
 
 The web client uses DuckDuckGo HTML with a bounded request timeout. It extracts recognized result titles and URLs. When DuckDuckGo returns a challenge page or no recognized results, it attempts a public GitHub profile lookup using the final query token as a possible username.
 
-This is retrieval context, not general browsing. The agent can invoke the `web_search` tool, and can use Playwright-backed `browser_open`, `browser_assert`, and `browser_screenshot` when Playwright and Chromium are installed. It does not provide a full browser UI or arbitrary page interaction. A provider challenge or markup change can yield zero sources; answer mode still completes with an uncertainty-aware answer.
+Install browser support with `pip install -e ".[browser]"` then `playwright install chromium`. Search tries DuckDuckGo HTML, then Bing's RSS feed, then a headless Chromium search, then GitHub user search. Multi-word queries now search GitHub with the full query instead of only the last word. This is retrieval context, not general browsing. The agent can invoke the `web_search` tool, and can use Playwright-backed `browser_open`, `browser_assert`, and `browser_screenshot` when Playwright and Chromium are installed. It does not provide a full browser UI or arbitrary page interaction. A provider challenge or markup change can still yield zero sources; answer mode completes with an uncertainty-aware answer.
 
 ## Adversarial Stages
 
@@ -332,19 +455,26 @@ The evaluator must pin and record:
 - per-task outputs, traces, and scores
 - code and evaluator hashes
 
-The current Docker gate is a placeholder. It writes `proposal.txt` and checks that it is nonempty, returning `1.0` for pass and `0.0` for failure. This is not a meaningful benchmark score. Replace that command with the real domain evaluator before comparing harnesses.
+Gate 1 runs the manifest named by `--task-manifest`, or the command given by `--gate-command`. Gate 2 runs `--final-task-manifest` or `--final-gate-command`; when neither is set, it re-runs the gate 1 command and records `independent: false` in the result. If Docker is enabled and no manifest or command is configured, the gate fails closed instead of assigning a fake score. `--no-docker` remains a wiring-only mode that passes with score `0.0`.
 
 The paper's test-set rule must remain strict: proposer, reviewer, adjudicator, and search-time summaries must not receive held-out results. Final held-out evaluation belongs in a separate process after search.
 
 ## Docker
 
-Start Docker Desktop and verify the daemon:
+Start a Docker daemon and verify it:
 
 ```bash
+# Docker Desktop, or on macOS without it:
+brew install colima docker
+colima start --cpu 1 --memory 2
 docker info
 ```
 
-The current gate uses `python:3.12-slim` with:
+Colima shares your home directory by default, so keep the repository and its
+`runs/` workspace under your home directory; mounts outside it are not visible
+inside the VM.
+
+The gate uses `python:3.12-slim` with:
 
 - no network
 - one CPU
@@ -362,14 +492,20 @@ cd /Users/kevinthomas/Documents/minimal-harness
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]" flake8
-black meta_harness tests
-black --check meta_harness tests
-flake8 meta_harness tests
-python -m compileall -q meta_harness tests
+black meta_harness tests gui benchmarks scripts setup_app.py
+black --check meta_harness tests gui benchmarks scripts setup_app.py
+flake8 meta_harness tests gui benchmarks scripts setup_app.py
+python -m compileall -q meta_harness tests gui scripts
 python -m unittest discover -s tests -v
 ```
 
-The tests are offline and cover web parsing, GitHub fallback, provider failures, malformed model responses, reviewer blocking, agent-stage sequencing, OpenRouter timeout behavior, and iteration cycling.
+Every new function, module, command, or behavior must ship with an offline unit
+test in the same change. Tests are mandatory, not optional. The suite covers
+web parsing and fallback order, GitHub user search, provider failures,
+malformed model responses, answer review, reviewer blocking, agent-stage
+sequencing, OpenRouter timeout behavior, iteration cycling, fail-closed gates,
+held-out scoring, local gates, local model configuration, and project-folder
+enforcement. CI runs the suite on Ubuntu, Windows, and macOS for Python 3.11–3.13 (`.github/workflows/tests.yml`).
 
 Python files follow `.github/skills/minimal-harness-python-formatting/SKILL.md`: Black, Flake8, module docstrings, NumPy-style function docstrings, no more than eight executable lines per function, and no blank lines inside function bodies.
 
@@ -415,6 +551,8 @@ Stop a running process with `Ctrl-C`.
 - `meta_harness/app_mode.py`: classic/cyber interface selection from `.env`.
 - `meta_harness/env.py`: `.env` loading shared by the CLI and desktop shell.
 - `gui/cyber_style.py`: dark neon stylesheet for cyber mode.
+- `gui/hal.py`: minimal red-eye push-to-talk voice window.
+- `gui/workspace.py`: shared project-folder resolution for both desktop windows.
 - `tests/`: offline tests.
 - `runs/`: generated candidate artifacts.
 

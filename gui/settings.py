@@ -11,6 +11,7 @@ class Settings:
         "show_commands": False,
         "show_tools": False,
         "speak_replies": True,
+        "workspace": "",
     }
 
     def __init__(self, path: Path | str = "runs/gui-settings.json") -> None:
@@ -27,7 +28,7 @@ class Settings:
             This initializer loads stored values.
         """
         self.path = Path(path)
-        self.values: dict[str, bool] = dict(self.defaults)
+        self.values: dict[str, bool | str] = dict(self.defaults)
         self._load()
 
     def _load(self) -> None:
@@ -45,10 +46,10 @@ class Settings:
         except (OSError, json.JSONDecodeError):
             return
         for key in self.defaults:
-            if isinstance(data.get(key), bool):
+            if isinstance(data.get(key), (bool, str)):
                 self.values[key] = data[key]
 
-    def get(self, key: str) -> bool:
+    def get(self, key: str) -> bool | str:
         """Return a setting value.
 
         Parameters
@@ -58,19 +59,19 @@ class Settings:
 
         Returns
         -------
-        bool
+        bool or str
             Stored or default value.
         """
         return self.values[key]
 
-    def set(self, key: str, value: bool) -> None:
+    def set(self, key: str, value: bool | str) -> None:
         """Store a setting value.
 
         Parameters
         ----------
         key : str
             Setting name.
-        value : bool
+        value : bool or str
             New value.
 
         Returns

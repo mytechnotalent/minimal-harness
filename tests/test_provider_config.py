@@ -10,7 +10,7 @@ OPENCODE_URL = "https://opencode.ai/inference/go/openai/v1/chat/completions"
 
 
 class ProviderConfigTests(unittest.TestCase):
-    """Verify OpenRouter and OpenCode Go configuration."""
+    """Verify OpenRouter, OpenCode Go, and local configuration."""
 
     def test_defaults_to_openrouter(self) -> None:
         """No provider setting keeps OpenRouter defaults."""
@@ -69,6 +69,56 @@ class ProviderConfigTests(unittest.TestCase):
             headers = client._headers()
             self.assertEqual(headers["x-opencode-session"], client.session_id)
             self.assertIn("User-Agent", headers)
+
+    def test_local_defaults(self) -> None:
+        """Local models use Ollama defaults and a dummy key."""
+        env = {"HARNESS_PROVIDER": "local", "LOCAL_MODEL": "qwen2.5-coder:7b"}
+        with patch.dict(os.environ, env, clear=True):
+            client = OpenRouterClient()
+            self.assertEqual(client.provider, "local")
+            self.assertEqual(client.model, "qwen2.5-coder:7b")
+            self.assertEqual(client.api_key, "local")
+            self.assertEqual(
+                client._url(),
+                "http://localhost:11434/v1/chat/completions",
+            )
+            self.assertIn("Authorization", client._headers())
+
+    def test_local_base_url_without_path_is_completed(self) -> None:
+        """A bare local base URL gains /v1/chat/completions."""
+        env = {
+            "HARNESS_PROVIDER": "ollama",
+            "LOCAL_BASE_URL": "http://localhost:11434",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(
+                OpenRouterClient()._url(),
+                "http://localhost:11434/v1/chat/completions",
+            )
+
+    def test_local_v1_base_url_is_completed(self) -> None:
+        """A local /v1 base URL gains only the chat path."""
+        env = {
+            "HARNESS_PROVIDER": "lmstudio",
+            "LOCAL_BASE_URL": "http://localhost:1234/v1",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(
+                OpenRouterClient()._url(),
+                "http://localhost:1234/v1/chat/completions",
+            )
+
+    def test_local_custom_key_and_model_fallback(self) -> None:
+        """The local key is configurable and HARNESS_MODEL is a fallback."""
+        env = {
+            "HARNESS_PROVIDER": "vllm",
+            "LOCAL_API_KEY": "secret",
+            "HARNESS_MODEL": "local-coder",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            client = OpenRouterClient()
+            self.assertEqual(client.api_key, "secret")
+            self.assertEqual(client.model, "local-coder")
 
     def test_missing_opencode_key_message(self) -> None:
         """A missing Go key names the correct variable."""

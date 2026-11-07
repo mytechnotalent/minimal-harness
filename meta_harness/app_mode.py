@@ -3,8 +3,10 @@
 import os
 
 CYBER = "cyber"
+HAL = "hal"
 CLASSIC = "classic"
-_CYBER_ALIASES = ("cyber", "voice", "neon", "dark")
+_CYBER_ALIASES = ("cyber", "neon", "dark")
+_HAL_ALIASES = ("hal", "hal9000", "minimal")
 
 
 def ui_mode() -> str:
@@ -16,6 +18,8 @@ def ui_mode() -> str:
         ``"cyber"`` when opted in, otherwise ``"classic"``.
     """
     value = os.getenv("HARNESS_UI_MODE", "").strip().lower()
+    if value in _HAL_ALIASES:
+        return HAL
     return CYBER if value in _CYBER_ALIASES else CLASSIC
 
 
@@ -27,4 +31,4 @@ def voice_enabled() -> bool:
     bool
         ``True`` only in cyber mode.
     """
-    return ui_mode() == CYBER
+    return ui_mode() in (CYBER, HAL)

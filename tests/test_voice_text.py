@@ -108,6 +108,12 @@ class UiModeTests(unittest.TestCase):
             self.assertEqual(ui_mode(), "cyber")
             self.assertTrue(voice_enabled())
 
+    def test_hal_opt_in(self) -> None:
+        """The HAL setting enables the minimal voice mode."""
+        with patch.dict(os.environ, {"HARNESS_UI_MODE": "hal"}):
+            self.assertEqual(ui_mode(), "hal")
+            self.assertTrue(voice_enabled())
+
     def test_unknown_value_stays_classic(self) -> None:
         """Unknown values fall back to the classic interface."""
         with patch.dict(os.environ, {"HARNESS_UI_MODE": "spaceship"}):

@@ -1,0 +1,50 @@
+[
+  {
+    "id": "double",
+    "function": "double",
+    "prompt": "Validation check: Implement double(x).",
+    "test": "tasks/double/test_double.py"
+  },
+  {
+    "id": "reverse",
+    "function": "reverse",
+    "prompt": "Validation check: Implement reverse(s).",
+    "test": "tasks/reverse/test_reverse.py"
+  },
+  {
+    "id": "is_even",
+    "function": "is_even",
+    "prompt": "Validation check: Implement is_even(x).",
+    "test": "tasks/is_even/test_is_even.py"
+  },
+  {
+    "id": "palindrome",
+    "function": "palindrome",
+    "prompt": "Validation check: Implement palindrome(s).",
+    "test": "tasks/palindrome/test_palindrome.py"
+  },
+  {
+    "id": "sum_list",
+    "function": "sum_list",
+    "prompt": "Validation check: Implement sum_list(xs).",
+    "test": "tasks/sum_list/test_sum_list.py"
+  },
+  {
+    "id": "fibonacci",
+    "function": "fibonacci",
+    "prompt": "Validation check: Implement fibonacci(n).",
+    "test": "tasks/fibonacci/test_fibonacci.py"
+  },
+  {
+    "id": "gcd",
+    "function": "gcd",
+    "prompt": "Validation check: Implement gcd(a, b).",
+    "test": "tasks/gcd/test_gcd.py"
+  },
+  {
+    "id": "fizz_buzz",
+    "function": "fizz_buzz",
+    "prompt": "Validation check: Implement fizz_buzz(n).",
+    "test": "tasks/fizz_buzz/test_fizz_buzz.py"
+  }
+]

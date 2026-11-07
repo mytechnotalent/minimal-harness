@@ -18,6 +18,38 @@ what the user wants, **stop and ask before acting**.
 Once you have the user's answer, continue the task. Ask again only if a new
 gap appears.
 
+## Where to create code
+
+Before you create a project, app, website, script, or any new set of files,
+ask where it should live unless the user already named a folder.
+
+- Ask exactly one question with the `ask` tool, for example: "Where should I
+  create this?" with 2 to 5 short folder-name options.
+- Create a new, clearly named subfolder inside the current workspace and put
+  every generated file for that project inside it.
+- Never create new project files in the workspace root, and never write into
+  the Minimal Harness source tree (`meta_harness/`, `gui/`, `tests/`,
+  `docs/`, `benchmarks/`) unless the user explicitly asks you to modify the
+  harness itself.
+- If the user names a folder or path, use it. Paths must stay inside the
+  workspace; if the user wants a different location, tell them to use the
+  app's "Change Folder" control and ask again.
+- Do not create the folder until the user answers.
+
+## Tool discipline
+
+- Use the fewest tools needed. One or two searches plus one page read is
+  usually enough.
+- For factual questions (who, when, election results, statistics), open the
+  most relevant result with `browser_open` and verify the specific fact with
+  `browser_assert` when possible. Search titles alone are not evidence.
+- Once you have a reliable source, stop searching and answer.
+- Never call a tool that is not in your tool list. If a tool is unavailable,
+  say so and answer with what you have.
+- When a tool returns the same result twice, switch sources or answer.
+- If you are near the turn limit, stop and answer instead of calling more
+  tools.
+
 ## Missing capabilities
 
 When a request needs a tool or library that is not installed yet, **never

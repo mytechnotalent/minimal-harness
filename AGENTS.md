@@ -57,6 +57,8 @@ scanning for `proposer` and `reviewer` in the system string.
 `agent.md` is the interactive agent's system prompt. It instructs the agent
 to ask one question at a time (via the `ask` tool) instead of assuming. The
 `ask` tool is only advertised when an interactive questioner is wired up.
+Every final Q&A answer is reviewed by `answer_reviewer.md`; disable it with
+`HARNESS_ANSWER_REVIEW=0`.
 
 ## Held-out data
 
@@ -66,16 +68,19 @@ after search completes.
 
 ## Docker gate
 
-The default gate command is a placeholder. Replace it with a real domain
-evaluator before comparing harnesses across runs. The container runs with
-`--network none`, one CPU, 512 MiB, read-only rootfs, read-only mount, and
-`--rm`; production use should add rootless mode, dropped capabilities,
-seccomp/AppArmor, PID limits, and an external isolation boundary.
+Gates fail closed. A run must provide `--task-manifest`, `--gate-command`,
+`--final-task-manifest`, or `--final-gate-command`; otherwise no candidate can
+win. `--gate-threshold` defaults to `1.0`, so a manifest gate rejects any
+candidate that misses a task. The container runs with `--network none`, one
+CPU, 512 MiB, read-only rootfs, read-only mount, and `--rm`; production use
+should add rootless mode, dropped capabilities, seccomp/AppArmor, PID limits,
+and an external isolation boundary. On macOS, Colima is supported; its default
+home-directory share requires the workspace to live under the home directory.
 
 ## PR checklist
 
 - [ ] Style rules satisfied (Black, Flake8, 8-line, no-blank).
 - [ ] `python -m unittest discover -s tests -v` passes.
-- [ ] New behavior has an offline test.
+- [ ] Every new function, module, command, or behavior has an offline unit test.
 - [ ] No held-out data leaks into a search-time stage.
 - [ ] README or `docs/` updated when user-facing behavior changes.

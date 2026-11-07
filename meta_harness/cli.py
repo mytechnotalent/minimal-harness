@@ -30,10 +30,18 @@ OPTION_SPECS = [
     (("--workspace",), {"default": "."}),
     (("--max-turns",), {"type": int, "default": 24}),
     (("--iterations",), {"type": int, "default": 5}),
+    (("--proposers",), {"type": int, "default": 2}),
     (("--target-score",), {"type": float, "default": 1.0}),
+    (("--gate-threshold",), {"type": float, "default": 1.0}),
     (("--no-docker",), {"action": "store_true"}),
+    (("--local-gate",), {"action": "store_true"}),
+    (("--baseline",), {"action": "store_true"}),
     (("--no-web",), {"action": "store_true"}),
     (("--task-manifest",), {"default": None}),
+    (("--gate-command",), {"default": None}),
+    (("--final-gate-command",), {"default": None}),
+    (("--final-task-manifest",), {"default": None}),
+    (("--held-out-manifest",), {"default": None}),
     (("--show-run",), {"default": None}),
 ]
 
@@ -425,10 +433,18 @@ def _config(args: Arguments) -> SearchConfig:
     """
     return SearchConfig(
         iterations=args.iterations,
+        proposers_per_iteration=args.proposers,
         target_score=args.target_score,
+        gate_threshold=args.gate_threshold,
         use_docker=not args.no_docker,
         use_web_search=not args.no_web,
         task_manifest=args.task_manifest,
+        gate_command=args.gate_command,
+        final_gate_command=args.final_gate_command,
+        final_task_manifest=args.final_task_manifest,
+        held_out_manifest=args.held_out_manifest,
+        allow_local_gate=args.local_gate,
+        baseline=args.baseline,
     )
 
 
@@ -448,6 +464,8 @@ def _print_result(result) -> None:
     winner = result.winner.candidate_id if result.winner else "none"
     score = result.winner.score if result.winner else 0.0
     print(f"winner={winner} score={score}")
+    if result.held_out_score is not None:
+        print(f"held_out={result.held_out_score}")
     print(result.stop_reason)
 
 

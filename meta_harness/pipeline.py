@@ -7,7 +7,7 @@ from typing import Callable
 
 from ._json_util import json_value
 from .chat_model import ChatModel
-from .docker_gate import DockerGate
+from .docker_gate import DockerGate, LocalGate
 from .models import Candidate, SearchConfig, SearchResult
 from .openrouter import OpenRouterClient
 from .prompts import load as _load_prompt
@@ -81,11 +81,35 @@ class SearchPipeline:
         self._emit("run_started", seed=seed, iterations=self.config.iterations)
         history, winner = self._search(seed, proposer)
         reached = self._target_reached(winner)
+        held_out = self._held_out(winner)
         result = SearchResult(
-            winner, tuple(history), reached, self._reason(reached)
+            winner,
+            tuple(history),
+            reached,
+            self._reason(reached),
+            held_out,
         )
         self._emit_finished(result, reached)
         return result
+
+    def _held_out(self, winner: Candidate | None) -> float | None:
+        """Score the winner on the held-out manifest after search.
+
+        Parameters
+        ----------
+        winner : Candidate or None
+            Selected candidate.
+
+        Returns
+        -------
+        float or None
+            Held-out pass rate, or ``None`` when not configured.
+        """
+        if winner is None or not self.config.held_out_manifest:
+            return None
+        score = self._score_manifest(winner, self.config.held_out_manifest)
+        self._emit("held_out_scored", score=score)
+        return score
 
     def _search(
         self, seed: str, proposer: Proposer | None
@@ -113,6 +137,8 @@ class SearchPipeline:
                 seed, history, winner, proposer, iteration
             )
             self._emit_winner(iteration, winner)
+            if self._target_reached(winner):
+                break
         return history, winner
 
     def _iteration(
@@ -181,9 +207,71 @@ class SearchPipeline:
         ]
         if not survivors:
             return self._record(evaluated, None, history, winner, iteration)
-        selected = self._adjudicate(survivors, history)
-        final = self._final_dynamic_test(selected, iteration)
+        selected = self._select_survivor(survivors, history)
+        final = self._final_survivor(selected, iteration)
         return self._record(evaluated, final, history, winner, iteration)
+
+    def _select_survivor(
+        self, survivors: list[Candidate], history: list[Candidate]
+    ) -> Candidate:
+        """Select a survivor for the configured mode.
+
+        Parameters
+        ----------
+        survivors : list[Candidate]
+            First-gate survivors.
+        history : list[Candidate]
+            Prior records.
+
+        Returns
+        -------
+        Candidate
+            Selected candidate.
+        """
+        if self.config.baseline:
+            return max(survivors, key=lambda item: item.score or 0.0)
+        return self._adjudicate(survivors, history)
+
+    def _final_survivor(
+        self, selected: Candidate, iteration: int
+    ) -> Candidate:
+        """Apply the configured final-gate behavior.
+
+        Parameters
+        ----------
+        selected : Candidate
+            Selected survivor.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        Candidate
+            Candidate with final-gate data.
+        """
+        if self.config.baseline:
+            return self._baseline_final(selected)
+        return self._final_dynamic_test(selected, iteration)
+
+    def _baseline_final(self, candidate: Candidate) -> Candidate:
+        """Mark a baseline survivor as final without a second gate.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Selected survivor.
+
+        Returns
+        -------
+        Candidate
+            Candidate marked final.
+        """
+        result = {
+            **candidate.dynamic_test,
+            "final_passed": True,
+            "independent": False,
+        }
+        return self._with_test(candidate, result, candidate.score)
 
     def _evaluate_all(
         self,
@@ -256,6 +344,8 @@ class SearchPipeline:
         Candidate
             Reviewed and first-tested candidate.
         """
+        if self.config.baseline:
+            return self._dynamic_test(candidate, iteration)
         return self._dynamic_test(self._review(candidate, history), iteration)
 
     def _propose(self, seed: str, history: list[Candidate]) -> list[Candidate]:
@@ -274,7 +364,12 @@ class SearchPipeline:
             Parsed proposals.
         """
         context = self._json(
-            {"seed": seed, "history": history, "web": self._web(seed)}
+            {
+                "seed": seed,
+                "history": history,
+                "tasks": self._manifest_prompts(),
+                "web": self._web(seed),
+            }
         )
         prompt = _load_prompt("proposer")
         self._emit("stage_started", stage="proposer")
@@ -298,6 +393,22 @@ class SearchPipeline:
         if not self.config.use_web_search:
             return []
         return self.web_search.search(seed)
+
+    def _manifest_prompts(self) -> list[dict]:
+        """Return search-task prompts, never held-out tests.
+
+        Returns
+        -------
+        list[dict]
+            Task identifiers and prompts from the search manifest.
+        """
+        if not self.config.task_manifest:
+            return []
+        manifest = load_manifest(Path(self.config.task_manifest))
+        return [
+            {"id": task.get("id"), "prompt": task.get("prompt")}
+            for task in manifest
+        ]
 
     def _proposal_items(
         self, history: list[Candidate], raw: str
@@ -386,7 +497,13 @@ class SearchPipeline:
         dict
             Decoded review object.
         """
-        context = self._json({"candidate": candidate, "history": history})
+        context = self._json(
+            {
+                "candidate": candidate,
+                "history": history,
+                "tasks": self._manifest_prompts(),
+            }
+        )
         prompt = _load_prompt("reviewer")
         self._emit(
             "stage_started",
@@ -475,7 +592,9 @@ class SearchPipeline:
         dict
             First-gate result.
         """
-        if not candidate.review.get("passed", False):
+        if not self.config.baseline and not candidate.review.get(
+            "passed", False
+        ):
             return self._blocked_result()
         return self._run_gate(candidate, iteration)
 
@@ -497,30 +616,85 @@ class SearchPipeline:
         if self.config.task_manifest:
             return self._manifest_result(candidate)
         if not self.config.use_docker:
-            return {
-                "passed": True,
-                "score": 0.0,
-                "error": "Docker disabled; no score assigned",
-            }
+            return self._wiring_result()
+        if not self.config.gate_command:
+            return self._unconfigured_result()
         return self._run_candidate_gate(candidate, iteration)
 
-    def _manifest_result(self, candidate: Candidate) -> dict:
-        """Score the candidate proposal against the task manifest.
+    def _wiring_result(self) -> dict:
+        """Return a wiring-only result when Docker is disabled.
+
+        Returns
+        -------
+        dict
+            Passing result with no meaningful score.
+        """
+        return {
+            "passed": True,
+            "score": 0.0,
+            "error": "Docker disabled; wiring-only run, no score assigned",
+        }
+
+    def _unconfigured_result(self) -> dict:
+        """Return a fail-closed result when no gate is configured.
+
+        Returns
+        -------
+        dict
+            Failed result.
+        """
+        return {
+            "passed": False,
+            "score": 0.0,
+            "error": "no gate configured; set --gate-command or "
+            "--task-manifest",
+        }
+
+    def _manifest_result(
+        self, candidate: Candidate, manifest_path: str | None = None
+    ) -> dict:
+        """Score the candidate proposal against a task manifest.
 
         Parameters
         ----------
         candidate : Candidate
             Candidate to score.
+        manifest_path : str or None
+            Manifest to use, or the configured search manifest.
 
         Returns
         -------
         dict
             Gate result with pass rate and passed flag.
         """
-        path = Path(self.config.task_manifest)
+        path = manifest_path or self.config.task_manifest
+        rate = self._score_manifest(candidate, str(path))
+        return {
+            "passed": rate >= self.config.gate_threshold,
+            "score": rate,
+        }
+
+    def _score_manifest(
+        self, candidate: Candidate, manifest_path: str
+    ) -> float:
+        """Score one candidate against a manifest.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate to score.
+        manifest_path : str
+            Manifest path.
+
+        Returns
+        -------
+        float
+            Pass rate in ``[0.0, 1.0]``.
+        """
+        path = Path(manifest_path)
         manifest = load_manifest(path)
         rate, _ = score_candidate(candidate.proposal, path.parent, manifest)
-        return {"passed": rate > 0.0, "score": rate}
+        return rate
 
     def _run_candidate_gate(
         self, candidate: Candidate, iteration: int
@@ -541,9 +715,28 @@ class SearchPipeline:
         """
         directory = self._candidate_dir(candidate, iteration)
         (directory / "proposal.txt").write_text(candidate.proposal)
-        return self.gate.run(
-            directory, ["sh", "-c", "test -s /candidate/proposal.txt"]
+        return self._run_gate_command(
+            directory, self.config.gate_command or ""
         )
+
+    def _run_gate_command(self, directory: Path, command: str) -> dict:
+        """Run a gate command locally or in Docker.
+
+        Parameters
+        ----------
+        directory : pathlib.Path
+            Candidate directory.
+        command : str
+            Shell command to execute.
+
+        Returns
+        -------
+        dict
+            Gate result.
+        """
+        if self.config.allow_local_gate:
+            return LocalGate().run(directory, command)
+        return self.gate.run(directory, ["sh", "-c", command])
 
     def _adjudicate(
         self, candidates: list[Candidate], history: list[Candidate]
@@ -563,7 +756,13 @@ class SearchPipeline:
             Selected candidate.
         """
         prompt = _load_prompt("adjudicator")
-        context = self._json({"candidates": candidates, "history": history})
+        context = self._json(
+            {
+                "candidates": candidates,
+                "history": history,
+                "tasks": self._manifest_prompts(),
+            }
+        )
         self._emit("stage_started", stage="adjudicator")
         raw = self.client.complete(prompt, context)
         self._record_call("adjudicator", prompt, context, raw)
@@ -716,32 +915,73 @@ class SearchPipeline:
         dict
             Final-gate result.
         """
-        if self.config.task_manifest:
-            return self._final_manifest_result(candidate)
+        if self.config.final_task_manifest:
+            return self._final_manifest_result(
+                candidate, self.config.final_task_manifest
+            )
         if not self.config.use_docker:
-            return {
-                "final_passed": True,
-                "error": "Docker disabled; final gate simulated",
-            }
-        return self._final_docker_gate(candidate, iteration)
+            return self._final_wiring_result()
+        command = self.config.final_gate_command or self.config.gate_command
+        if not command:
+            return self._final_unconfigured_result()
+        return self._final_docker_gate(candidate, iteration, command)
 
-    def _final_manifest_result(self, candidate: Candidate) -> dict:
-        """Rescore the winner against the task manifest.
+    def _final_wiring_result(self) -> dict:
+        """Return a wiring-only final-gate result.
+
+        Returns
+        -------
+        dict
+            Passing result marked as non-independent.
+        """
+        return {
+            "final_passed": True,
+            "error": "Docker disabled; final gate simulated",
+            "independent": False,
+        }
+
+    def _final_unconfigured_result(self) -> dict:
+        """Return a fail-closed final-gate result.
+
+        Returns
+        -------
+        dict
+            Failed result.
+        """
+        return {
+            "final_passed": False,
+            "error": "no final gate configured; set "
+            "--final-gate-command or --final-task-manifest",
+            "independent": False,
+        }
+
+    def _final_manifest_result(
+        self, candidate: Candidate, manifest_path: str
+    ) -> dict:
+        """Rescore the winner against a held-out task manifest.
 
         Parameters
         ----------
         candidate : Candidate
             Candidate to score.
+        manifest_path : str
+            Held-out manifest path.
 
         Returns
         -------
         dict
-            Final-gate result with pass rate and passed flag.
+            Final-gate result with pass rate, passed flag, and independence.
         """
-        result = self._manifest_result(candidate)
-        return {**result, "final_passed": result["passed"]}
+        result = self._manifest_result(candidate, manifest_path)
+        return {
+            **result,
+            "final_passed": result["passed"],
+            "independent": True,
+        }
 
-    def _final_docker_gate(self, candidate: Candidate, iteration: int) -> dict:
+    def _final_docker_gate(
+        self, candidate: Candidate, iteration: int, command: str
+    ) -> dict:
         """Run the final Docker gate.
 
         Parameters
@@ -750,17 +990,23 @@ class SearchPipeline:
             Candidate to test.
         iteration : int
             Current iteration number.
+        command : str
+            Final-gate shell command.
 
         Returns
         -------
         dict
             Final-gate result.
         """
-        result = self.gate.run(
-            self._candidate_dir(candidate, iteration),
-            ["sh", "-c", "test -s /candidate/proposal.txt"],
+        result = self._run_gate_command(
+            self._candidate_dir(candidate, iteration), command
         )
-        return {**result, "final_passed": result.get("passed", False)}
+        independent = self.config.final_gate_command is not None
+        return {
+            **result,
+            "final_passed": result.get("passed", False),
+            "independent": independent,
+        }
 
     def _record(
         self,
@@ -1068,6 +1314,7 @@ class SearchPipeline:
             winner_score=self._winner_score(result.winner),
             stop_reason=result.stop_reason,
             stopped_on_target=reached,
+            held_out_score=result.held_out_score,
             cancelled=self._cancelled,
         )
 
@@ -1119,6 +1366,7 @@ class SearchPipeline:
             final_passed=bool(result.get("final_passed")),
             score=result.get("score"),
             error=result.get("error"),
+            independent=result.get("independent"),
         )
 
     def _emit_candidate(self, iteration: int, candidate: Candidate) -> None:
