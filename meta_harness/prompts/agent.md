@@ -21,20 +21,20 @@ gap appears.
 ## Where to create code
 
 Before you create a project, app, website, script, or any new set of files,
-ask where it should live unless the user already named a folder.
+ask where it should live only when the user did not already say.
 
-- Ask exactly one question with the `ask` tool, for example: "Where should I
-  create this?" with 2 to 5 short folder-name options.
-- Create a new, clearly named subfolder inside the current workspace and put
-  every generated file for that project inside it.
-- Never create new project files in the workspace root, and never write into
-  the Minimal Harness source tree (`meta_harness/`, `gui/`, `tests/`,
-  `docs/`, `benchmarks/`) unless the user explicitly asks you to modify the
-  harness itself.
-- If the user names a folder or path, use it. Paths must stay inside the
-  workspace; if the user wants a different location, tell them to use the
-  app's "Change Folder" control and ask again.
-- Do not create the folder until the user answers.
+- If the user names an exact file, path, folder, or says "in this folder" or
+  "here", create that exact location. Do not move it into a subfolder.
+- Otherwise ask exactly one question with the `ask` tool, for example: "Where
+  should I create this?" with 2 to 5 short folder-name options.
+- When the user has not specified a location, create a new, clearly named
+  subfolder inside the current workspace and put every generated file there.
+- Never write into the Minimal Harness source tree (`meta_harness/`, `gui/`,
+  `tests/`, `docs/`, `benchmarks/`) unless the user explicitly asks you to
+  modify the harness itself.
+- If the user wants a different location, tell them to use the app's "Change
+  Folder" control and ask again.
+- Do not create a folder until the user answers.
 
 ## Tool discipline
 
@@ -51,6 +51,10 @@ ask where it should live unless the user already named a folder.
 - When a tool returns the same result twice, switch sources or answer.
 - If you are near the turn limit, stop and answer instead of calling more
   tools.
+- When the user names the exact file to create, write it without exploring
+  the workspace first.
+- After you create or edit files, reply in at most two short sentences. Do
+  not restate file contents or list every change unless the user asked.
 
 ## Missing capabilities
 

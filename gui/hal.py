@@ -1,6 +1,7 @@
 """Minimal HAL-style voice interface with a red eye and push-to-talk."""
 
 import math
+import os
 import threading
 from pathlib import Path
 
@@ -606,12 +607,23 @@ class HalWindow(QMainWindow):
             The utterance answers a question or starts a turn.
         """
         if not text.strip():
-            self._set_state("idle")
+            self._handle_empty_heard()
             return
         if self._pending is not None:
             self._answer_pending(text)
             return
         self._send_prompt(text)
+
+    def _handle_empty_heard(self) -> None:
+        """Release a pending question when speech was not recognized.
+
+        Returns
+        -------
+        None
+            The eye returns to idle and the worker is released.
+        """
+        self._resolve_pending()
+        self._set_state("idle")
 
     def _answer_pending(self, text: str) -> None:
         """Resolve a pending agent question with spoken input.
@@ -719,6 +731,41 @@ class HalWindow(QMainWindow):
         spoken = question + " Options: " + ", ".join(options)
         if self._voice is not None:
             self._voice.speak(speech_text(spoken))
+        self._arm_ask_timeout(bridge)
+
+    def _arm_ask_timeout(self, bridge: QuestionBridge) -> None:
+        """Return to idle when a spoken answer never arrives.
+
+        Parameters
+        ----------
+        bridge : QuestionBridge
+            Pending question.
+
+        Returns
+        -------
+        None
+            A timer is scheduled.
+        """
+        seconds = int(os.getenv("HARNESS_ASK_TIMEOUT", "45"))
+        QTimer.singleShot(seconds * 1000, lambda: self._ask_timeout(bridge))
+
+    def _ask_timeout(self, bridge: QuestionBridge) -> None:
+        """Resolve an unanswered question and return to idle.
+
+        Parameters
+        ----------
+        bridge : QuestionBridge
+            Question that may still be pending.
+
+        Returns
+        -------
+        None
+            The worker is released when the question is still active.
+        """
+        if self._pending is not bridge:
+            return
+        self._resolve_pending()
+        self._set_state("idle")
 
     def _on_error(self, message: str) -> None:
         """Display an error state.

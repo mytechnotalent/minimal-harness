@@ -165,6 +165,8 @@ class OpenRouterClient:
         self.call_count = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
+        self.cached_tokens = 0
+        self.cost = 0.0
 
     @property
     def provider(self) -> str:
@@ -582,9 +584,12 @@ class OpenRouterClient:
             Decoded provider response.
         """
         usage = body.get("usage") or {}
+        details = usage.get("prompt_tokens_details") or {}
         self.call_count += 1
         self.prompt_tokens += int(usage.get("prompt_tokens", 0) or 0)
         self.completion_tokens += int(usage.get("completion_tokens", 0) or 0)
+        self.cached_tokens += int(details.get("cached_tokens", 0) or 0)
+        self.cost += float(usage.get("cost", 0.0) or 0.0)
 
     def usage_summary(self) -> str:
         """Return a one-line summary of accumulated token usage.
@@ -597,7 +602,9 @@ class OpenRouterClient:
         return (
             f"calls={self.call_count} "
             f"prompt_tokens={self.prompt_tokens} "
-            f"completion_tokens={self.completion_tokens}"
+            f"completion_tokens={self.completion_tokens} "
+            f"cached_tokens={self.cached_tokens} "
+            f"cost=${self.cost:.6f}"
         )
 
 

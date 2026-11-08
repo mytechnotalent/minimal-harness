@@ -73,13 +73,21 @@ class OpenRouterTests(unittest.TestCase):
         client.api_key = "test"
         body = {
             "choices": [{"message": {"content": "ok"}}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 2,
+                "prompt_tokens_details": {"cached_tokens": 4},
+                "cost": 0.0005,
+            },
         }
         with patch.object(client, "_send", return_value=body):
             client.chat([], [])
         self.assertEqual(client.call_count, 1)
         self.assertEqual(client.prompt_tokens, 10)
         self.assertEqual(client.completion_tokens, 2)
+        self.assertEqual(client.cached_tokens, 4)
+        self.assertAlmostEqual(client.cost, 0.0005)
+        self.assertIn("cost=$0.000500", client.usage_summary())
 
     def test_model_timeout_is_configurable(self) -> None:
         """The model timeout can be raised from the environment."""
