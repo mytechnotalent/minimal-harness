@@ -68,6 +68,8 @@ class Agent:
             Initial conversation messages.
         """
         messages = session.messages[:] if session else []
+        for message in messages:
+            _repair_tool_calls(message)
         if messages and messages[0].get("role") == "system":
             return messages
         system = (
@@ -296,6 +298,7 @@ class Agent:
         self._inject_steering()
         response = self.client.chat(self.messages, self.tools.schema())
         message = response["choices"][0]["message"]
+        _repair_tool_calls(message)
         self._append(message)
         return message
 
@@ -366,3 +369,24 @@ class Agent:
         if self.observer is not None:
             self.observer(function["name"], arguments, content)
         return {"role": "tool", "tool_call_id": call["id"], "content": content}
+
+
+def _repair_tool_calls(message: dict[str, Any]) -> None:
+    """Replace unparseable tool-call arguments with an empty object.
+
+    Parameters
+    ----------
+    message : dict[str, Any]
+        Assistant message repaired in place.
+
+    Returns
+    -------
+    None
+        Invalid argument strings become ``{}``.
+    """
+    for call in message.get("tool_calls") or []:
+        function = call.get("function", {})
+        try:
+            json.loads(function.get("arguments", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            function["arguments"] = "{}"

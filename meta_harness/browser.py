@@ -319,5 +319,32 @@ class BrowserClient:
             .sync_playwright()
             .start()
         )
-        browser = playwright.chromium.launch(headless=True)
+        try:
+            browser = playwright.chromium.launch(headless=True)
+        except Exception as exc:
+            playwright.stop()
+            raise BrowserError(_launch_hint(exc)) from exc
         return playwright, browser, browser.new_page()
+
+
+def _launch_hint(exc: Exception) -> str:
+    """Return an actionable browser launch failure.
+
+    Parameters
+    ----------
+    exc : Exception
+        Original Playwright launch error.
+
+    Returns
+    -------
+    str
+        Error text with an install hint when the browser is missing.
+    """
+    message = str(exc)
+    missing = "Executable doesn't exist" in message
+    if missing or "playwright install" in message:
+        return (
+            "Playwright browser is missing or out of date. "
+            "Run: python -m playwright install chromium"
+        )
+    return f"Browser launch failed: {message}"
