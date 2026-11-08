@@ -1,7 +1,6 @@
 """Minimal HAL-style voice interface with a red eye and push-to-talk."""
 
 import math
-import tempfile
 import threading
 from pathlib import Path
 
@@ -82,104 +81,6 @@ def hal_icon(size: int = 256) -> QIcon:
     _icon_iris(painter, center, size, base)
     painter.end()
     return QIcon(pixmap)
-
-
-def set_macos_dock_icon(icon: QIcon) -> None:
-    """Set the macOS Dock icon from a Qt icon.
-
-    Parameters
-    ----------
-    icon : QIcon
-        Source icon.
-
-    Returns
-    -------
-    None
-        The Dock icon is updated when AppKit is available.
-    """
-    modules = _appkit_modules()
-    if modules is None:
-        return
-    path = _icon_temp(icon)
-    _try_dock_image(path, modules)
-    path.unlink(missing_ok=True)
-
-
-def _appkit_modules():
-    """Return AppKit classes when available.
-
-    Returns
-    -------
-    tuple or None
-        ``NSImage`` and ``NSApplication``, or ``None``.
-    """
-    try:
-        from AppKit import NSApplication, NSImage
-    except Exception:
-        return None
-    return NSImage, NSApplication
-
-
-def _try_dock_image(path: Path, modules: tuple) -> None:
-    """Apply a Dock image, ignoring platform failures.
-
-    Parameters
-    ----------
-    path : pathlib.Path
-        PNG path.
-    modules : tuple
-        AppKit classes.
-
-    Returns
-    -------
-    None
-        Failures are swallowed.
-    """
-    try:
-        _apply_dock_image(path, *modules)
-    except Exception:
-        return
-
-
-def _apply_dock_image(path: Path, ns_image, ns_application) -> None:
-    """Set the macOS Dock icon image.
-
-    Parameters
-    ----------
-    path : pathlib.Path
-        PNG path.
-    ns_image : type
-        ``NSImage`` class.
-    ns_application : type
-        ``NSApplication`` class.
-
-    Returns
-    -------
-    None
-        The Dock icon is updated.
-    """
-    image = ns_image.alloc().initWithContentsOfFile_(str(path))
-    ns_application.sharedApplication().setApplicationIconImage_(image)
-
-
-def _icon_temp(icon: QIcon) -> Path:
-    """Render a Qt icon to a temporary PNG.
-
-    Parameters
-    ----------
-    icon : QIcon
-        Source icon.
-
-    Returns
-    -------
-    pathlib.Path
-        Temporary PNG path.
-    """
-    handle = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-    handle.close()
-    path = Path(handle.name)
-    icon.pixmap(256, 256).save(str(path), "PNG")
-    return path
 
 
 def _icon_glow(

@@ -16,14 +16,19 @@ USER_BUBBLE = "#0e3b2c"
 AGENT_BUBBLE = "#0a2d3a"
 TOOL_BUBBLE = "#141a22"
 
-FONT_STACK = (
-    '"JetBrains Mono", "Cascadia Code", "Fira Code", '
-    "Consolas, Menlo, monospace"
+FALLBACK_FONT = "monospace"
+
+FONT_PREFERENCES = (
+    "JetBrains Mono",
+    "Cascadia Code",
+    "Fira Code",
+    "Consolas",
+    "Menlo",
 )
 
 STYLESHEET = f"""
 * {{
-    font-family: {FONT_STACK};
+    font-family: {FALLBACK_FONT};
     font-size: 13px;
 }}
 QMainWindow, QWidget {{
@@ -191,4 +196,20 @@ def apply_palette(app: QApplication) -> None:
     None
         The stylesheet is set on the application.
     """
-    app.setStyleSheet(STYLESHEET)
+    chosen = _font_stack()
+    app.setStyleSheet(STYLESHEET.replace(FALLBACK_FONT, chosen))
+
+
+def _font_stack() -> str:
+    """Return the first installed preferred monospace family.
+
+    Returns
+    -------
+    str
+        Quoted font family name, or the generic fallback.
+    """
+    from PySide6.QtGui import QFontDatabase
+
+    installed = set(QFontDatabase.families())
+    found = next((n for n in FONT_PREFERENCES if n in installed), None)
+    return f'"{found}"' if found else FALLBACK_FONT

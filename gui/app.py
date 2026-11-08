@@ -1,7 +1,10 @@
 """PySide6 desktop shell with command and ideas panels."""
 
-import sys
 import json
+import os
+import plistlib
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -1768,6 +1771,103 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
+def _launch_bundle() -> bool:
+    """Start the macOS app bundle in the background when installed.
+
+    Returns
+    -------
+    bool
+        ``True`` when a detached bundle process was started.
+    """
+    if not _is_bundle_launcher() or os.getenv("HARNESS_BUNDLE_LAUNCHED"):
+        return False
+    executable = _bundle_executable()
+    if executable is None:
+        return False
+    _spawn_bundle(executable)
+    return True
+
+
+def _spawn_bundle(executable: Path) -> None:
+    """Start the bundle executable detached from this terminal.
+
+    Parameters
+    ----------
+    executable : pathlib.Path
+        Bundle executable path.
+
+    Returns
+    -------
+    None
+        The child process starts.
+    """
+    root = Path(__file__).resolve().parent.parent
+    env = dict(os.environ)
+    env["HARNESS_BUNDLE_LAUNCHED"] = "1"
+    env["HARNESS_HOME"] = str(root)
+    subprocess.Popen(
+        [str(executable), *sys.argv[1:]],
+        env=env,
+        cwd=str(root),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+
+
+def _is_bundle_launcher() -> bool:
+    """Return whether the current process is a console launcher script.
+
+    Returns
+    -------
+    bool
+        ``True`` for the ``harness-gui`` and ``harness-voice`` scripts.
+    """
+    name = Path(sys.argv[0]).name
+    return name in ("harness-gui", "harness-voice")
+
+
+def _bundle_executable() -> Path | None:
+    """Return the installed app-bundle executable for this checkout.
+
+    Returns
+    -------
+    pathlib.Path or None
+        Bundle executable path when it exists and matches this repo.
+    """
+    if sys.platform != "darwin":
+        return None
+    app = Path.home() / "Applications" / "Minimal Harness.app"
+    executable = app / "Contents" / "MacOS" / "Minimal Harness"
+    if not executable.exists() or not _bundle_matches(app):
+        return None
+    return executable
+
+
+def _bundle_matches(app: Path) -> bool:
+    """Return whether a bundle was built from this repository.
+
+    Parameters
+    ----------
+    app : pathlib.Path
+        Application bundle path.
+
+    Returns
+    -------
+    bool
+        ``True`` when the bundle targets this checkout.
+    """
+    plist = app / "Contents" / "Info.plist"
+    if not plist.exists():
+        return False
+    info = plistlib.loads(plist.read_bytes())
+    home = info.get("LSEnvironment", {}).get("HARNESS_HOME")
+    root = Path(__file__).resolve().parent.parent
+    return not home or Path(home).resolve() == root
+
+
 def main() -> None:
     """Launch the desktop application.
 
@@ -1776,6 +1876,8 @@ def main() -> None:
     None
         The application runs until the window closes.
     """
+    if _launch_bundle():
+        return
     load_env()
     app = QApplication(sys.argv)
     _apply_theme(app)
@@ -1805,13 +1907,12 @@ def _apply_hal_identity(app: QApplication) -> None:
     None
         Name and icon are applied.
     """
-    from .hal import hal_icon, set_macos_dock_icon
+    from .hal import hal_icon
 
     icon = hal_icon()
     app.setApplicationName("Minimal Harness")
     app.setApplicationDisplayName("Minimal Harness")
     app.setWindowIcon(icon)
-    set_macos_dock_icon(icon)
     _set_process_name("Minimal Harness")
 
 

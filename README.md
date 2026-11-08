@@ -6,6 +6,53 @@ Minimal Harness is a Python control plane inspired by **Meta-Harness: End-to-End
 
 This repository is an independent modification. It is not the paper authors' artifact and does not reproduce their benchmark numbers.
 
+## Installation
+
+Requires Python 3.11 or newer. There is no `requirements.txt`; dependencies
+live in `pyproject.toml` as optional extras.
+
+Create and activate a virtual environment:
+
+```bash
+cd minimal-harness
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+```
+
+Then install the extras for what you want to run:
+
+| Goal | Install command | Adds |
+| --- | --- | --- |
+| CLI, answer mode, and optimizer | `pip install -e .` | No runtime dependencies (standard library only) |
+| Web search and browser tools | `pip install -e ".[browser]"` then `playwright install chromium` | Playwright and headless Chromium |
+| Desktop app (classic, HAL, cyber) | `pip install -e ".[voice,browser]"` then `playwright install chromium` | PySide6, voice input, TTS, and browser tools |
+| Development and tests | `pip install -e ".[dev]" flake8` | Black, Playwright, and py2app on macOS |
+
+Activate the virtual environment in every new terminal before running any
+command:
+
+```bash
+source .venv/bin/activate
+```
+
+Copy the example configuration and edit it:
+
+```bash
+cp .env.example .env
+```
+
+Then run the harness:
+
+```bash
+python -m meta_harness.cli "Explain this repository's architecture"   # answer mode
+harness-gui                                                           # desktop app
+```
+
+The desktop mode comes from `HARNESS_UI_MODE` in `.env`: `classic`, `hal`, or
+`cyber`. You can override it per launch, for example `HARNESS_UI_MODE=hal
+harness-gui`. `harness-voice` is an alias for `harness-gui`.
+
 ## What The Paper Says
 
 The paper describes a system that “repeatedly proposes, evaluates, and logs new harnesses.” Its central engineering decision is to let an agent inspect a filesystem containing prior candidate source code, evaluation scores, and raw execution traces.
@@ -488,7 +535,7 @@ These controls reduce risk but are not a complete hostile-code sandbox. Producti
 ## Testing
 
 ```bash
-cd /Users/kevinthomas/Documents/minimal-harness
+cd minimal-harness
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]" flake8

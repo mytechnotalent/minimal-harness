@@ -45,6 +45,14 @@ class BuildMacosAppTests(unittest.TestCase):
             self.assertFalse((target / "old.txt").exists())
             self.assertTrue((target / "Contents" / "new.txt").exists())
 
+    def test_install_preserves_symlinks(self) -> None:
+        """Installing keeps alias-mode symlinks instead of following them."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = _alias_bundle(Path(directory))
+            with patch("pathlib.Path.home", return_value=root / "home"):
+                target = build_macos_app._install(root)
+            self.assertTrue((target / "Contents" / "dangling").is_symlink())
+
     def test_main_rejects_non_macos(self) -> None:
         """Non-macOS platforms return an error."""
         with patch.object(build_macos_app.sys, "platform", "linux"):
@@ -82,6 +90,8 @@ class RunDesktopTests(unittest.TestCase):
             ):
                 with patch.object(run_desktop.os, "chdir") as chdir:
                     run_desktop.main()
+            self.assertEqual(sys.path[0], "/tmp/harness")
+            sys.path.remove("/tmp/harness")
         chdir.assert_called_once_with(Path("/tmp/harness"))
         self.assertEqual(called, [True])
 
@@ -106,6 +116,26 @@ class SetupAppTests(unittest.TestCase):
         self.assertEqual(
             plist["CFBundleIdentifier"], "com.minimalharness.desktop"
         )
+
+
+def _alias_bundle(root: Path) -> Path:
+    """Create a fake alias bundle with a dangling symlink.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Temporary repository root.
+
+    Returns
+    -------
+    pathlib.Path
+        Repository root containing the fake bundle.
+    """
+    source = root / "dist" / "Minimal Harness.app"
+    contents = source / "Contents"
+    contents.mkdir(parents=True)
+    (contents / "dangling").symlink_to("/missing/target")
+    return root
 
 
 if __name__ == "__main__":

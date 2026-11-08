@@ -64,7 +64,7 @@ def _install(root: Path) -> Path:
     target = Path.home() / "Applications" / (APP_NAME + ".app")
     if target.exists():
         shutil.rmtree(target)
-    shutil.copytree(source, target)
+    shutil.copytree(source, target, symlinks=True)
     return target
 
 
