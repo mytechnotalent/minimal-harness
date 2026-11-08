@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import patch
 
 from meta_harness.evaluator import AppEvaluator
@@ -43,7 +44,12 @@ class ParityFeatureTests(unittest.TestCase):
             (root / "index.html").write_text("<html></html>")
             (root / "styles.css").write_text("body {}")
             (root / "app.js").write_text("console.log('ok');")
-            result = AppEvaluator().evaluate(root)
+            with patch.object(
+                AppEvaluator,
+                "_node_process",
+                return_value=CompletedProcess(["node"], 0),
+            ):
+                result = AppEvaluator().evaluate(root)
         self.assertEqual(result["score"], 1.0)
 
     def test_app_evaluator_skips_missing_node(self) -> None:

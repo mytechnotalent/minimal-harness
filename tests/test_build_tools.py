@@ -80,18 +80,17 @@ class RunDesktopTests(unittest.TestCase):
     def test_main_chdirs_and_launches(self) -> None:
         """The launcher uses HARNESS_HOME and calls gui.app.main."""
         called = []
+        home = str(Path("/tmp/harness"))
         package = types.ModuleType("gui")
         package.__path__ = []
         app = types.ModuleType("gui.app")
         app.main = lambda: called.append(True)
         with patch.dict(sys.modules, {"gui": package, "gui.app": app}):
-            with patch.dict(
-                "os.environ", {"HARNESS_HOME": "/tmp/harness"}, clear=False
-            ):
+            with patch.dict("os.environ", {"HARNESS_HOME": home}):
                 with patch.object(run_desktop.os, "chdir") as chdir:
                     run_desktop.main()
-            self.assertEqual(sys.path[0], "/tmp/harness")
-            sys.path.remove("/tmp/harness")
+            self.assertEqual(sys.path[0], home)
+            sys.path.remove(home)
         chdir.assert_called_once_with(Path("/tmp/harness"))
         self.assertEqual(called, [True])
 
