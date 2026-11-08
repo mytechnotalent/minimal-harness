@@ -67,6 +67,20 @@ class OpenRouterTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         sleeper.assert_called_once()
 
+    def test_chat_records_usage(self) -> None:
+        """Chat responses add their tokens to the usage counters."""
+        client = OpenRouterClient()
+        client.api_key = "test"
+        body = {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        }
+        with patch.object(client, "_send", return_value=body):
+            client.chat([], [])
+        self.assertEqual(client.call_count, 1)
+        self.assertEqual(client.prompt_tokens, 10)
+        self.assertEqual(client.completion_tokens, 2)
+
     def test_model_timeout_is_configurable(self) -> None:
         """The model timeout can be raised from the environment."""
         with patch.dict(os.environ, {"HARNESS_MODEL_TIMEOUT": "240"}):

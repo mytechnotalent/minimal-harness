@@ -184,10 +184,31 @@ in `--interactive`); clicking one runs it as your next message.
 
 ### Answer review
 
-Every final Q&A answer is passed through a second adversarial model call
-before it is returned or spoken. The reviewer receives the question, the draft
-answer, and the tool evidence, and removes or revises unsupported claims. Set
-`HARNESS_ANSWER_REVIEW=0` to disable it.
+Final answers can pass through a second adversarial model call before they
+are returned or spoken. The reviewer receives the question, the draft answer,
+and the tool evidence, and removes or revises unsupported claims.
+`HARNESS_ANSWER_REVIEW` accepts `1` (always review), `0` (never), or `auto`
+(review only tool-backed answers and answers of 400+ characters).
+
+### Token efficiency
+
+Token use is controlled without switching models:
+
+- `HARNESS_ANSWER_REVIEW=auto` skips the review call for short, tool-free
+  answers.
+- `HARNESS_CODING_STANDARDS=auto` loads the large coding-standards prompt only
+  for likely coding tasks. Use `1` to always load it or `0` to never load it.
+- `HARNESS_CONTEXT_CHARS` (default `60000`) compacts the conversation when it
+  grows too large; `HARNESS_CONTEXT_KEEP` (default `16`) sets how many recent
+  messages survive.
+- `HARNESS_TOOL_OUTPUT_LIMIT` (default `12000`) caps how many characters one
+  tool result can add to the context.
+- `--usage` prints `calls`, `prompt_tokens`, and `completion_tokens` after an
+  answer so you can measure a change.
+
+```bash
+python3 -m meta_harness.cli --usage "Summarize this repository"
+```
 
 The live tool loop has been tested with OpenRouter prompts that caused the agent to create files, run bash verification, invoke `web_search`, and create a website.
 

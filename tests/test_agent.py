@@ -118,6 +118,22 @@ class AgentTests(unittest.TestCase):
         return [item["function"]["name"] for item in registry.schema()]
 
 
+class ToolOutputTests(unittest.TestCase):
+    """Verify oversized tool output is clipped before it reaches the model."""
+
+    def test_read_output_is_truncated(self) -> None:
+        """A large file result is wrapped with a bounded payload."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "big.txt").write_text("x" * 20000)
+            with patch.dict(os.environ, {"HARNESS_TOOL_OUTPUT_LIMIT": "2000"}):
+                raw = ToolRegistry(root).execute("read", {"path": "big.txt"})
+        value = json.loads(raw)
+        self.assertTrue(value["truncated"])
+        self.assertLessEqual(len(value["output"]), 2100)
+        self.assertIn("...[truncated]...", value["output"])
+
+
 class LoopingClient:
     """Return one tool call, then a final answer."""
 
@@ -148,13 +164,15 @@ class LoopingClient:
 class ReviewClient:
     """Return a draft answer and a fixed review response."""
 
-    def __init__(self, review: str) -> None:
-        """Store the review response.
+    def __init__(self, review: str, draft: str = "draft answer") -> None:
+        """Store the review response and draft answer.
 
         Parameters
         ----------
         review : str
             Raw review text.
+        draft : str
+            Draft answer returned by :meth:`chat`.
 
         Returns
         -------
@@ -162,11 +180,12 @@ class ReviewClient:
             The client is ready.
         """
         self.review = review
+        self.draft = draft
         self.complete_calls = 0
 
     def chat(self, messages: list[dict], tools: list[dict]) -> dict:
         """Return a draft final answer."""
-        message = {"role": "assistant", "content": "draft answer"}
+        message = {"role": "assistant", "content": self.draft}
         return {"choices": [{"message": message}]}
 
     def complete(
@@ -175,6 +194,28 @@ class ReviewClient:
         """Return the configured review text."""
         self.complete_calls += 1
         return self.review
+
+
+class RecordingClient:
+    """Record chat requests and return a fixed final answer."""
+
+    def __init__(self) -> None:
+        """Initialize an empty recording.
+
+        Returns
+        -------
+        None
+            The client is ready.
+        """
+        self.messages: list[dict] = []
+        self.calls = 0
+
+    def chat(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Record the request and return final text."""
+        self.messages = messages
+        self.calls += 1
+        message = {"role": "assistant", "content": "final answer"}
+        return {"choices": [{"message": message}]}
 
 
 class AnswerReviewTests(unittest.TestCase):
@@ -211,6 +252,22 @@ class AnswerReviewTests(unittest.TestCase):
             self.assertEqual(agent.run("question"), "draft answer")
         self.assertEqual(client.complete_calls, 0)
 
+    def test_auto_review_skips_short_untooled_answer(self) -> None:
+        """Auto mode skips review for short answers without tools."""
+        client = ReviewClient('{"approved": false}')
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_REVIEW": "auto"}):
+            self.assertEqual(agent.run("question"), "draft answer")
+        self.assertEqual(client.complete_calls, 0)
+
+    def test_auto_review_checks_long_answer(self) -> None:
+        """Auto mode reviews a long unsupported answer."""
+        client = ReviewClient('{"approved": true}', draft="x" * 500)
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_REVIEW": "auto"}):
+            agent.run("question")
+        self.assertEqual(client.complete_calls, 1)
+
 
 class CodingStandardsTests(unittest.TestCase):
     """Verify the agent receives the mandatory language standards."""
@@ -231,13 +288,74 @@ class CodingStandardsTests(unittest.TestCase):
         self.assertIn("web_search", system)
 
     def test_system_prompt_includes_standards(self) -> None:
-        """Python, C, Rust, and assembly rules are always present."""
+        """Python, C, Rust, and assembly rules start in the prompt."""
         agent = Agent(root=".")
         system = agent.messages[0]["content"]
         self.assertIn("Mandatory coding standards", system)
         self.assertIn("REA conventions", system)
         self.assertIn("embedded C standard", system)
         self.assertIn("RP2350 RISC-V", system)
+
+    def test_standards_strip_for_non_coding_prompt(self) -> None:
+        """Auto mode removes standards from a plain question."""
+        client = RecordingClient()
+        agent = Agent(root=".", client=client)
+        agent.run("What is the capital of France?")
+        system = client.messages[0]["content"]
+        self.assertNotIn("Mandatory coding standards", system)
+        self.assertIn("ask", system.lower())
+
+    def test_standards_kept_for_coding_prompt(self) -> None:
+        """Auto mode keeps standards for a coding task."""
+        client = RecordingClient()
+        agent = Agent(root=".", client=client)
+        agent.run("Write a python function that adds two numbers.")
+        system = client.messages[0]["content"]
+        self.assertIn("Mandatory coding standards", system)
+
+
+class ContextCompactionTests(unittest.TestCase):
+    """Verify long conversations are compacted before model calls."""
+
+    def test_compaction_drops_orphan_tool_messages(self) -> None:
+        """Compaction keeps the system prompt and complete recent turns."""
+        agent = Agent(".", client=object())
+        agent.messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "tool", "tool_call_id": "1", "content": "result"},
+            {"role": "assistant", "content": "new"},
+        ]
+        agent._compact_messages(2)
+        roles = [item["role"] for item in agent.messages]
+        self.assertEqual(roles, ["system", "assistant"])
+        self.assertEqual(agent.messages[0]["content"], "sys")
+
+    def test_auto_compaction_respects_budget(self) -> None:
+        """A low character budget triggers compaction."""
+        agent = Agent(".", client=object())
+        agent.messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "x" * 200},
+            {"role": "assistant", "content": "y" * 200},
+        ]
+        settings = {
+            "HARNESS_CONTEXT_CHARS": "100",
+            "HARNESS_CONTEXT_KEEP": "1",
+        }
+        with patch.dict(os.environ, settings):
+            agent._maybe_compact()
+        self.assertEqual(len(agent.messages), 2)
+        self.assertEqual(agent.messages[0]["role"], "system")
+
+    def test_compaction_skips_short_conversations(self) -> None:
+        """A conversation under budget is left untouched."""
+        agent = Agent(".", client=object())
+        before = agent.messages[:]
+        with patch.dict(os.environ, {"HARNESS_CONTEXT_CHARS": "999999"}):
+            agent._maybe_compact()
+        self.assertEqual(agent.messages, before)
 
 
 class AgentLimitTests(unittest.TestCase):

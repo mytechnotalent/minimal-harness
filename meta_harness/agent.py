@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,101 @@ from .openrouter import OpenRouterClient
 from .prompts import load as _load_prompt
 from .session import Session
 from .tools import ToolError, ToolRegistry
+
+_CONTEXT_CHARS = 60000
+_CONTEXT_KEEP = 16
+_CODING_WORDS = (
+    "code",
+    "function",
+    "class",
+    "bug",
+    "fix",
+    "test",
+    "script",
+    "implement",
+    "refactor",
+    "debug",
+    "file",
+    "api",
+    "html",
+    "css",
+    "javascript",
+    "python",
+    "rust",
+    "firmware",
+    "sql",
+    "build",
+)
+
+
+def _int_env(name: str, default: int) -> int:
+    """Return a positive integer environment setting.
+
+    Parameters
+    ----------
+    name : str
+        Variable name.
+    default : int
+        Fallback value.
+
+    Returns
+    -------
+    int
+        Parsed positive value, or the fallback.
+    """
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+def _message_chars(messages: list[dict[str, Any]]) -> int:
+    """Return the approximate character size of a conversation.
+
+    Parameters
+    ----------
+    messages : list[dict[str, Any]]
+        Conversation messages.
+
+    Returns
+    -------
+    int
+        Total serialized characters.
+    """
+    return sum(len(json.dumps(item, default=str)) for item in messages)
+
+
+def _standards_mode() -> str:
+    """Return the coding-standards inclusion mode.
+
+    Returns
+    -------
+    str
+        ``"keep"``, ``"strip"``, or ``"auto"``.
+    """
+    value = os.getenv("HARNESS_CODING_STANDARDS", "auto").strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return "keep"
+    if value in ("0", "false", "no", "off"):
+        return "strip"
+    return "auto"
+
+
+def _coding_task(prompt: str) -> bool:
+    """Return whether a prompt likely needs coding standards.
+
+    Parameters
+    ----------
+    prompt : str
+        User task.
+
+    Returns
+    -------
+    bool
+        ``True`` for likely coding tasks.
+    """
+    words = set(re.findall(r"[a-z]+", prompt.lower()))
+    return bool(words & set(_CODING_WORDS))
 
 
 class Agent:
@@ -91,7 +187,29 @@ class Agent:
             Final assistant response.
         """
         self._append({"role": "user", "content": prompt})
+        self._trim_system(prompt)
         return self._review_answer(prompt, self._loop())
+
+    def _trim_system(self, prompt: str) -> None:
+        """Drop coding standards for non-coding tasks when configured.
+
+        Parameters
+        ----------
+        prompt : str
+            User task.
+
+        Returns
+        -------
+        None
+            The system message may be shortened in place.
+        """
+        mode = _standards_mode()
+        if mode == "keep":
+            return
+        if mode == "auto" and _coding_task(prompt):
+            return
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0]["content"] = _load_prompt("agent")
 
     def _review_answer(self, prompt: str, answer: str) -> str:
         """Adversarially review and possibly revise a final answer.
@@ -108,7 +226,7 @@ class Agent:
         str
             Approved answer or a revised answer.
         """
-        if not self._review_enabled():
+        if not self._review_enabled(answer):
             return answer
         review = self._answer_review(prompt, answer)
         revised = review.get("revised_answer")
@@ -116,17 +234,44 @@ class Agent:
             return revised.strip() or answer
         return answer
 
-    def _review_enabled(self) -> bool:
+    def _review_enabled(self, answer: str = "") -> bool:
         """Return whether answer review is enabled.
+
+        Parameters
+        ----------
+        answer : str
+            Draft answer used by ``auto`` mode.
 
         Returns
         -------
         bool
             ``True`` when configured and the client supports completion.
         """
-        value = os.getenv("HARNESS_ANSWER_REVIEW", "1").strip().lower()
-        enabled = value not in ("0", "false", "no")
-        return enabled and hasattr(self.client, "complete")
+        mode = os.getenv("HARNESS_ANSWER_REVIEW", "1").strip().lower()
+        if not hasattr(self.client, "complete"):
+            return False
+        if mode in ("0", "false", "no", "off"):
+            return False
+        if mode == "auto":
+            return self._needs_review(answer)
+        return True
+
+    def _needs_review(self, answer: str) -> bool:
+        """Return whether an answer is substantial enough to review.
+
+        Parameters
+        ----------
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        bool
+            ``True`` when tools were used or the answer is long.
+        """
+        if any(item.get("role") == "tool" for item in self.messages):
+            return True
+        return len(answer.strip()) >= 400
 
     def _answer_review(self, prompt: str, answer: str) -> dict:
         """Request one structured answer review.
@@ -247,6 +392,43 @@ class Agent:
         self.messages = self.session.messages[:]
         return discarded
 
+    def _maybe_compact(self) -> None:
+        """Compact the context when it exceeds the configured budget.
+
+        Returns
+        -------
+        None
+            Older messages may be discarded.
+        """
+        limit = _int_env("HARNESS_CONTEXT_CHARS", _CONTEXT_CHARS)
+        if _message_chars(self.messages) <= limit:
+            return
+        keep = _int_env("HARNESS_CONTEXT_KEEP", _CONTEXT_KEEP)
+        self._compact_messages(keep)
+
+    def _compact_messages(self, keep: int) -> None:
+        """Retain the system prompt and the newest complete messages.
+
+        Parameters
+        ----------
+        keep : int
+            Number of newest messages to retain.
+
+        Returns
+        -------
+        None
+            Older messages are discarded.
+        """
+        if keep <= 0 or len(self.messages) <= keep:
+            return
+        head = self.messages[:1]
+        tail = self.messages[-keep:]
+        while tail and tail[0].get("role") == "tool":
+            tail = tail[1:]
+        self.messages = head + tail
+        if self.session:
+            self.session.messages = self.messages[:]
+
     def _loop(self) -> str:
         """Process model turns until completion.
 
@@ -256,6 +438,7 @@ class Agent:
             Final response or turn-limit message.
         """
         for _ in range(self.max_turns):
+            self._maybe_compact()
             message = self._message()
             if not message.get("tool_calls"):
                 return str(message.get("content", ""))

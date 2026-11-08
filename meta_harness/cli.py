@@ -43,6 +43,7 @@ OPTION_SPECS = [
     (("--final-task-manifest",), {"default": None}),
     (("--held-out-manifest",), {"default": None}),
     (("--show-run",), {"default": None}),
+    (("--usage",), {"action": "store_true"}),
 ]
 
 
@@ -196,7 +197,10 @@ def _run_agent(args: Arguments) -> None:
     None
         Agent output is printed.
     """
-    _frontend(args, _new_agent(args))
+    agent = _new_agent(args)
+    _frontend(args, agent)
+    if args.usage:
+        print(f"usage: {agent.client.usage_summary()}", file=sys.stderr)
 
 
 def _new_agent(args: Arguments) -> Agent:

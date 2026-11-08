@@ -1,6 +1,7 @@
 """Built-in tools for the Minimal Harness agent runtime."""
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -93,6 +94,42 @@ def _tool_schema(name: str, properties: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _output_limit() -> int:
+    """Return the configured tool-output character limit.
+
+    Returns
+    -------
+    int
+        Maximum serialized characters returned to the model.
+    """
+    try:
+        return max(1000, int(os.getenv("HARNESS_TOOL_OUTPUT_LIMIT", "12000")))
+    except ValueError:
+        return 12000
+
+
+def _bound_output(text: str) -> str:
+    """Truncate oversized tool output while keeping both ends.
+
+    Parameters
+    ----------
+    text : str
+        Serialized tool result.
+
+    Returns
+    -------
+    str
+        Original text, or a JSON wrapper with clipped output.
+    """
+    limit = _output_limit()
+    if len(text) <= limit:
+        return text
+    head = text[: limit * 2 // 3]
+    tail = text[-(limit // 3) :]
+    content = head + "\n...[truncated]...\n" + tail
+    return json.dumps({"truncated": True, "output": content})
+
+
 class ToolError(RuntimeError):
     """Represent a rejected or failed tool operation."""
 
@@ -182,9 +219,10 @@ class ToolRegistry:
         if name not in self._advertised_names():
             raise ToolError(f"Tool not available: {name}")
         try:
-            return json.dumps(self.tools[name](**arguments), default=str)
+            result = self.tools[name](**arguments)
         except Exception as exc:
             raise ToolError(f"Tool {name} failed: {exc}") from exc
+        return _bound_output(json.dumps(result, default=str))
 
     def read(self, path: str) -> dict[str, str]:
         """Read a workspace file.

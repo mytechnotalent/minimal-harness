@@ -240,6 +240,7 @@ class OpenRouterClient:
             raise OpenRouterError(
                 f"OpenRouter returned an error response: {body}"
             )
+        self._record_usage(body)
         return body
 
     def _build_payload_request(
