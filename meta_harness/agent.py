@@ -384,13 +384,24 @@ class Agent:
         list[dict[str, Any]]
             Discarded messages.
         """
-        if not self.session:
-            discarded = self.messages[:-keep]
-            self.messages = self.messages[-keep:]
-            return discarded
-        discarded = self.session.compact(keep)
-        self.messages = self.session.messages[:]
-        return discarded
+        old = self.messages
+        self._compact_messages(keep)
+        return [item for item in old if item not in self.messages]
+
+    def trim_context(self, keep: int = 8) -> None:
+        """Keep only the system prompt and newest messages.
+
+        Parameters
+        ----------
+        keep : int
+            Number of newest messages to retain.
+
+        Returns
+        -------
+        None
+            Older messages are discarded.
+        """
+        self._compact_messages(keep)
 
     def _maybe_compact(self) -> None:
         """Compact the context when it exceeds the configured budget.

@@ -1,11 +1,16 @@
 """Offline tests for HAL eye-state recovery."""
 
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 try:
-    from gui.hal import HalWindow
+    from gui.hal import HalWindow, _log_error
 except Exception:
     HalWindow = None
+    _log_error = None
 
 
 class _FakeHal:
@@ -79,3 +84,11 @@ class HalStateTests(unittest.TestCase):
         HalWindow._ask_timeout(fake, bridge)
         self.assertEqual(fake.resolved, 1)
         self.assertEqual(fake.state, "idle")
+
+    def test_log_error_appends_message(self) -> None:
+        """Diagnostics are written where the app can read them later."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hal.log"
+            with patch.dict(os.environ, {"HARNESS_HAL_LOG": str(path)}):
+                _log_error("boom")
+            self.assertIn("boom", path.read_text())

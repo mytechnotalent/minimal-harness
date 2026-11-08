@@ -22,6 +22,109 @@ _LOCAL_NAMES = (
     "openai_compatible",
 )
 
+_ALLOWED_MESSAGE_KEYS = {
+    "role",
+    "content",
+    "tool_calls",
+    "tool_call_id",
+    "name",
+}
+
+
+def _sanitize_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Strip provider-specific fields and repair tool sequences.
+
+    Parameters
+    ----------
+    messages : list[dict[str, Any]]
+        Raw conversation messages.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Messages accepted by OpenAI-compatible endpoints.
+    """
+    pending: set[Any] = set()
+    cleaned: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        if _skip_message(message, index, pending):
+            continue
+        _track_calls(message, pending)
+        cleaned.append(_allowed_fields(message))
+    return cleaned
+
+
+def _skip_message(
+    message: dict[str, Any], index: int, pending: set[Any]
+) -> bool:
+    """Return whether a message is stale or an orphan tool result.
+
+    Parameters
+    ----------
+    message : dict[str, Any]
+        Conversation message.
+    index : int
+        Position in the conversation.
+    pending : set[Any]
+        Tool-call identifiers awaiting results.
+
+    Returns
+    -------
+    bool
+        ``True`` when the message must be dropped.
+    """
+    role = message.get("role")
+    if role == "system" and index > 0:
+        return True
+    return role == "tool" and message.get("tool_call_id") not in pending
+
+
+def _track_calls(message: dict[str, Any], pending: set[Any]) -> None:
+    """Update the pending tool-call identifiers for a message.
+
+    Parameters
+    ----------
+    message : dict[str, Any]
+        Conversation message.
+    pending : set[Any]
+        Tool-call identifiers awaiting results.
+
+    Returns
+    -------
+    None
+        The pending set is updated.
+    """
+    role = message.get("role")
+    if role == "assistant":
+        pending.clear()
+        pending.update(
+            call.get("id") for call in message.get("tool_calls") or []
+        )
+    elif role == "tool":
+        pending.discard(message.get("tool_call_id"))
+
+
+def _allowed_fields(message: dict[str, Any]) -> dict[str, Any]:
+    """Return only fields accepted by OpenAI-compatible endpoints.
+
+    Parameters
+    ----------
+    message : dict[str, Any]
+        Conversation message.
+
+    Returns
+    -------
+    dict[str, Any]
+        Filtered message.
+    """
+    return {
+        key: value
+        for key, value in message.items()
+        if key in _ALLOWED_MESSAGE_KEYS
+    }
+
 
 def _provider_name() -> str:
     """Return the configured model provider.
@@ -220,7 +323,10 @@ class OpenRouterClient:
             Provider response body.
         """
         self._require_key()
-        payload = {"model": self.model, "messages": messages, "tools": tools}
+        clean = _sanitize_messages(messages)
+        payload: dict[str, Any] = {"model": self.model, "messages": clean}
+        if tools:
+            payload["tools"] = tools
         return self._validate_chat(
             self._send(self._build_payload_request(payload))
         )

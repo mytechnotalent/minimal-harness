@@ -357,6 +357,18 @@ class ContextCompactionTests(unittest.TestCase):
             agent._maybe_compact()
         self.assertEqual(agent.messages, before)
 
+    def test_trim_context_keeps_system(self) -> None:
+        """Trimming keeps the system prompt and newest messages."""
+        agent = Agent(".", client=object())
+        agent.messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "new"},
+        ]
+        agent.trim_context(1)
+        roles = [item["role"] for item in agent.messages]
+        self.assertEqual(roles, ["system", "assistant"])
+
 
 class AgentLimitTests(unittest.TestCase):
     """Verify turn-limit finalization and tool visibility."""

@@ -3,6 +3,7 @@
 import math
 import os
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, QThread, QTimer, Qt, Signal
@@ -82,6 +83,26 @@ def hal_icon(size: int = 256) -> QIcon:
     _icon_iris(painter, center, size, base)
     painter.end()
     return QIcon(pixmap)
+
+
+def _log_error(message: str) -> None:
+    """Append an error to the HAL diagnostic log.
+
+    Parameters
+    ----------
+    message : str
+        Error text.
+
+    Returns
+    -------
+    None
+        The log is appended.
+    """
+    path = Path(os.getenv("HARNESS_HAL_LOG", "runs/hal-error.log"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{stamp} {message}\n")
 
 
 def _icon_glow(
@@ -487,6 +508,7 @@ class HalWindow(QMainWindow):
             root=root, session=Session(Path("runs/hal-session.jsonl"))
         )
         self._agent.tools.require_project_folder = True
+        self._agent.trim_context(8)
         self._worker = AgentWorker(self._agent)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
@@ -561,7 +583,8 @@ class HalWindow(QMainWindow):
         try:
             self._voice.stop_speaking()
             self._voice.start_recording()
-        except Exception:
+        except Exception as exc:
+            _log_error(f"recording: {exc}")
             self._set_state("error")
             return
         self._set_state("listening")
@@ -589,7 +612,8 @@ class HalWindow(QMainWindow):
         """
         try:
             text = self._voice.stop_recording()
-        except Exception:
+        except Exception as exc:
+            _log_error(f"transcription: {exc}")
             text = ""
         self.heard.emit(text)
 
@@ -690,9 +714,28 @@ class HalWindow(QMainWindow):
         self._busy = False
         self._button.setEnabled(self._voice is not None)
         self._set_state("speaking")
-        if self._voice is not None:
-            self._voice.speak(speech_text(answer))
+        self._speak(answer)
         QTimer.singleShot(1200, self._idle_after_speech)
+
+    def _speak(self, text: str) -> None:
+        """Queue speech and log playback failures.
+
+        Parameters
+        ----------
+        text : str
+            Text to speak.
+
+        Returns
+        -------
+        None
+            Speech is queued or the failure is logged.
+        """
+        if self._voice is None:
+            return
+        try:
+            self._voice.speak(speech_text(text))
+        except Exception as exc:
+            _log_error(f"speech: {exc}")
 
     def _idle_after_speech(self) -> None:
         """Return to idle after a short speaking period.
@@ -729,8 +772,7 @@ class HalWindow(QMainWindow):
         self._button.setEnabled(self._voice is not None)
         self._set_state("answer")
         spoken = question + " Options: " + ", ".join(options)
-        if self._voice is not None:
-            self._voice.speak(speech_text(spoken))
+        self._speak(spoken)
         self._arm_ask_timeout(bridge)
 
     def _arm_ask_timeout(self, bridge: QuestionBridge) -> None:
@@ -780,6 +822,7 @@ class HalWindow(QMainWindow):
         None
             The eye reflects the error without text.
         """
+        _log_error(message)
         self._busy = False
         self._pending = None
         self._button.setEnabled(self._voice is not None)

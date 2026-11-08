@@ -7,7 +7,11 @@ import unittest
 import urllib.error
 from unittest.mock import patch
 
-from meta_harness.openrouter import OpenRouterClient, OpenRouterError
+from meta_harness.openrouter import (
+    OpenRouterClient,
+    OpenRouterError,
+    _sanitize_messages,
+)
 
 
 class OpenRouterTests(unittest.TestCase):
@@ -88,6 +92,39 @@ class OpenRouterTests(unittest.TestCase):
         self.assertEqual(client.cached_tokens, 4)
         self.assertAlmostEqual(client.cost, 0.0005)
         self.assertIn("cost=$0.000500", client.usage_summary())
+
+    def test_chat_omits_empty_tools(self) -> None:
+        """An empty tools list is omitted for strict providers."""
+        client = OpenRouterClient()
+        client.api_key = "test"
+        body = {"choices": [{"message": {"content": "ok"}}]}
+        with patch.object(client, "_build_payload_request") as build:
+            with patch.object(client, "_send", return_value=body):
+                client.chat([{"role": "user", "content": "hi"}], [])
+        payload = build.call_args.args[0]
+        self.assertNotIn("tools", payload)
+
+    def test_sanitize_drops_provider_fields(self) -> None:
+        """Provider-only fields and stale system messages are removed."""
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": None, "reasoning_content": "x"},
+            {"role": "system", "content": "stale"},
+            {"role": "user", "content": "hi"},
+        ]
+        clean = _sanitize_messages(messages)
+        roles = [message["role"] for message in clean]
+        self.assertEqual(roles, ["system", "assistant", "user"])
+        self.assertNotIn("reasoning_content", clean[1])
+
+    def test_sanitize_drops_orphan_tool_results(self) -> None:
+        """A tool result without a pending call is removed."""
+        messages = [
+            {"role": "tool", "tool_call_id": "missing", "content": "x"},
+            {"role": "user", "content": "hi"},
+        ]
+        clean = _sanitize_messages(messages)
+        self.assertEqual([message["role"] for message in clean], ["user"])
 
     def test_model_timeout_is_configurable(self) -> None:
         """The model timeout can be raised from the environment."""
