@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from meta_harness.agent import Agent
+from meta_harness.session import Session
 from meta_harness.tools import ToolError, ToolRegistry
 
 
@@ -214,6 +215,14 @@ class AnswerReviewTests(unittest.TestCase):
 class CodingStandardsTests(unittest.TestCase):
     """Verify the agent receives the mandatory language standards."""
 
+    def test_system_prompt_describes_voice_input(self) -> None:
+        """The agent knows the app transcribes its press-to-talk audio."""
+        agent = Agent(root=".")
+        system = agent.messages[0]["content"].lower()
+        self.assertIn("press-to-talk", system)
+        self.assertIn("transcribes", system)
+        self.assertIn("never claim", system)
+
     def test_system_prompt_includes_standards(self) -> None:
         """Python, C, Rust, and assembly rules are always present."""
         agent = Agent(root=".")
@@ -239,6 +248,65 @@ class AgentLimitTests(unittest.TestCase):
         registry = ToolRegistry(".")
         with self.assertRaises(ToolError):
             registry.execute("ask", {"question": "Pick", "options": ["a"]})
+
+
+class BadArgsClient:
+    """Return a tool call with malformed JSON, then a final answer."""
+
+    def __init__(self) -> None:
+        """Initialize the call counter."""
+        self.calls = 0
+
+    def chat(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Return a broken tool call first and text second."""
+        self.calls += 1
+        if self.calls == 1:
+            call = {
+                "id": "1",
+                "function": {"name": "read", "arguments": '{"p'},
+            }
+            message = {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [call],
+            }
+            return {"choices": [{"message": message}]}
+        return {
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}]
+        }
+
+
+class ToolCallRepairTests(unittest.TestCase):
+    """Verify malformed tool-call arguments cannot poison a request."""
+
+    def test_loaded_tool_calls_are_repaired(self) -> None:
+        """Invalid arguments in a saved session become an empty object."""
+        bad = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "1", "function": {"name": "read", "arguments": '{"p'}}
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "s.jsonl")
+            path.write_text(json.dumps(bad) + "\n", encoding="utf-8")
+            agent = Agent(
+                directory, client=BadArgsClient(), session=Session(path)
+            )
+            args = agent.messages[-1]["tool_calls"][0]["function"]["arguments"]
+        self.assertEqual(args, "{}")
+
+    def test_model_tool_calls_are_repaired(self) -> None:
+        """Invalid arguments returned by the model are repaired."""
+        with tempfile.TemporaryDirectory() as directory:
+            session = Session(Path(directory, "s.jsonl"))
+            agent = Agent(directory, client=BadArgsClient(), session=session)
+            agent.run("go")
+            args = session.messages[1]["tool_calls"][0]["function"][
+                "arguments"
+            ]
+        self.assertEqual(args, "{}")
 
 
 class InstallGuardTests(unittest.TestCase):
