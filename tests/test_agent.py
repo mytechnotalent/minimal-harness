@@ -223,6 +223,13 @@ class CodingStandardsTests(unittest.TestCase):
         self.assertIn("transcribes", system)
         self.assertIn("never claim", system)
 
+    def test_system_prompt_falls_back_when_browser_fails(self) -> None:
+        """The agent answers from search results if browsing fails."""
+        agent = Agent(root=".")
+        system = agent.messages[0]["content"]
+        self.assertIn("browser_open", system)
+        self.assertIn("web_search", system)
+
     def test_system_prompt_includes_standards(self) -> None:
         """Python, C, Rust, and assembly rules are always present."""
         agent = Agent(root=".")

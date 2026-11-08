@@ -44,6 +44,8 @@ ask where it should live unless the user already named a folder.
   most relevant result with `browser_open` and verify the specific fact with
   `browser_assert` when possible. Search titles alone are not evidence.
 - Once you have a reliable source, stop searching and answer.
+- If `browser_open` fails, do not refuse the request. Fall back to the
+  `web_search` results, cite the source you could reach, and answer.
 - Never call a tool that is not in your tool list. If a tool is unavailable,
   say so and answer with what you have.
 - When a tool returns the same result twice, switch sources or answer.
