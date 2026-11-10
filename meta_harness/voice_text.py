@@ -60,6 +60,21 @@ def match_option(transcript: str, options: list[str]) -> str:
 
 
 def _resolve(said: str, options: list[str]) -> str:
+    """Resolve normalized speech to one suggested option.
+
+    Parameters
+    ----------
+    said : str
+        Normalized spoken text.
+
+    options : list of str
+        Suggested answers.
+
+    Returns
+    -------
+    str
+        Matching option, or the spoken text when nothing matches.
+    """
     exact = _exact_option(said, options)
     if exact:
         return exact
@@ -67,6 +82,21 @@ def _resolve(said: str, options: list[str]) -> str:
 
 
 def _exact_option(said: str, options: list[str]) -> str:
+    """Find an option matched by text.
+
+    Parameters
+    ----------
+    said : str
+        Normalized spoken text.
+
+    options : list of str
+        Suggested answers.
+
+    Returns
+    -------
+    str
+        Matching option text, or an empty string.
+    """
     lowered = said.lower()
     for option in options:
         if lowered == option.strip().lower():
@@ -78,6 +108,21 @@ def _exact_option(said: str, options: list[str]) -> str:
 
 
 def _spoken_choice(said: str, options: list[str]) -> str:
+    """Find an option selected by number or number word.
+
+    Parameters
+    ----------
+    said : str
+        Normalized spoken text.
+
+    options : list of str
+        Suggested answers.
+
+    Returns
+    -------
+    str
+        Selected option text, or an empty string.
+    """
     index = _word_number(said.lower().strip(" ."))
     if 1 <= index <= len(options):
         return options[index - 1]
@@ -85,6 +130,18 @@ def _spoken_choice(said: str, options: list[str]) -> str:
 
 
 def _word_number(said: str) -> int:
+    """Convert a spoken number or number word to an index.
+
+    Parameters
+    ----------
+    said : str
+        Lowercase text that may hold a number.
+
+    Returns
+    -------
+    int
+        One-based index, or zero when no number is present.
+    """
     if said.isdigit():
         return int(said)
     if said in _NUMBER_WORDS:

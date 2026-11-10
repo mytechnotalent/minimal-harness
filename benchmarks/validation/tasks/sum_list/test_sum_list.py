@@ -9,15 +9,42 @@ class SumListTests(unittest.TestCase):
     """Verify sum_list(xs) validation cases."""
 
     def test_empty(self) -> None:
-        """Verify the empty case."""
+        """Verify the empty case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(sum_list([]), 0)
 
     def test_seven(self) -> None:
-        """Verify the seven case."""
+        """Verify the seven case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(sum_list([7]), 7)
 
     def test_mixed(self) -> None:
-        """Verify the mixed case."""
+        """Verify the mixed case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(sum_list([-2, 2, 5]), 5)
 
 

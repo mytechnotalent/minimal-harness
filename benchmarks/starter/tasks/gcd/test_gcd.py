@@ -9,15 +9,42 @@ class GcdTests(unittest.TestCase):
     """Verify gcd(a, b) returns the greatest common divisor."""
 
     def test_coprime(self) -> None:
-        """gcd(8, 9) is 1."""
+        """gcd(8, 9) is 1.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(gcd(8, 9), 1)
 
     def test_common_factor(self) -> None:
-        """gcd(12, 18) is 6."""
+        """gcd(12, 18) is 6.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(gcd(12, 18), 6)
 
     def test_zero(self) -> None:
-        """gcd(0, 7) is 7."""
+        """gcd(0, 7) is 7.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(gcd(0, 7), 7)
 
 

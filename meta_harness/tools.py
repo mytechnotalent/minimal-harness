@@ -5,7 +5,8 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+from typing import Callable
 
 from .web_search import WebSearchClient
 from .browser import BrowserClient
@@ -82,20 +83,22 @@ def _tool_schema(name: str, properties: dict[str, Any]) -> dict[str, Any]:
     dict[str, Any]
         Tool schema.
     """
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": TOOL_DESCRIPTIONS.get(
-                name, f"Minimal Harness {name} tool"
-            ),
-            "parameters": {"type": "object", "properties": properties},
-        },
+    function = {
+        "name": name,
+        "description": TOOL_DESCRIPTIONS.get(
+            name, f"Minimal Harness {name} tool"
+        ),
+        "parameters": {"type": "object", "properties": properties},
     }
+    return {"type": "function", "function": function}
 
 
 def _output_limit() -> int:
     """Return the configured tool-output character limit.
+
+    Parameters
+    ----------
+    None
 
     Returns
     -------
@@ -170,6 +173,10 @@ class ToolRegistry:
     def _tool_map(self) -> dict[str, Callable[..., Any]]:
         """Build the registered tool map.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         dict[str, Callable[..., Any]]
@@ -179,6 +186,10 @@ class ToolRegistry:
 
     def schema(self) -> list[dict[str, Any]]:
         """Return OpenAI-compatible tool schemas.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -193,6 +204,10 @@ class ToolRegistry:
 
     def _advertised_names(self) -> set[str]:
         """Return currently advertised tool names.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -350,6 +365,10 @@ class ToolRegistry:
     def _require_install_ok(self) -> None:
         """Ask the user to approve a package install.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -362,15 +381,29 @@ class ToolRegistry:
         """
         if self.questioner is None:
             raise ToolError("Installing software needs your approval first.")
-        answer = self.questioner(
-            "I need to download and install a tool for this. " "Is that okay?",
-            ["Yes, install it", "No, don't install"],
-        )
+        answer = self._ask_install()
         if not answer.lower().startswith("yes"):
             raise ToolError(
                 "Install declined. Do not install software without "
                 "approval."
             )
+
+    def _ask_install(self) -> str:
+        """Ask the user to approve a package install.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        str
+            The user's answer text.
+        """
+        return self.questioner(
+            "I need to download and install a tool for this. Is that okay?",
+            ["Yes, install it", "No, don't install"],
+        )
 
     def _run_command(
         self, command: str, timeout: int

@@ -9,13 +9,31 @@ class WordWrapTests(unittest.TestCase):
     """Verify the benchmark cases."""
 
     def test_fox(self) -> None:
-        """Verify the fox case."""
+        """Verify the fox case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(
             word_wrap("the quick brown fox", 10), ["the quick", "brown fox"]
         )
 
     def test_three(self) -> None:
-        """Verify the three case."""
+        """Verify the three case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(
             word_wrap("one two three", 5), ["one", "two", "three"]
         )

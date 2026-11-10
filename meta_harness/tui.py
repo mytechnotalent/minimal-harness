@@ -37,6 +37,10 @@ class TUI:
     def run(self) -> None:
         """Start the full-screen interface.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -103,6 +107,10 @@ class TUI:
     def _tick(self) -> None:
         """Advance the thinking animation and apply a finished worker.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -115,6 +123,10 @@ class TUI:
 
     def _serve_ui_request(self) -> None:
         """Answer one queued question from the worker thread.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -153,6 +165,10 @@ class TUI:
 
     def _colors(self) -> None:
         """Define the interface color palette.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -247,6 +263,10 @@ class TUI:
 
     def _status_label(self) -> str:
         """Return the header status, animating while thinking.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -511,6 +531,10 @@ class TUI:
     def _input_label_text(self) -> str:
         """Return the input label, animated while thinking.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         str
@@ -725,6 +749,10 @@ class TUI:
     def _model_name(self) -> str:
         """Return the configured model label.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         str
@@ -776,6 +804,10 @@ class TUI:
 
     def _submit(self) -> bool:
         """Submit the current prompt.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -851,6 +883,10 @@ class TUI:
     def _finish_worker(self) -> None:
         """Append the worker's answer and leave the thinking state.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -864,6 +900,10 @@ class TUI:
 
     def _worker_text(self) -> str:
         """Return the worker answer or its error text.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -916,6 +956,10 @@ class TUI:
     def _append_suggestions(self) -> None:
         """Append clickable suggestions from the last answer.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -933,6 +977,10 @@ class TUI:
     def _take_suggestions(self) -> list[str]:
         """Read and clear the agent's pending suggestions.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         list[str]
@@ -947,6 +995,10 @@ class TUI:
     def _enable_mouse(self) -> None:
         """Enable mouse click reporting when the terminal allows it.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -959,6 +1011,10 @@ class TUI:
 
     def _handle_mouse(self) -> bool:
         """Scroll or run a suggestion based on a mouse event.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -975,6 +1031,10 @@ class TUI:
 
     def _mouse_event(self) -> tuple[int, int, int] | None:
         """Return the pending mouse event coordinates.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -1012,6 +1072,10 @@ class TUI:
     def _wheel_up() -> int:
         """Return the scroll-up mouse mask for this platform.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         int
@@ -1022,6 +1086,10 @@ class TUI:
     @staticmethod
     def _wheel_down() -> int:
         """Return the scroll-down mouse mask for this platform.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -1053,6 +1121,10 @@ class TUI:
 
     def _scroll_keys(self) -> tuple:
         """Return the transcript scroll key codes.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -1317,6 +1389,28 @@ class TUI:
         screen = self.screen
         screen.erase()
         height, width = screen.getmaxyx()
+        self._draw_question_banner(screen, width)
+        row = self._question_text(screen, question, width)
+        self._option_rows(screen, entries, selected, row, width)
+        self._draw_question_hint(screen, height, width)
+        screen.refresh()
+
+    def _draw_question_banner(self, screen: Any, width: int) -> None:
+        """Draw the question-mode title banner.
+
+        Parameters
+        ----------
+        screen : Any
+            Initialized curses screen.
+
+        width : int
+            Screen width.
+
+        Returns
+        -------
+        None
+            The banner is drawn.
+        """
         self._add(
             screen,
             0,
@@ -1325,8 +1419,28 @@ class TUI:
             width,
             curses.color_pair(1) | curses.A_BOLD,
         )
-        row = self._question_text(screen, question, width)
-        self._option_rows(screen, entries, selected, row, width)
+
+    def _draw_question_hint(
+        self, screen: Any, height: int, width: int
+    ) -> None:
+        """Draw the question-mode key hint.
+
+        Parameters
+        ----------
+        screen : Any
+            Initialized curses screen.
+
+        height : int
+            Screen height.
+
+        width : int
+            Screen width.
+
+        Returns
+        -------
+        None
+            The hint is drawn.
+        """
         self._add(
             screen,
             height - 1,
@@ -1335,7 +1449,6 @@ class TUI:
             width,
             curses.color_pair(3),
         )
-        screen.refresh()
 
     def _question_text(self, screen: Any, question: str, width: int) -> int:
         """Draw wrapped question text.
@@ -1357,16 +1470,36 @@ class TUI:
         row = 2
         lines = textwrap.wrap(question, width=max(width - 4, 8)) or [question]
         for line in lines:
-            self._add(
-                screen,
-                row,
-                0,
-                "  " + line,
-                width,
-                curses.color_pair(4) | curses.A_BOLD,
-            )
+            self._draw_question_line(screen, row, line, width)
             row += 1
         return row + 1
+
+    def _draw_question_line(
+        self, screen: Any, row: int, line: str, width: int
+    ) -> None:
+        """Draw one wrapped question line.
+
+        Parameters
+        ----------
+        screen : Any
+            Initialized curses screen.
+
+        row : int
+            Screen row.
+
+        line : str
+            Question text line.
+
+        width : int
+            Screen width.
+
+        Returns
+        -------
+        None
+            The line is drawn.
+        """
+        color = curses.color_pair(4) | curses.A_BOLD
+        self._add(screen, row, 0, "  " + line, width, color)
 
     def _option_rows(
         self,
@@ -1397,14 +1530,9 @@ class TUI:
             Option rows are drawn.
         """
         for index, entry in enumerate(entries):
-            self._add(
-                screen,
-                row + index,
-                0,
-                f"  [{index + 1}] {entry}",
-                width,
-                self._option_attr(index, selected),
-            )
+            attr = self._option_attr(index, selected)
+            text = f"  [{index + 1}] {entry}"
+            self._add(screen, row + index, 0, text, width, attr)
 
     def _option_attr(self, index: int, selected: int) -> int:
         """Return the display attribute for an option row.
@@ -1427,6 +1555,10 @@ class TUI:
 
     def _read_answer(self) -> str:
         """Collect a typed custom answer.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -1456,7 +1588,29 @@ class TUI:
         """
         screen = self.screen
         screen.erase()
-        height, width = screen.getmaxyx()
+        _, width = screen.getmaxyx()
+        self._draw_answer_banner(screen, width)
+        self._draw_answer_prompt(screen, width)
+        self._add(screen, 4, 0, "  > " + text, width, curses.color_pair(2))
+        screen.move(4, min(4 + len(text), max(width - 1, 0)))
+        screen.refresh()
+
+    def _draw_answer_banner(self, screen: Any, width: int) -> None:
+        """Draw the answer-mode title banner.
+
+        Parameters
+        ----------
+        screen : Any
+            Initialized curses screen.
+
+        width : int
+            Screen width.
+
+        Returns
+        -------
+        None
+            The banner is drawn.
+        """
         self._add(
             screen,
             0,
@@ -1465,6 +1619,23 @@ class TUI:
             width,
             curses.color_pair(1) | curses.A_BOLD,
         )
+
+    def _draw_answer_prompt(self, screen: Any, width: int) -> None:
+        """Draw the answer-mode instruction line.
+
+        Parameters
+        ----------
+        screen : Any
+            Initialized curses screen.
+
+        width : int
+            Screen width.
+
+        Returns
+        -------
+        None
+            The instruction line is drawn.
+        """
         self._add(
             screen,
             2,
@@ -1473,9 +1644,6 @@ class TUI:
             width,
             curses.color_pair(4),
         )
-        self._add(screen, 4, 0, "  > " + text, width, curses.color_pair(2))
-        screen.move(4, min(4 + len(text), max(width - 1, 0)))
-        screen.refresh()
 
     def _edit_answer(self, answer: str, key: Any) -> str:
         """Apply one editing key to the typed answer.

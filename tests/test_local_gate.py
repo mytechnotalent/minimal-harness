@@ -12,7 +12,16 @@ class LocalGateTests(unittest.TestCase):
     """Verify non-isolated host command execution."""
 
     def test_passing_command(self) -> None:
-        """A zero exit status passes and is marked non-isolated."""
+        """A zero exit status passes and is marked non-isolated.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         with tempfile.TemporaryDirectory() as directory:
             result = LocalGate().run(Path(directory), "echo ok")
         self.assertTrue(result["passed"])
@@ -20,7 +29,16 @@ class LocalGateTests(unittest.TestCase):
         self.assertFalse(result["isolated"])
 
     def test_failing_command(self) -> None:
-        """A nonzero exit status fails and preserves the code."""
+        """A nonzero exit status fails and preserves the code.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         command = f'"{sys.executable}" -c "import sys; sys.exit(3)"'
         with tempfile.TemporaryDirectory() as directory:
             result = LocalGate().run(Path(directory), command)
@@ -29,7 +47,16 @@ class LocalGateTests(unittest.TestCase):
         self.assertFalse(result["isolated"])
 
     def test_missing_command(self) -> None:
-        """A command that cannot start fails closed."""
+        """A command that cannot start fails closed.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         with tempfile.TemporaryDirectory() as directory:
             result = LocalGate().run(
                 Path(directory), "definitely-not-a-command-xyz"

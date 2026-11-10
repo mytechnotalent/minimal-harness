@@ -10,7 +10,8 @@ from ._json_util import json_value
 from .openrouter import OpenRouterClient
 from .prompts import load as _load_prompt
 from .session import Session
-from .tools import ToolError, ToolRegistry
+from .tools import ToolError
+from .tools import ToolRegistry
 
 _CONTEXT_CHARS = 60000
 _CONTEXT_KEEP = 16
@@ -77,6 +78,10 @@ def _message_chars(messages: list[dict[str, Any]]) -> int:
 
 def _standards_mode() -> str:
     """Return the coding-standards inclusion mode.
+
+    Parameters
+    ----------
+    None
 
     Returns
     -------
@@ -168,10 +173,7 @@ class Agent:
             _repair_tool_calls(message)
         if messages and messages[0].get("role") == "system":
             return messages
-        system = (
-            _load_prompt("agent") + "\n\n" + _load_prompt("coding_standards")
-        )
-        return [{"role": "system", "content": system}] + messages
+        return [{"role": "system", "content": _system_prompt()}] + messages
 
     def run(self, prompt: str) -> str:
         """Run the agent until final text or turn limit.
@@ -289,14 +291,32 @@ class Agent:
             Decoded review, or an empty dict on failure.
         """
         try:
-            raw = self.client.complete(
-                _load_prompt("answer_reviewer"),
-                self._review_context(prompt, answer),
-            )
+            raw = self._review_raw(prompt, answer)
             value = json_value(raw)
         except Exception:
             return {}
         return value if isinstance(value, dict) else {}
+
+    def _review_raw(self, prompt: str, answer: str) -> str:
+        """Request the raw reviewer response.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+
+        answer : str
+            Draft final answer.
+
+        Returns
+        -------
+        str
+            Raw reviewer response text.
+        """
+        return self.client.complete(
+            _load_prompt("answer_reviewer"),
+            self._review_context(prompt, answer),
+        )
 
     def _rejected(self, review: dict) -> bool:
         """Return whether a review rejects the answer.
@@ -328,11 +348,7 @@ class Agent:
         str
             JSON review context.
         """
-        evidence = [
-            str(message.get("content", ""))[-500:]
-            for message in self.messages
-            if message.get("role") == "tool"
-        ][-8:]
+        evidence = _tool_evidence(self.messages)
         return json.dumps(
             {
                 "question": prompt,
@@ -406,6 +422,10 @@ class Agent:
     def _maybe_compact(self) -> None:
         """Compact the context when it exceeds the configured budget.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -433,15 +453,32 @@ class Agent:
         if keep <= 0 or len(self.messages) <= keep:
             return
         head = self.messages[:1]
-        tail = self.messages[-keep:]
-        while tail and tail[0].get("role") == "tool":
-            tail = tail[1:]
-        self.messages = head + tail
+        tail = _complete_tail(self.messages[-keep:])
+        self._replace(head + tail)
+
+    def _replace(self, messages: list[dict[str, Any]]) -> None:
+        """Replace the conversation and mirror it to the session.
+
+        Parameters
+        ----------
+        messages : list of dict[str, Any]
+            New conversation messages.
+
+        Returns
+        -------
+        None
+            The conversation is replaced.
+        """
+        self.messages = messages
         if self.session:
-            self.session.messages = self.messages[:]
+            self.session.messages = messages[:]
 
     def _loop(self) -> str:
         """Process model turns until completion.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -459,20 +496,16 @@ class Agent:
     def _finalize(self) -> str:
         """Request a final answer without tools after the turn limit.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         str
             Final assistant text, or a fallback message.
         """
-        self._append(
-            {
-                "role": "system",
-                "content": (
-                    "Turn limit reached. Answer now using the information "
-                    "already gathered. Do not call tools."
-                ),
-            }
-        )
+        self._append(_turn_limit_message())
         response = self.client.chat(self.messages, [])
         message = response["choices"][0]["message"]
         self._append(message)
@@ -483,6 +516,10 @@ class Agent:
 
     def _message(self) -> dict[str, Any]:
         """Request and append one assistant message.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -498,6 +535,10 @@ class Agent:
 
     def _inject_steering(self) -> None:
         """Append queued steering messages before a model call.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -554,15 +595,73 @@ class Agent:
             Tool result message.
         """
         function = call["function"]
+        arguments, content = self._run_tool(function)
+        self._notify(function["name"], arguments, content)
+        return {"role": "tool", "tool_call_id": call["id"], "content": content}
+
+    def _run_tool(self, function: dict[str, Any]) -> tuple:
+        """Execute one tool call and return its arguments and output.
+
+        Parameters
+        ----------
+        function : dict[str, Any]
+            Tool-call function payload.
+
+        Returns
+        -------
+        tuple
+            Parsed arguments and the tool output string.
+        """
         arguments: dict[str, Any] = {}
         try:
             arguments = json.loads(function.get("arguments", "{}"))
             content = self.tools.execute(function["name"], arguments)
         except (ToolError, json.JSONDecodeError, KeyError) as exc:
             content = json.dumps({"error": str(exc)})
+        return arguments, content
+
+    def _notify(self, name: str, arguments: dict, content: str) -> None:
+        """Report one tool result to the observer.
+
+        Parameters
+        ----------
+        name : str
+            Tool name.
+
+        arguments : dict
+            Tool arguments.
+
+        content : str
+            Tool result content.
+
+        Returns
+        -------
+        None
+            The observer is called when configured.
+        """
         if self.observer is not None:
-            self.observer(function["name"], arguments, content)
-        return {"role": "tool", "tool_call_id": call["id"], "content": content}
+            self.observer(name, arguments, content)
+
+
+def _turn_limit_message() -> dict[str, str]:
+    """Build the system message that ends tool use.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    dict[str, str]
+        System message requesting a final answer.
+    """
+    return {
+        "role": "system",
+        "content": (
+            "Turn limit reached. Answer now using the information "
+            "already gathered. Do not call tools."
+        ),
+    }
 
 
 def _repair_tool_calls(message: dict[str, Any]) -> None:
@@ -584,3 +683,58 @@ def _repair_tool_calls(message: dict[str, Any]) -> None:
             json.loads(function.get("arguments", "{}"))
         except (json.JSONDecodeError, TypeError):
             function["arguments"] = "{}"
+
+
+def _system_prompt() -> str:
+    """Build the combined interactive system prompt.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        Agent prompt followed by the coding standards.
+    """
+    return _load_prompt("agent") + "\n\n" + _load_prompt("coding_standards")
+
+
+def _tool_evidence(messages: list[dict[str, Any]]) -> list[str]:
+    """Collect the newest tool-result content for the reviewer.
+
+    Parameters
+    ----------
+    messages : list of dict[str, Any]
+        Conversation messages.
+
+    Returns
+    -------
+    list of str
+        Up to eight trailing tool results, each truncated.
+    """
+    evidence = [
+        str(message.get("content", ""))[-500:]
+        for message in messages
+        if message.get("role") == "tool"
+    ]
+    return evidence[-8:]
+
+
+def _complete_tail(tail: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop leading tool results from a retained tail.
+
+    Parameters
+    ----------
+    tail : list of dict[str, Any]
+        Newest messages to retain.
+
+    Returns
+    -------
+    list of dict[str, Any]
+        Tail without leading tool results.
+    """
+    index = 0
+    while index < len(tail) and tail[index].get("role") == "tool":
+        index += 1
+    return tail[index:]

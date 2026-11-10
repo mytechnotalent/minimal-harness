@@ -81,15 +81,31 @@ class AppEvaluator:
         dict[str, bool]
             Syntax and HTML checks.
         """
+        checks = {"html_structure": self._html_ok(root, files)}
         javascript = files["app.js"] and self._node_ok(root / "app.js")
-        html = (
-            files["index.html"]
-            and "<html" in (root / "index.html").read_text().lower()
-        )
-        checks = {"html_structure": html}
         if javascript is not None:
             checks["javascript_syntax"] = javascript
         return checks
+
+    def _html_ok(self, root: Path, files: dict[str, bool]) -> bool:
+        """Check that index.html contains an HTML element.
+
+        Parameters
+        ----------
+        root : pathlib.Path
+            Application workspace.
+
+        files : dict[str, bool]
+            Required-file checks.
+
+        Returns
+        -------
+        bool
+            Whether the HTML file structure is present.
+        """
+        if not files["index.html"]:
+            return False
+        return "<html" in (root / "index.html").read_text().lower()
 
     def _node_ok(self, path: Path) -> bool | None:
         """Check JavaScript syntax with Node.

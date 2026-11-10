@@ -80,6 +80,10 @@ class Session:
     def _load(self) -> list[dict[str, Any]]:
         """Load prior messages from the transcript.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         list[dict[str, Any]]

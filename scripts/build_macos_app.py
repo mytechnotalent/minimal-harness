@@ -11,6 +11,10 @@ APP_NAME = "Minimal Harness"
 def main() -> int:
     """Build and install the app bundle.
 
+    Parameters
+    ----------
+    None
+
     Returns
     -------
     int

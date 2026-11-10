@@ -9,15 +9,42 @@ class FizzBuzzTests(unittest.TestCase):
     """Verify fizz_buzz(n) returns the classic sequence."""
 
     def test_three(self) -> None:
-        """fizz_buzz(3) is ['1', '2', 'Fizz']."""
+        """fizz_buzz(3) is ['1', '2', 'Fizz'].
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(fizz_buzz(3), ["1", "2", "Fizz"])
 
     def test_five(self) -> None:
-        """fizz_buzz(5) ends with 'Buzz'."""
+        """fizz_buzz(5) ends with 'Buzz'.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(fizz_buzz(5)[-1], "Buzz")
 
     def test_fifteen(self) -> None:
-        """fizz_buzz(15) ends with 'FizzBuzz'."""
+        """fizz_buzz(15) ends with 'FizzBuzz'.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(fizz_buzz(15)[-1], "FizzBuzz")
 
 

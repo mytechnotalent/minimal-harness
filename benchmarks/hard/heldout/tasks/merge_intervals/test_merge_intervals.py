@@ -9,19 +9,55 @@ class MergeIntervalsTests(unittest.TestCase):
     """Verify the benchmark cases."""
 
     def test_single(self) -> None:
-        """Verify the single case."""
+        """Verify the single case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(merge_intervals([[1, 2]]), [[1, 2]])
 
     def test_overlap_zero(self) -> None:
-        """Verify the overlap_zero case."""
+        """Verify the overlap_zero case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(merge_intervals([[1, 4], [0, 4]]), [[0, 4]])
 
     def test_reverse_touch(self) -> None:
-        """Verify the reverse_touch case."""
+        """Verify the reverse_touch case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(merge_intervals([[2, 3], [1, 2]]), [[1, 3]])
 
     def test_disjoint(self) -> None:
-        """Verify the disjoint case."""
+        """Verify the disjoint case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(merge_intervals([[1, 2], [3, 4]]), [[1, 2], [3, 4]])
 
 

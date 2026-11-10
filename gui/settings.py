@@ -34,6 +34,10 @@ class Settings:
     def _load(self) -> None:
         """Read stored settings values.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -41,13 +45,27 @@ class Settings:
         """
         if not self.path.exists():
             return
-        try:
-            data = json.loads(self.path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return
+        data = self._read_data()
         for key in self.defaults:
             if isinstance(data.get(key), (bool, str)):
                 self.values[key] = data[key]
+
+    def _read_data(self):
+        """Read the stored JSON document.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        object
+            Parsed document, or an empty mapping when unreadable.
+        """
+        try:
+            return json.loads(self.path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
 
     def get(self, key: str) -> bool | str:
         """Return a setting value.

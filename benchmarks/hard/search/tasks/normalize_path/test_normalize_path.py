@@ -9,15 +9,42 @@ class NormalizePathTests(unittest.TestCase):
     """Verify the benchmark cases."""
 
     def test_absolute(self) -> None:
-        """Verify the absolute case."""
+        """Verify the absolute case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(normalize_path("/a//b/./c"), "/a/b/c")
 
     def test_parent(self) -> None:
-        """Verify the parent case."""
+        """Verify the parent case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(normalize_path("a/b/../c"), "a/c")
 
     def test_dot(self) -> None:
-        """Verify the dot case."""
+        """Verify the dot case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(normalize_path("."), ".")
 
 

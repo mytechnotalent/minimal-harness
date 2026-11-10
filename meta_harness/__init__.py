@@ -1,6 +1,8 @@
 """Minimal Harness search and evaluation components."""
 
-from .models import Candidate, SearchConfig, SearchResult
+from .models import Candidate
+from .models import SearchConfig
+from .models import SearchResult
 from .agent import Agent
 from .pipeline import SearchPipeline
 from .session import Session

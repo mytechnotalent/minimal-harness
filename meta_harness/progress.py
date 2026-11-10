@@ -157,6 +157,22 @@ def _status(row: dict) -> str:
     return "pending"
 
 
+def _candidate_rows(state: Any) -> list[str]:
+    """Render the candidate table rows.
+
+    Parameters
+    ----------
+    state : Any
+        Live dashboard state.
+
+    Returns
+    -------
+    list of str
+        One formatted row per known candidate.
+    """
+    return [_format_candidate(state.candidates[item]) for item in state.order]
+
+
 def _format_candidate(row: dict) -> str:
     """Format one candidate table row.
 
@@ -493,6 +509,10 @@ class ProgressTUI:
     def run(self) -> None:
         """Run the pipeline behind a live dashboard.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -506,6 +526,10 @@ class ProgressTUI:
     def _start(self) -> None:
         """Wire the observer and launch the worker thread.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -518,6 +542,10 @@ class ProgressTUI:
 
     def _work(self) -> None:
         """Run the pipeline and capture its result or error.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -589,6 +617,10 @@ class ProgressTUI:
     def _pump(self) -> None:
         """Drain queued events and refresh the usage line.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -600,6 +632,10 @@ class ProgressTUI:
 
     def _usage(self) -> str:
         """Return the client usage summary when available.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -632,6 +668,10 @@ class ProgressTUI:
 
     def _colors(self) -> None:
         """Register the dashboard color palette.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -685,6 +725,24 @@ class ProgressTUI:
         self._add(
             screen, 0, 0, title, width, curses.color_pair(1) | curses.A_BOLD
         )
+        return self._draw_header_lines(screen, width)
+
+    def _draw_header_lines(self, screen: Any, width: int) -> int:
+        """Draw the status and progress lines.
+
+        Parameters
+        ----------
+        screen : Any
+            Initialized curses screen.
+
+        width : int
+            Screen width.
+
+        Returns
+        -------
+        int
+            First free row below the header.
+        """
         self._add(
             screen, 1, 0, self._status_text(), width, curses.color_pair(3)
         )
@@ -695,6 +753,10 @@ class ProgressTUI:
 
     def _status_text(self) -> str:
         """Compose the iteration and elapsed status line.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -709,6 +771,10 @@ class ProgressTUI:
     def _progress_text(self) -> str:
         """Compose a textual progress bar line.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         str
@@ -722,6 +788,10 @@ class ProgressTUI:
 
     def _elapsed(self) -> str:
         """Return elapsed time as mm:ss.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -753,10 +823,7 @@ class ProgressTUI:
         self._add(
             screen, start + 1, 0, _CANDIDATE_HEADER, width, curses.A_BOLD
         )
-        rows = [
-            _format_candidate(self.state.candidates[c])
-            for c in self.state.order
-        ]
+        rows = _candidate_rows(self.state)
         return self._draw_rows(screen, start + 2, rows, width)
 
     def _draw_rows(
@@ -810,15 +877,35 @@ class ProgressTUI:
         self._add(screen, start, 0, "  ACTIVITY", width, curses.A_BOLD)
         visible = max(bottom - start - 1, 0)
         lines = self.state.log[-visible:] if visible else []
+        self._draw_log(screen, start, lines, width)
+
+    def _draw_log(
+        self, screen: Any, start: int, lines: list[str], width: int
+    ) -> None:
+        """Draw the visible activity log lines.
+
+        Parameters
+        ----------
+        screen : Any
+            Initialized curses screen.
+
+        start : int
+            First available row.
+
+        lines : list[str]
+            Log lines to draw.
+
+        width : int
+            Screen width.
+
+        Returns
+        -------
+        None
+            Log lines are drawn.
+        """
         for offset, line in enumerate(lines):
-            self._add(
-                screen,
-                start + 1 + offset,
-                0,
-                line,
-                width,
-                curses.color_pair(4),
-            )
+            color = curses.color_pair(4)
+            self._add(screen, start + 1 + offset, 0, line, width, color)
 
     def _footer(self, screen: Any, height: int, width: int) -> None:
         """Draw the usage summary and key hint.
@@ -844,6 +931,10 @@ class ProgressTUI:
 
     def _hint(self) -> str:
         """Compose the footer hint line.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -873,14 +964,8 @@ class ProgressTUI:
             Divider is drawn.
         """
         if row >= 0:
-            self._add(
-                screen,
-                row,
-                0,
-                "-" * max(width, 1),
-                width,
-                curses.color_pair(1),
-            )
+            text = "-" * max(width, 1)
+            self._add(screen, row, 0, text, width, curses.color_pair(1))
 
     def _add(
         self,
@@ -954,6 +1039,10 @@ class ProgressTUI:
 
     def _summary(self) -> str:
         """Return the one-line summary printed after the dashboard.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------

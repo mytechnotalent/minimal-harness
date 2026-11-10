@@ -7,15 +7,17 @@ Usage:
 import sys
 from pathlib import Path
 
-from meta_harness.task_evaluator import (
-    TaskResult,
-    load_manifest,
-    score_candidate,
-)
+from meta_harness.task_evaluator import TaskResult
+from meta_harness.task_evaluator import load_manifest
+from meta_harness.task_evaluator import score_candidate
 
 
 def main() -> int:
     """Score the solution passed on the command line.
+
+    Parameters
+    ----------
+    None
 
     Returns
     -------
@@ -25,12 +27,28 @@ def main() -> int:
     if len(sys.argv) != 2:
         print("usage: run.py PATH_TO_SOLUTION.py", file=sys.stderr)
         return 2
+    _score(Path(sys.argv[1]))
+    return 0
+
+
+def _score(solution: Path) -> None:
+    """Score one solution file against the starter manifest.
+
+    Parameters
+    ----------
+    solution : pathlib.Path
+        Path to the candidate solution.
+
+    Returns
+    -------
+    None
+        Per-task marks and the pass rate are printed.
+    """
     root = Path(__file__).parent
     manifest = load_manifest(root / "manifest.json")
-    code = Path(sys.argv[1]).read_text(encoding="utf-8")
+    code = solution.read_text(encoding="utf-8")
     rate, results = score_candidate(code, root, manifest)
     _report(rate, results)
-    return 0
 
 
 def _report(rate: float, results: list[TaskResult]) -> None:
@@ -40,8 +58,14 @@ def _report(rate: float, results: list[TaskResult]) -> None:
     ----------
     rate : float
         Overall pass rate.
+
     results : list[TaskResult]
         Per-task results.
+
+    Returns
+    -------
+    None
+        One line per task plus a summary line is printed.
     """
     for result in results:
         mark = "PASS" if result.passed else "FAIL"

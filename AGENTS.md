@@ -25,25 +25,33 @@ gate 2 → log → repeat**. See [docs/adversarial-loop.md](docs/adversarial-loo
 
 ## Style rules (strict)
 
-See `.github/skills/minimal-harness-python-formatting/SKILL.md`. Summary:
+See `.opencode/skill/embedded-python-standard/SKILL.md`. Summary:
 
-- PEP 8, Black (`line-length = 79`), Flake8 clean.
-- Module docstring on every `.py` file.
-- Every function has a full NumPy-style docstring.
+- PEP 8 enforced by `pycodestyle` at `--max-line-length=79`; Black and
+  Flake8 stay clean (`line-length = 79`).
+- Module docstring on every `.py` file, and a docstring on every class,
+  function, and method.
+- Every function/method docstring has a `Parameters` section and a `Returns`
+  section (write `None` when nothing is returned), in NumPy style.
 - Function bodies are **≤ 8 executable lines** and contain **no blank lines**.
+- No en dash (U+2013) or em dash (U+2014) anywhere; use the hyphen-minus.
+- Imports are grouped standard library, third party, local, one name per line.
 - Break longer bodies into private helpers.
 
 ## Verifying a change
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]" flake8
-black meta_harness tests
-black --check meta_harness tests
-flake8 meta_harness tests
-python -m compileall -q meta_harness tests
+pip install -e ".[dev]" flake8 pycodestyle
+black meta_harness tests gui benchmarks scripts setup_app.py
+black --check meta_harness tests gui benchmarks scripts setup_app.py
+flake8 meta_harness tests gui benchmarks scripts setup_app.py
+python .opencode/skill/embedded-python-standard/audit_python_standard.py
+python -m compileall -q meta_harness tests gui scripts
 python -m unittest discover -s tests -v
 ```
+
+The audit must exit 0. Any output from it is a failure to fix.
 
 All of the above must pass before opening a PR.
 
@@ -79,7 +87,7 @@ home-directory share requires the workspace to live under the home directory.
 
 ## PR checklist
 
-- [ ] Style rules satisfied (Black, Flake8, 8-line, no-blank).
+- [ ] Style rules satisfied (Black, Flake8, pycodestyle 79, audit clean).
 - [ ] `python -m unittest discover -s tests -v` passes.
 - [ ] Every new function, module, command, or behavior has an offline unit test.
 - [ ] No held-out data leaks into a search-time stage.

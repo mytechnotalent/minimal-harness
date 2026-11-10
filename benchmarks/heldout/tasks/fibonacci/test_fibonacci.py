@@ -9,15 +9,42 @@ class FibonacciTests(unittest.TestCase):
     """Verify fibonacci(n) held-out cases."""
 
     def test_two(self) -> None:
-        """Verify the two case."""
+        """Verify the two case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(fibonacci(2), 1)
 
     def test_seven(self) -> None:
-        """Verify the seven case."""
+        """Verify the seven case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(fibonacci(7), 13)
 
     def test_fifteen(self) -> None:
-        """Verify the fifteen case."""
+        """Verify the fifteen case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(fibonacci(15), 610)
 
 

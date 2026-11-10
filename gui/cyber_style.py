@@ -1,5 +1,6 @@
 """Dark neon cyber theme for the Minimal Harness desktop shell."""
 
+from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication
 
 BG = "#04070a"
@@ -203,13 +204,15 @@ def apply_palette(app: QApplication) -> None:
 def _font_stack() -> str:
     """Return the first installed preferred monospace family.
 
+    Parameters
+    ----------
+    None
+
     Returns
     -------
     str
         Quoted font family name, or the generic fallback.
     """
-    from PySide6.QtGui import QFontDatabase
-
     installed = set(QFontDatabase.families())
     found = next((n for n in FONT_PREFERENCES if n in installed), None)
     return f'"{found}"' if found else FALLBACK_FONT

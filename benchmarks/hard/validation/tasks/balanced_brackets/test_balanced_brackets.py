@@ -9,19 +9,55 @@ class BalancedBracketsTests(unittest.TestCase):
     """Verify the benchmark cases."""
 
     def test_empty(self) -> None:
-        """Verify the empty case."""
+        """Verify the empty case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertTrue(balanced_brackets(""))
 
     def test_open(self) -> None:
-        """Verify the open case."""
+        """Verify the open case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertFalse(balanced_brackets("("))
 
     def test_text(self) -> None:
-        """Verify the text case."""
+        """Verify the text case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertTrue(balanced_brackets("a(b)c"))
 
     def test_all(self) -> None:
-        """Verify the all case."""
+        """Verify the all case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertTrue(balanced_brackets("{[()]}"))
 
 

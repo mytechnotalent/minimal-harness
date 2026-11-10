@@ -9,15 +9,42 @@ class ReverseTests(unittest.TestCase):
     """Verify reverse(s) reverses a string."""
 
     def test_hello(self) -> None:
-        """reverse('hello') is 'olleh'."""
+        """reverse('hello') is 'olleh'.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(reverse("hello"), "olleh")
 
     def test_empty(self) -> None:
-        """reverse('') is ''."""
+        """reverse('') is ''.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(reverse(""), "")
 
     def test_palindrome(self) -> None:
-        """reverse('abba') is 'abba'."""
+        """reverse('abba') is 'abba'.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(reverse("abba"), "abba")
 
 

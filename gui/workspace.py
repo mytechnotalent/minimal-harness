@@ -26,6 +26,10 @@ def workspace_root(settings) -> Path:
 def default_root() -> Path:
     """Return the default project workspace directory.
 
+    Parameters
+    ----------
+    None
+
     Returns
     -------
     pathlib.Path

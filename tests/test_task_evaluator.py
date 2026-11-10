@@ -3,7 +3,8 @@
 import unittest
 from pathlib import Path
 
-from meta_harness.task_evaluator import load_manifest, score_candidate
+from meta_harness.task_evaluator import load_manifest
+from meta_harness.task_evaluator import score_candidate
 
 STARTER = Path(__file__).parent.parent / "benchmarks" / "starter"
 VALIDATION = Path(__file__).parent.parent / "benchmarks" / "validation"
@@ -17,6 +18,10 @@ class TaskEvaluatorTests(unittest.TestCase):
     def test_reference_solution_scores_full(self) -> None:
         """The reference solution passes every starter task.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -29,6 +34,10 @@ class TaskEvaluatorTests(unittest.TestCase):
     def test_broken_solution_scores_zero(self) -> None:
         """The broken solution fails every starter task.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -39,19 +48,46 @@ class TaskEvaluatorTests(unittest.TestCase):
         self.assertFalse(any(item.passed for item in results))
 
     def test_validation_reference_solution_scores_full(self) -> None:
-        """The reference solution passes every validation task."""
+        """The reference solution passes every validation task.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         rate, results = self._score_reference(VALIDATION)
         self.assertEqual(rate, 1.0)
         self.assertTrue(all(item.passed for item in results))
 
     def test_heldout_reference_solution_scores_full(self) -> None:
-        """The reference solution passes every held-out task."""
+        """The reference solution passes every held-out task.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         rate, results = self._score_reference(HELDOUT)
         self.assertEqual(rate, 1.0)
         self.assertTrue(all(item.passed for item in results))
 
     def test_hard_reference_solution_scores_full(self) -> None:
-        """The hard reference solution passes every hard split."""
+        """The hard reference solution passes every hard split.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         code = (HARD / "reference_solution.py").read_text(encoding="utf-8")
         for split in ("search", "validation", "heldout"):
             manifest = load_manifest(HARD / split / "manifest.json")
@@ -59,7 +95,16 @@ class TaskEvaluatorTests(unittest.TestCase):
             self.assertEqual(rate, 1.0)
 
     def test_heldout_missing_functions_score_zero(self) -> None:
-        """A solution without held-out functions fails."""
+        """A solution without held-out functions fails.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         code = "def unused():\n    return 0\n"
         manifest = load_manifest(HELDOUT / "manifest.json")
         rate, _ = score_candidate(code, HELDOUT, manifest, timeout=10)

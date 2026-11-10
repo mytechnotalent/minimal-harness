@@ -6,29 +6,33 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import (
-    QColor,
-    QIcon,
-    QPainter,
-    QPen,
-    QPixmap,
-    QRadialGradient,
-)
-from PySide6.QtWidgets import (
-    QMainWindow,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtCore import QPointF
+from PySide6.QtCore import QRectF
+from PySide6.QtCore import QThread
+from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt
+from PySide6.QtCore import Signal
+from PySide6.QtGui import QColor
+from PySide6.QtGui import QIcon
+from PySide6.QtGui import QPainter
+from PySide6.QtGui import QPen
+from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QRadialGradient
+from PySide6.QtWidgets import QMainWindow
+from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QVBoxLayout
+from PySide6.QtWidgets import QWidget
 
 from meta_harness.agent import Agent
 from meta_harness.session import Session
-from meta_harness.voice import VoiceEngine, missing_dependencies
-from meta_harness.voice_text import match_option, speech_text
+from meta_harness.voice import VoiceEngine
+from meta_harness.voice import missing_dependencies
+from meta_harness.voice_text import match_option
+from meta_harness.voice_text import speech_text
 
 from .store import SessionStore
-from .worker import AgentWorker, QuestionBridge
+from .worker import AgentWorker
+from .worker import QuestionBridge
 
 _STATE_COLORS = {
     "idle": QColor(255, 40, 40),
@@ -73,16 +77,58 @@ def hal_icon(size: int = 256) -> QIcon:
     QIcon
         Rendered eye icon.
     """
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.transparent)
+    pixmap = _icon_pixmap(size)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
     center = QPointF(size / 2, size / 2)
     base = _STATE_COLORS["idle"]
-    _icon_glow(painter, center, size, base)
-    _icon_iris(painter, center, size, base)
+    _icon_eye(painter, center, size, base)
     painter.end()
     return QIcon(pixmap)
+
+
+def _icon_pixmap(size: int) -> QPixmap:
+    """Create a transparent square pixmap.
+
+    Parameters
+    ----------
+    size : int
+        Square side length in pixels.
+
+    Returns
+    -------
+    QPixmap
+        Transparent pixmap.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    return pixmap
+
+
+def _icon_eye(painter, center, size, base) -> None:
+    """Paint the icon halo and iris.
+
+    Parameters
+    ----------
+    painter : QPainter
+        Active painter.
+
+    center : QPointF
+        Eye center.
+
+    size : float
+        Icon size.
+
+    base : QColor
+        State color.
+
+    Returns
+    -------
+    None
+        The eye is painted.
+    """
+    _icon_glow(painter, center, size, base)
+    _icon_iris(painter, center, size, base)
 
 
 def _log_error(message: str) -> None:
@@ -277,6 +323,10 @@ class HalEye(QWidget):
     def _tick(self) -> None:
         """Advance the pulse animation.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -330,14 +380,7 @@ class HalEye(QWidget):
         """
         pulse = 1.0 + 0.05 * math.sin(self._phase)
         radius = size * 0.42 * pulse
-        gradient = QRadialGradient(center, radius)
-        glow = QColor(base)
-        glow.setAlpha(90)
-        gradient.setColorAt(0.0, glow)
-        fade = QColor(base)
-        fade.setAlpha(0)
-        gradient.setColorAt(1.0, fade)
-        painter.setBrush(gradient)
+        painter.setBrush(_glow_gradient(center, radius, base))
         painter.setPen(Qt.NoPen)
         painter.drawEllipse(center, radius, radius)
 
@@ -363,11 +406,7 @@ class HalEye(QWidget):
             The lens is painted.
         """
         radius = size * 0.22
-        gradient = QRadialGradient(center, radius)
-        gradient.setColorAt(0.0, QColor(base).lighter(150))
-        gradient.setColorAt(0.55, QColor(base))
-        gradient.setColorAt(1.0, QColor(base).darker(240))
-        painter.setBrush(gradient)
+        painter.setBrush(_iris_gradient(center, radius, base))
         painter.setPen(QPen(QColor(40, 0, 0), max(size * 0.008, 1.0)))
         painter.drawEllipse(center, radius, radius)
         self._paint_pupil(painter, center, radius)
@@ -437,9 +476,7 @@ class HalButton(QPushButton):
         super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        color = QColor(255, 60, 60)
-        if not self.isEnabled():
-            color = QColor(92, 34, 34)
+        color = QColor(255, 60, 60) if self.isEnabled() else QColor(92, 34, 34)
         painter.setPen(QPen(color, 5, Qt.SolidLine, Qt.RoundCap))
         center = QPointF(self.width() / 2, self.height() / 2)
         self._paint_mic(painter, center)
@@ -464,14 +501,7 @@ class HalButton(QPushButton):
         painter.drawRoundedRect(capsule, 9, 9)
         arc = QRectF(center.x() - 20, center.y() - 12, 40, 36)
         painter.drawArc(arc, 180 * 16, 180 * 16)
-        painter.drawLine(
-            QPointF(center.x(), center.y() + 24),
-            QPointF(center.x(), center.y() + 34),
-        )
-        painter.drawLine(
-            QPointF(center.x() - 11, center.y() + 34),
-            QPointF(center.x() + 11, center.y() + 34),
-        )
+        _paint_stem(painter, center)
 
 
 class HalWindow(QMainWindow):
@@ -502,13 +532,22 @@ class HalWindow(QMainWindow):
         self._settings = settings
         self._pending: QuestionBridge | None = None
         self._busy = False
-        self._voice_missing = missing_dependencies()
-        self._voice = None if self._voice_missing else VoiceEngine()
-        self._agent = Agent(
-            root=root, session=Session(Path("runs/hal-session.jsonl"))
-        )
-        self._agent.tools.require_project_folder = True
-        self._agent.trim_context(8)
+        self._voice = _voice_engine()
+        self._start_components()
+
+    def _start_components(self) -> None:
+        """Build the agent, worker thread, and window layout.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Components start running.
+        """
+        self._agent = _hal_agent(self._root)
         self._worker = AgentWorker(self._agent)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
@@ -518,6 +557,10 @@ class HalWindow(QMainWindow):
 
     def _connect_worker(self) -> None:
         """Connect worker signals to HAL handlers.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -533,23 +576,36 @@ class HalWindow(QMainWindow):
     def _build_ui(self) -> None:
         """Compose only the eye and the talk button.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
             Widgets are arranged in place.
         """
-        central = QWidget(self)
-        central.setObjectName("HalRoot")
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(40, 40, 40, 48)
-        layout.setSpacing(20)
+        central = _hal_central(self)
         self._eye = HalEye(central)
         self._button = HalButton(central)
         self._button.pressed.connect(self._start_talk)
         self._button.released.connect(self._stop_talk)
-        layout.addWidget(self._eye, 1)
-        layout.addWidget(self._button, 0, Qt.AlignHCenter)
+        _hal_layout(central, self._eye, self._button)
         self.setCentralWidget(central)
+        self._style_window()
+
+    def _style_window(self) -> None:
+        """Apply the HAL stylesheet, icon, and fixed size.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Window chrome is configured.
+        """
         self.setStyleSheet(HAL_STYLE)
         self.setWindowTitle("Minimal Harness")
         self.setWindowIcon(hal_icon())
@@ -558,6 +614,10 @@ class HalWindow(QMainWindow):
 
     def _voice_setup(self) -> None:
         """Disable the button when voice dependencies are missing.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -573,6 +633,10 @@ class HalWindow(QMainWindow):
     def _start_talk(self) -> None:
         """Begin push-to-talk capture.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -580,17 +644,37 @@ class HalWindow(QMainWindow):
         """
         if self._voice is None or self._busy:
             return
+        if not self._begin_recording():
+            return
+        self._set_state("listening")
+
+    def _begin_recording(self) -> bool:
+        """Start recording, reporting any failure.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        bool
+            True when recording started.
+        """
         try:
             self._voice.stop_speaking()
             self._voice.start_recording()
         except Exception as exc:
             _log_error(f"recording: {exc}")
             self._set_state("error")
-            return
-        self._set_state("listening")
+            return False
+        return True
 
     def _stop_talk(self) -> None:
         """Stop capture and transcribe in the background.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -604,6 +688,10 @@ class HalWindow(QMainWindow):
 
     def _hear(self) -> None:
         """Transcribe the captured audio and emit it.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -640,6 +728,10 @@ class HalWindow(QMainWindow):
 
     def _handle_empty_heard(self) -> None:
         """Release a pending question when speech was not recognized.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -688,6 +780,10 @@ class HalWindow(QMainWindow):
 
     def _on_started(self) -> None:
         """Reflect a running turn.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -739,6 +835,10 @@ class HalWindow(QMainWindow):
 
     def _idle_after_speech(self) -> None:
         """Return to idle after a short speaking period.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -847,6 +947,10 @@ class HalWindow(QMainWindow):
     def stop(self) -> None:
         """Release the worker, pending question, and speech.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -860,6 +964,10 @@ class HalWindow(QMainWindow):
 
     def _resolve_pending(self) -> None:
         """Answer any pending question with no answer.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -887,3 +995,181 @@ class HalWindow(QMainWindow):
         """
         self.stop()
         event.accept()
+
+
+def _glow_gradient(center, radius, base):
+    """Build the radial halo gradient.
+
+    Parameters
+    ----------
+    center : QPointF
+        Eye center.
+
+    radius : float
+        Halo radius.
+
+    base : QColor
+        State color.
+
+    Returns
+    -------
+    QRadialGradient
+        Gradient fading from the state color to transparent.
+    """
+    gradient = QRadialGradient(center, radius)
+    gradient.setColorAt(0.0, _alpha_color(base, 90))
+    gradient.setColorAt(1.0, _alpha_color(base, 0))
+    return gradient
+
+
+def _alpha_color(base, alpha):
+    """Return a copy of a color with a new alpha value.
+
+    Parameters
+    ----------
+    base : QColor
+        Source color.
+
+    alpha : int
+        Alpha channel value.
+
+    Returns
+    -------
+    QColor
+        Color copy with the requested alpha.
+    """
+    color = QColor(base)
+    color.setAlpha(alpha)
+    return color
+
+
+def _iris_gradient(center, radius, base):
+    """Build the radial iris gradient.
+
+    Parameters
+    ----------
+    center : QPointF
+        Eye center.
+
+    radius : float
+        Iris radius.
+
+    base : QColor
+        State color.
+
+    Returns
+    -------
+    QRadialGradient
+        Gradient from the lightened color to the darkened color.
+    """
+    gradient = QRadialGradient(center, radius)
+    gradient.setColorAt(0.0, QColor(base).lighter(150))
+    gradient.setColorAt(0.55, QColor(base))
+    gradient.setColorAt(1.0, QColor(base).darker(240))
+    return gradient
+
+
+def _paint_stem(painter, center) -> None:
+    """Paint the microphone stand.
+
+    Parameters
+    ----------
+    painter : QPainter
+        Active painter.
+
+    center : QPointF
+        Button center.
+
+    Returns
+    -------
+    None
+        The stand is painted.
+    """
+    painter.drawLine(
+        QPointF(center.x(), center.y() + 24),
+        QPointF(center.x(), center.y() + 34),
+    )
+    painter.drawLine(
+        QPointF(center.x() - 11, center.y() + 34),
+        QPointF(center.x() + 11, center.y() + 34),
+    )
+
+
+def _voice_engine():
+    """Create a voice engine when dependencies are available.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    VoiceEngine or None
+        Engine instance, or None when voice is unavailable.
+    """
+    if missing_dependencies():
+        return None
+    return VoiceEngine()
+
+
+def _hal_agent(root: Path) -> Agent:
+    """Build the HAL agent with the fixed session file.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Project workspace root.
+
+    Returns
+    -------
+    Agent
+        Configured interactive agent.
+    """
+    agent = Agent(root=root, session=Session(Path("runs/hal-session.jsonl")))
+    agent.tools.require_project_folder = True
+    agent.trim_context(8)
+    return agent
+
+
+def _hal_central(parent) -> QWidget:
+    """Create the HAL central widget.
+
+    Parameters
+    ----------
+    parent : QMainWindow
+        Owning window.
+
+    Returns
+    -------
+    QWidget
+        Central widget named ``HalRoot``.
+    """
+    central = QWidget(parent)
+    central.setObjectName("HalRoot")
+    return central
+
+
+def _hal_layout(central, eye, button) -> None:
+    """Arrange the eye and talk button in the central widget.
+
+    Parameters
+    ----------
+    central : QWidget
+        Central widget.
+
+    eye : HalEye
+        Eye widget.
+
+    button : HalButton
+        Talk button.
+
+    Returns
+    -------
+    None
+        The layout is installed.
+    """
+    layout = QVBoxLayout(central)
+    layout.setContentsMargins(40, 40, 40, 48)
+    layout.setSpacing(20)
+    layout.addWidget(eye, 1)
+    layout.addWidget(button, 0, Qt.AlignHCenter)

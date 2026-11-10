@@ -3,7 +3,8 @@
 import threading
 from typing import Any
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject
+from PySide6.QtCore import Signal
 
 
 class QuestionBridge:
@@ -94,6 +95,21 @@ class AgentWorker(QObject):
         self._agent.tools.questioner = self._ask
         self.prompt_started.emit(prompt)
         self.started.emit()
+        self._deliver(prompt)
+
+    def _deliver(self, prompt: str) -> None:
+        """Run the agent and emit the reply or error.
+
+        Parameters
+        ----------
+        prompt : str
+            User message delivered to the agent.
+
+        Returns
+        -------
+        None
+            Output is broadcast through signals.
+        """
         try:
             answer = self._agent.run(prompt)
         except Exception as exc:

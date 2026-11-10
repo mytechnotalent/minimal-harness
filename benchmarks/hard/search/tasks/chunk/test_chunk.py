@@ -9,11 +9,29 @@ class ChunkTests(unittest.TestCase):
     """Verify the benchmark cases."""
 
     def test_two(self) -> None:
-        """Verify the two case."""
+        """Verify the two case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(chunk([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]])
 
     def test_large(self) -> None:
-        """Verify the large case."""
+        """Verify the large case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(chunk([1, 2], 5), [[1, 2]])
 
 

@@ -9,19 +9,55 @@ class WordWrapTests(unittest.TestCase):
     """Verify the benchmark cases."""
 
     def test_empty(self) -> None:
-        """Verify the empty case."""
+        """Verify the empty case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(word_wrap("", 5), [])
 
     def test_one(self) -> None:
-        """Verify the one case."""
+        """Verify the one case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(word_wrap("a b c", 1), ["a", "b", "c"])
 
     def test_long_word(self) -> None:
-        """Verify the long_word case."""
+        """Verify the long_word case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(word_wrap("abcdef", 3), ["abcdef"])
 
     def test_hello(self) -> None:
-        """Verify the hello case."""
+        """Verify the hello case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(word_wrap("hello world", 5), ["hello", "world"])
 
 

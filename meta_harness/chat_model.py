@@ -1,6 +1,7 @@
 """Structural typing protocol for chat-completion clients."""
 
-from typing import Protocol, runtime_checkable
+from typing import Protocol
+from typing import runtime_checkable
 
 
 @runtime_checkable
@@ -49,6 +50,10 @@ class ChatModel(Protocol):
 
     def usage_summary(self) -> str:
         """Return a one-line summary of accumulated usage.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------

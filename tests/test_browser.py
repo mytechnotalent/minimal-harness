@@ -11,6 +11,10 @@ class LaunchHintTests(unittest.TestCase):
     def test_missing_executable_mentions_install_command(self) -> None:
         """A missing browser tells the user how to install it.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -21,6 +25,10 @@ class LaunchHintTests(unittest.TestCase):
 
     def test_other_failures_keep_the_original_message(self) -> None:
         """Unrelated launch failures keep their original detail.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------

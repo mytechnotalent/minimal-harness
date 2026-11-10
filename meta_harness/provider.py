@@ -11,6 +11,10 @@ class ProviderCatalog:
     def list_models(self) -> list[dict[str, Any]]:
         """Return available OpenRouter models.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         list[dict[str, Any]]
@@ -27,6 +31,10 @@ class ProviderCatalog:
 
     def free_models(self) -> list[dict[str, Any]]:
         """Return models with zero prompt and completion pricing.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------

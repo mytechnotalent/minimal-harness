@@ -9,15 +9,42 @@ class DoubleTests(unittest.TestCase):
     """Verify double(x) returns twice its input."""
 
     def test_two(self) -> None:
-        """double(2) is 4."""
+        """double(2) is 4.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(double(2), 4)
 
     def test_zero(self) -> None:
-        """double(0) is 0."""
+        """double(0) is 0.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(double(0), 0)
 
     def test_negative(self) -> None:
-        """double(-3) is -6."""
+        """double(-3) is -6.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(double(-3), -6)
 
 

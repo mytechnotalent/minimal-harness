@@ -61,6 +61,10 @@ class DockerGate:
     def _available(self) -> bool:
         """Check whether Docker is reachable.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         bool
@@ -123,6 +127,10 @@ class DockerGate:
 
     def _limits(self) -> list[str]:
         """Return Docker isolation flags.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -190,21 +198,9 @@ class LocalGate:
             Gate status, score, output, and an isolation marker.
         """
         try:
-            result = subprocess.run(
-                command,
-                cwd=candidate_dir,
-                capture_output=True,
-                text=True,
-                timeout=180,
-                shell=True,
-            )
+            result = _run_command(candidate_dir, command)
         except Exception as exc:
-            return {
-                "passed": False,
-                "score": 0.0,
-                "error": str(exc),
-                "isolated": False,
-            }
+            return _error_result(str(exc))
         return self._result(result)
 
     def _result(
@@ -223,14 +219,84 @@ class LocalGate:
             Normalized pass/fail result marked as non-isolated.
         """
         passed = result.returncode == 0
-        return {
-            "passed": passed,
-            "score": float(passed),
-            "returncode": result.returncode,
-            "stdout": result.stdout[-10000:],
-            "stderr": result.stderr[-10000:],
-            "isolated": False,
-        }
+        return _local_result(passed, result)
+
+
+def _run_command(
+    candidate_dir: Path, command: str
+) -> subprocess.CompletedProcess[str]:
+    """Run a shell command in the candidate directory.
+
+    Parameters
+    ----------
+    candidate_dir : pathlib.Path
+        Directory to run the command in.
+
+    command : str
+        Shell command to execute.
+
+    Returns
+    -------
+    subprocess.CompletedProcess
+        Completed host process.
+    """
+    return subprocess.run(
+        command,
+        cwd=candidate_dir,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        shell=True,
+    )
+
+
+def _error_result(message: str) -> dict[str, Any]:
+    """Build a fail-closed gate result for a host error.
+
+    Parameters
+    ----------
+    message : str
+        Error text.
+
+    Returns
+    -------
+    dict[str, Any]
+        Failed gate result marked as non-isolated.
+    """
+    return {
+        "passed": False,
+        "score": 0.0,
+        "error": message,
+        "isolated": False,
+    }
+
+
+def _local_result(
+    passed: bool, result: subprocess.CompletedProcess[str]
+) -> dict[str, Any]:
+    """Build a non-isolated gate result.
+
+    Parameters
+    ----------
+    passed : bool
+        Whether the command succeeded.
+
+    result : subprocess.CompletedProcess[str]
+        Completed host process.
+
+    Returns
+    -------
+    dict[str, Any]
+        Normalized result marked as non-isolated.
+    """
+    return {
+        "passed": passed,
+        "score": float(passed),
+        "returncode": result.returncode,
+        "stdout": result.stdout[-10000:],
+        "stderr": result.stderr[-10000:],
+        "isolated": False,
+    }
 
 
 def load_gate_result(path: Path) -> dict[str, Any]:

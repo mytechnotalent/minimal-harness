@@ -9,15 +9,42 @@ class GcdTests(unittest.TestCase):
     """Verify gcd(a, b) validation cases."""
 
     def test_coprime(self) -> None:
-        """Verify the coprime case."""
+        """Verify the coprime case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(gcd(7, 13), 1)
 
     def test_common(self) -> None:
-        """Verify the common case."""
+        """Verify the common case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(gcd(100, 75), 25)
 
     def test_zero(self) -> None:
-        """Verify the zero case."""
+        """Verify the zero case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(gcd(0, 5), 5)
 
 

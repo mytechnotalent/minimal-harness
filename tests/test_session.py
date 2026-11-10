@@ -13,6 +13,10 @@ class SessionTests(unittest.TestCase):
     def test_session_round_trips_messages(self) -> None:
         """Persist messages and reload them in a new session.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None

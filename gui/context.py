@@ -42,15 +42,33 @@ def _git(args: str, root: Path) -> str:
         Trimmed command output or blank.
     """
     try:
-        result = subprocess.run(
-            ["git", "-C", str(root)] + args.split(),
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return result.stdout.strip()
+        return _run_git(args, root).stdout.strip()
     except (subprocess.SubprocessError, FileNotFoundError):
         return ""
+
+
+def _run_git(args: str, root: Path):
+    """Run one git command in the workspace.
+
+    Parameters
+    ----------
+    args : str
+        Git arguments.
+
+    root : pathlib.Path
+        Workspace directory.
+
+    Returns
+    -------
+    subprocess.CompletedProcess
+        Completed process with captured text output.
+    """
+    return subprocess.run(
+        ["git", "-C", str(root)] + args.split(),
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
 
 
 def _tree(root: Path) -> str:

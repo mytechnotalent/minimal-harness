@@ -9,15 +9,42 @@ class ReverseTests(unittest.TestCase):
     """Verify reverse(s) validation cases."""
 
     def test_five(self) -> None:
-        """Verify the five case."""
+        """Verify the five case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(reverse("abcde"), "edcba")
 
     def test_double(self) -> None:
-        """Verify the double case."""
+        """Verify the double case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(reverse("aa"), "aa")
 
     def test_digit(self) -> None:
-        """Verify the digit case."""
+        """Verify the digit case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(reverse("1"), "1")
 
 

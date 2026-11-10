@@ -1,46 +1,31 @@
 ---
 name: minimal-harness-python-formatting
-description: "Strict formatting, structural, and documentation rules for the minimal-harness Python scripts, including PEP8 compliance, 8-line function limits, and no blank lines within functions. Trigger when writing or refactoring Python code in this repository."
+description: "Strict formatting, structural, and documentation rules for the minimal-harness Python scripts, including pycodestyle at 79 columns, 8-line function limits, no blank lines within functions, and a ban on en/em dashes. Trigger when writing or refactoring Python code in this repository."
 ---
 
 # Minimal Harness Python Scripting Rules
 
-When writing, modifying, or refactoring Python code (`.py` files) in this repository, you MUST strictly adhere to the following rules:
+The authoritative skill is
+`.opencode/skill/embedded-python-standard/SKILL.md`. This file mirrors its
+rules for tooling that only scans `.github/`.
 
-## 1. PEP8 Compliance
+## Rules
 
-- All Python code MUST strictly adhere to PEP8 formatting guidelines (e.g., 4-space indentation, appropriate naming conventions).
-- Run `flake8` or equivalent on the script to verify.
+1. Full PEP 8, enforced by `pycodestyle` at `--max-line-length=79`. Four-space
+   indent, no tabs, no trailing whitespace, two blank lines between top-level
+   definitions.
+2. No function or method longer than 8 executable lines. The docstring does not
+   count toward the limit. Split the work into a helper.
+3. No blank lines inside a function body.
+4. Every module, class, function, and method has a docstring. Function and
+   method docstrings contain a `Parameters` section and a `Returns` section
+   (write `None` when nothing is returned), in NumPy style.
+5. No U+2013 (en dash) or U+2014 (em dash) anywhere. Use the hyphen-minus `-`.
+6. Imports are grouped standard library, third party, local, with one import
+   per line.
 
-## 2. Maximum Function Length (8-Line Rule)
+## Verify
 
-- All functions MUST be no longer than 8 lines of code (excluding the `def` signature, docstrings, and decorator lines).
-- If a function body exceeds 8 lines, you MUST refactor it by breaking it down into smaller helper functions.
-- **Exception**: Cryptographic functions (e.g., encryption loops, hashing algorithms) are exempt from this rule to maintain algorithmic clarity and correctness.
-
-## 3. No Blank Lines Within Functions
-
-- There MUST be absolutely NO blank lines inside any function body.
-- You may use blank lines *between* functions or classes (following PEP8), but never inside the execution block of a function.
-
-## 4. Documentation
-
-- Every file must have a module-level docstring.
-- EVERY function must have a complete docstring following the exact NumPy style, explaining its purpose, parameters, and return value.
-- You must use this EXACT format:
-
-```python
-    """
-    Generate OBC bytecode for setting the system state.
-
-    Parameters
-    ----------
-    state : int
-        State ID.
-
-    Returns
-    -------
-    bytes
-        Bytecode sequence.
-    """
+```bash
+python3 .opencode/skill/embedded-python-standard/audit_python_standard.py
 ```

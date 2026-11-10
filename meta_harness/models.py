@@ -1,6 +1,7 @@
 """Data models used by the adversarial harness search."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
 from typing import Any
 
 

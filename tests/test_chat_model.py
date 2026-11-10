@@ -20,11 +20,38 @@ class MinimalModel:
     def complete(
         self, system: str, user: str, temperature: float = 0.2
     ) -> str:
-        """Return an empty completion."""
+        """Return an empty completion.
+
+        Parameters
+        ----------
+        system : str
+            System instruction.
+
+        user : str
+            User payload.
+
+        temperature : float
+            Sampling temperature.
+
+        Returns
+        -------
+        str
+            Empty completion content.
+        """
         return ""
 
     def usage_summary(self) -> str:
-        """Return an empty usage summary."""
+        """Return an empty usage summary.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        str
+            Usage line with zero counters.
+        """
         return "calls=0 prompt_tokens=0 completion_tokens=0"
 
 
@@ -32,15 +59,42 @@ class ChatModelProtocolTests(unittest.TestCase):
     """Verify ChatModel structural typing."""
 
     def test_openrouter_client_satisfies_protocol(self) -> None:
-        """OpenRouterClient is structurally a ChatModel."""
+        """OpenRouterClient is structurally a ChatModel.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertIsInstance(OpenRouterClient(), ChatModel)
 
     def test_minimal_model_satisfies_protocol(self) -> None:
-        """A minimal shape-compatible object is a ChatModel."""
+        """A minimal shape-compatible object is a ChatModel.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertIsInstance(MinimalModel(), ChatModel)
 
     def test_bare_object_does_not_satisfy_protocol(self) -> None:
-        """An unrelated object is not a ChatModel."""
+        """An unrelated object is not a ChatModel.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertNotIsInstance(NotAModel(), ChatModel)
 
 

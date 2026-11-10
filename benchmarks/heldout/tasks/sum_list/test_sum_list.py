@@ -9,15 +9,42 @@ class SumListTests(unittest.TestCase):
     """Verify sum_list(xs) held-out cases."""
 
     def test_single(self) -> None:
-        """Verify the single case."""
+        """Verify the single case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(sum_list([5]), 5)
 
     def test_cancel(self) -> None:
-        """Verify the cancel case."""
+        """Verify the cancel case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(sum_list([10, -10]), 0)
 
     def test_four(self) -> None:
-        """Verify the four case."""
+        """Verify the four case.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(sum_list([1, 2, 3, 4]), 10)
 
 

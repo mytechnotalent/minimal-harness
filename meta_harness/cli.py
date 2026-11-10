@@ -8,7 +8,8 @@ from .agent import Agent
 from .env import load_env
 from .inspector import print_run
 from .models import SearchConfig
-from .openrouter import OpenRouterClient, OpenRouterError
+from .openrouter import OpenRouterClient
+from .openrouter import OpenRouterError
 from .pipeline import SearchPipeline
 from .progress import ProgressTUI
 from .provider import ProviderCatalog
@@ -50,6 +51,10 @@ OPTION_SPECS = [
 def main() -> None:
     """Parse arguments and dispatch the requested mode.
 
+    Parameters
+    ----------
+    None
+
     Returns
     -------
     None
@@ -61,6 +66,10 @@ def main() -> None:
 
 def _parse_args() -> Arguments:
     """Parse command-line arguments.
+
+    Parameters
+    ----------
+    None
 
     Returns
     -------
@@ -108,6 +117,22 @@ def _dispatch(args: Arguments) -> None:
         return
     if args.show_run:
         sys.exit(print_run(Path(args.show_run)))
+    _run_mode_safely(args)
+
+
+def _run_mode_safely(args: Arguments) -> None:
+    """Run the selected mode and report provider errors.
+
+    Parameters
+    ----------
+    args : Arguments
+        Parsed command-line options.
+
+    Returns
+    -------
+    None
+        The selected mode runs, or the process exits on error.
+    """
     try:
         _run_mode(args)
     except OpenRouterError as exc:
@@ -156,6 +181,10 @@ def _run_optimize(args: Arguments) -> None:
 
 def _use_progress() -> bool:
     """Return whether the interactive progress dashboard should run.
+
+    Parameters
+    ----------
+    None
 
     Returns
     -------
@@ -414,6 +443,10 @@ def _print_repl_suggestions(agent: Agent) -> None:
 def _load_env() -> None:
     """Load local environment assignments.
 
+    Parameters
+    ----------
+    None
+
     Returns
     -------
     None
@@ -435,21 +468,74 @@ def _config(args: Arguments) -> SearchConfig:
     SearchConfig
         Configured optimization settings.
     """
-    return SearchConfig(
-        iterations=args.iterations,
-        proposers_per_iteration=args.proposers,
-        target_score=args.target_score,
-        gate_threshold=args.gate_threshold,
-        use_docker=not args.no_docker,
-        use_web_search=not args.no_web,
-        task_manifest=args.task_manifest,
-        gate_command=args.gate_command,
-        final_gate_command=args.final_gate_command,
-        final_task_manifest=args.final_task_manifest,
-        held_out_manifest=args.held_out_manifest,
-        allow_local_gate=args.local_gate,
-        baseline=args.baseline,
-    )
+    fields = _core_fields(args)
+    fields.update(_manifest_fields(args))
+    fields.update(_flag_fields(args))
+    return SearchConfig(**fields)
+
+
+def _core_fields(args: Arguments) -> dict:
+    """Build the core optimization settings.
+
+    Parameters
+    ----------
+    args : Arguments
+        Parsed command-line options.
+
+    Returns
+    -------
+    dict
+        Iteration, score, and threshold settings.
+    """
+    return {
+        "iterations": args.iterations,
+        "proposers_per_iteration": args.proposers,
+        "target_score": args.target_score,
+        "gate_threshold": args.gate_threshold,
+    }
+
+
+def _manifest_fields(args: Arguments) -> dict:
+    """Build the manifest and gate settings.
+
+    Parameters
+    ----------
+    args : Arguments
+        Parsed command-line options.
+
+    Returns
+    -------
+    dict
+        Manifest and gate command settings.
+    """
+    return {
+        "task_manifest": args.task_manifest,
+        "gate_command": args.gate_command,
+        "final_gate_command": args.final_gate_command,
+        "final_task_manifest": args.final_task_manifest,
+        "held_out_manifest": args.held_out_manifest,
+    }
+
+
+def _flag_fields(args: Arguments) -> dict:
+    """Build the boolean mode settings.
+
+    Parameters
+    ----------
+    args : Arguments
+        Parsed command-line options.
+
+    Returns
+    -------
+    dict
+        Boolean optimization settings.
+    """
+    return {
+        "use_docker": not args.no_docker,
+        "use_web_search": not args.no_web,
+        "allow_local_gate": args.local_gate,
+        "baseline": args.baseline,
+    }
 
 
 def _print_result(result) -> None:

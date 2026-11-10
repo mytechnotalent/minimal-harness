@@ -27,7 +27,7 @@ Then install the extras for what you want to run:
 | CLI, answer mode, and optimizer | `pip install -e .` | No runtime dependencies (standard library only) |
 | Web search and browser tools | `pip install -e ".[browser]"` then `playwright install chromium` | Playwright and headless Chromium |
 | Desktop app (classic, HAL, cyber) | `pip install -e ".[voice,browser]"` then `playwright install chromium` | PySide6, voice input, TTS, and browser tools |
-| Development and tests | `pip install -e ".[dev]" flake8` | Black, Playwright, and py2app on macOS |
+| Development and tests | `pip install -e ".[dev]" flake8 pycodestyle` | Black, Playwright, and py2app on macOS |
 
 Activate the virtual environment in every new terminal before running any
 command:
@@ -559,10 +559,11 @@ These controls reduce risk but are not a complete hostile-code sandbox. Producti
 cd minimal-harness
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e ".[dev]" flake8
+python -m pip install -e ".[dev]" flake8 pycodestyle
 black meta_harness tests gui benchmarks scripts setup_app.py
 black --check meta_harness tests gui benchmarks scripts setup_app.py
 flake8 meta_harness tests gui benchmarks scripts setup_app.py
+python .opencode/skill/embedded-python-standard/audit_python_standard.py
 python -m compileall -q meta_harness tests gui scripts
 python -m unittest discover -s tests -v
 ```
@@ -575,7 +576,7 @@ sequencing, OpenRouter timeout behavior, iteration cycling, fail-closed gates,
 held-out scoring, local gates, local model configuration, and project-folder
 enforcement. CI runs the suite on Ubuntu, Windows, and macOS for Python 3.11–3.13 (`.github/workflows/tests.yml`).
 
-Python files follow `.github/skills/minimal-harness-python-formatting/SKILL.md`: Black, Flake8, module docstrings, NumPy-style function docstrings, no more than eight executable lines per function, and no blank lines inside function bodies.
+Python files follow `.opencode/skill/embedded-python-standard/SKILL.md`: pycodestyle at 79 columns, Black and Flake8 clean, module/class/function docstrings with `Parameters` and `Returns` sections, no more than eight executable lines per function, no blank lines inside function bodies, no en/em dashes, and one import per line. Run `.opencode/skill/embedded-python-standard/audit_python_standard.py`; it must exit 0.
 
 ## Troubleshooting
 

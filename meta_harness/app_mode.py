@@ -12,6 +12,10 @@ _HAL_ALIASES = ("hal", "hal9000", "minimal")
 def ui_mode() -> str:
     """Return the configured desktop interface mode.
 
+    Parameters
+    ----------
+    None
+
     Returns
     -------
     str
@@ -25,6 +29,10 @@ def ui_mode() -> str:
 
 def voice_enabled() -> bool:
     """Return whether the voice interface is enabled.
+
+    Parameters
+    ----------
+    None
 
     Returns
     -------

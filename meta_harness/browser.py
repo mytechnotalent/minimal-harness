@@ -289,6 +289,10 @@ class BrowserClient:
     def _page(self) -> tuple[Any, Any, Any]:
         """Start a Chromium browser and page.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         tuple[Any, Any, Any]
@@ -298,6 +302,10 @@ class BrowserClient:
 
     def _start_playwright(self) -> tuple[Any, Any, Any]:
         """Start Playwright and headless Chromium.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -309,22 +317,59 @@ class BrowserClient:
     def _launch(self) -> tuple[Any, Any, Any]:
         """Start Playwright and Chromium.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         tuple[Any, Any, Any]
             Playwright manager, browser, and page.
         """
-        playwright = (
-            importlib.import_module("playwright.sync_api")
-            .sync_playwright()
-            .start()
-        )
-        try:
-            browser = playwright.chromium.launch(headless=True)
-        except Exception as exc:
-            playwright.stop()
-            raise BrowserError(_launch_hint(exc)) from exc
+        playwright = _start_playwright()
+        browser = _start_browser(playwright)
         return playwright, browser, browser.new_page()
+
+
+def _start_playwright():
+    """Start a Playwright session.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    Any
+        Started Playwright manager.
+    """
+    module = importlib.import_module("playwright.sync_api")
+    return module.sync_playwright().start()
+
+
+def _start_browser(playwright):
+    """Start headless Chromium, stopping Playwright on failure.
+
+    Parameters
+    ----------
+    playwright : Any
+        Started Playwright manager.
+
+    Returns
+    -------
+    Any
+        Launched Chromium browser.
+
+    Raises
+    ------
+    BrowserError
+        If Chromium cannot start.
+    """
+    try:
+        return playwright.chromium.launch(headless=True)
+    except Exception as exc:
+        playwright.stop()
+        raise BrowserError(_launch_hint(exc)) from exc
 
 
 def _launch_hint(exc: Exception) -> str:

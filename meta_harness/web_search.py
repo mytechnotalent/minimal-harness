@@ -1,11 +1,14 @@
 """Small DuckDuckGo-backed web search client for agent context."""
 
 from html.parser import HTMLParser
+import importlib
 import json
 import os
 import re
-from urllib.parse import quote_plus, urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import quote_plus
+from urllib.parse import urlencode
+from urllib.request import Request
+from urllib.request import urlopen
 from xml.etree import ElementTree
 
 _BROWSER_HEADERS = {
@@ -36,6 +39,87 @@ def _capitalized_words(query: str) -> list[str]:
         Capitalized words in order.
     """
     return re.findall(r"\b[A-Z][a-z]{1,}\b", query)
+
+
+def _rss_root(body: str):
+    """Parse an RSS document, returning None on malformed input.
+
+    Parameters
+    ----------
+    body : str
+        RSS response body.
+
+    Returns
+    -------
+    xml.etree.ElementTree.Element or None
+        Parsed document root, or None.
+    """
+    try:
+        return ElementTree.fromstring(body)
+    except ElementTree.ParseError:
+        return None
+
+
+def _rss_item(item) -> dict[str, str]:
+    """Convert one RSS item to a result dictionary.
+
+    Parameters
+    ----------
+    item : xml.etree.ElementTree.Element
+        RSS item element.
+
+    Returns
+    -------
+    dict[str, str]
+        Result title, URL, and snippet.
+    """
+    return {
+        "title": item.findtext("title") or "",
+        "url": item.findtext("link") or "",
+        "snippet": item.findtext("description") or "",
+    }
+
+
+def _open_page(page, query: str) -> None:
+    """Open DuckDuckGo and wait for result anchors.
+
+    Parameters
+    ----------
+    page : playwright.sync_api.Page
+        Browser page.
+
+    query : str
+        Search terms.
+
+    Returns
+    -------
+    None
+        The page is loaded and results are present.
+    """
+    page.goto("https://duckduckgo.com/?q=" + quote_plus(query), timeout=20000)
+    page.wait_for_selector("a[data-testid='result-title-a']", timeout=10000)
+
+
+def _github_items(items: list[dict]) -> list[dict[str, str]]:
+    """Convert GitHub user items to search results.
+
+    Parameters
+    ----------
+    items : list of dict
+        GitHub search items.
+
+    Returns
+    -------
+    list of dict[str, str]
+        Matching public GitHub profiles.
+    """
+    return [
+        {
+            "title": f"{item.get('login', 'unknown')} (GitHub profile)",
+            "url": item.get("html_url", ""),
+        }
+        for item in items
+    ]
 
 
 def _looks_like_person(query: str) -> bool:
@@ -107,6 +191,10 @@ def _merge_results(
 def _github_headers() -> dict[str, str]:
     """Build GitHub API headers with optional authentication.
 
+    Parameters
+    ----------
+    None
+
     Returns
     -------
     dict[str, str]
@@ -127,6 +215,10 @@ class _ResultParser(HTMLParser):
 
     def __init__(self) -> None:
         """Initialize parser state.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -200,6 +292,10 @@ class WebSearchClient:
     def __init__(self) -> None:
         """Initialize the profile cache.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -222,16 +318,47 @@ class WebSearchClient:
         list[dict[str, str]]
             Result titles and URLs, or an empty list on failure.
         """
+        results = self._first_results(query)
+        people = self._people(query)
+        merged = _merge_results(people, results, limit)
+        return merged or self._github_fallback(query, limit)
+
+    def _first_results(self, query: str) -> list[dict[str, str]]:
+        """Return results from the first backend that answers.
+
+        Parameters
+        ----------
+        query : str
+            Search terms.
+
+        Returns
+        -------
+        list[dict[str, str]]
+            Results from HTML, Bing, or Playwright search.
+        """
         results = self._html_search(query)
         if not results:
             results = self._bing_search(query)
         if not results:
             results = self._playwright_search(query)
-        people = (
-            self._github_people(query) if _looks_like_person(query) else []
-        )
-        merged = _merge_results(people, results, limit)
-        return merged or self._github_fallback(query, limit)
+        return results
+
+    def _people(self, query: str) -> list[dict[str, str]]:
+        """Return GitHub profile results for person-like queries.
+
+        Parameters
+        ----------
+        query : str
+            Search terms.
+
+        Returns
+        -------
+        list[dict[str, str]]
+            Matching profiles, or an empty list.
+        """
+        if not _looks_like_person(query):
+            return []
+        return self._github_people(query)
 
     def _bing_search(self, query: str) -> list[dict[str, str]]:
         """Search Bing's RSS feed without an API key.
@@ -267,16 +394,11 @@ class WebSearchClient:
         list[dict[str, str]]
             Result titles and URLs, or an empty list.
         """
-        try:
-            root = ElementTree.fromstring(body)
-        except ElementTree.ParseError:
+        root = _rss_root(body)
+        if root is None:
             return []
         return [
-            {
-                "title": item.findtext("title") or "",
-                "url": item.findtext("link") or "",
-                "snippet": item.findtext("description") or "",
-            }
+            _rss_item(item)
             for item in root.findall(".//item")
             if item.findtext("link")
         ]
@@ -333,9 +455,8 @@ class WebSearchClient:
         list[dict[str, str]]
             Result titles and URLs.
         """
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as playwright:
+        module = importlib.import_module("playwright.sync_api")
+        with module.sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             try:
                 return self._page_results(browser, query)
@@ -358,12 +479,7 @@ class WebSearchClient:
             Result titles and URLs.
         """
         page = browser.new_page()
-        page.goto(
-            "https://duckduckgo.com/?q=" + quote_plus(query), timeout=20000
-        )
-        page.wait_for_selector(
-            "a[data-testid='result-title-a']", timeout=10000
-        )
+        _open_page(page, query)
         return page.eval_on_selector_all(
             "a[data-testid='result-title-a']",
             "els => els.map(e => ({title: e.innerText, url: e.href}))",
@@ -578,13 +694,7 @@ class WebSearchClient:
             items = self._search_items(query, limit)
         except Exception:
             return []
-        return [
-            {
-                "title": f"{item.get('login', 'unknown')} (GitHub profile)",
-                "url": item.get("html_url", ""),
-            }
-            for item in items
-        ]
+        return _github_items(items)
 
     def _profile_request(self, username: str) -> Request:
         """Build a GitHub profile request.

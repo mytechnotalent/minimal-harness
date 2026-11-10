@@ -9,15 +9,42 @@ class FibonacciTests(unittest.TestCase):
     """Verify fibonacci(n) returns the nth Fibonacci number."""
 
     def test_zero(self) -> None:
-        """fibonacci(0) is 0."""
+        """fibonacci(0) is 0.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(fibonacci(0), 0)
 
     def test_one(self) -> None:
-        """fibonacci(1) is 1."""
+        """fibonacci(1) is 1.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(fibonacci(1), 1)
 
     def test_ten(self) -> None:
-        """fibonacci(10) is 55."""
+        """fibonacci(10) is 55.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(fibonacci(10), 55)
 
 

@@ -1,5 +1,6 @@
 """Entry point for the macOS app bundle."""
 
+import importlib
 import os
 import sys
 from pathlib import Path
@@ -7,6 +8,10 @@ from pathlib import Path
 
 def main() -> None:
     """Switch to the repository and launch the desktop app.
+
+    Parameters
+    ----------
+    None
 
     Returns
     -------
@@ -17,9 +22,7 @@ def main() -> None:
     root = Path(home) if home else Path(__file__).resolve().parent.parent
     os.chdir(root)
     _prefer_repository(root)
-    from gui.app import main as launch
-
-    launch()
+    importlib.import_module("gui.app").main()
 
 
 def _prefer_repository(root: Path) -> None:

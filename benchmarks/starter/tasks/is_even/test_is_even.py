@@ -9,15 +9,42 @@ class IsEvenTests(unittest.TestCase):
     """Verify is_even(x) reports evenness."""
 
     def test_four(self) -> None:
-        """is_even(4) is True."""
+        """is_even(4) is True.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertTrue(is_even(4))
 
     def test_seven(self) -> None:
-        """is_even(7) is False."""
+        """is_even(7) is False.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertFalse(is_even(7))
 
     def test_zero(self) -> None:
-        """is_even(0) is True."""
+        """is_even(0) is True.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertTrue(is_even(0))
 
 

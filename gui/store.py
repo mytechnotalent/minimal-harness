@@ -20,6 +20,99 @@ class SessionRecord:
     meta: Path
 
 
+def _session_meta(session_id: str, title: str, kind: str) -> dict:
+    """Build the metadata document for a new session.
+
+    Parameters
+    ----------
+    session_id : str
+        New session identifier.
+
+    title : str
+        Optional session title.
+
+    kind : str
+        Item kind ("session" or "build").
+
+    Returns
+    -------
+    dict
+        Metadata ready to serialize.
+    """
+    now = time.time()
+    return {
+        "id": session_id,
+        "title": title or "Untitled session",
+        "kind": kind,
+        "created": now,
+        "updated": now,
+    }
+
+
+def _record_fields(folder: Path, meta: dict) -> dict:
+    """Build the session record keyword arguments.
+
+    Parameters
+    ----------
+    folder : pathlib.Path
+        Session folder.
+
+    meta : dict
+        Parsed metadata document.
+
+    Returns
+    -------
+    dict
+        Keyword arguments for ``SessionRecord``.
+    """
+    return {
+        "session_id": folder.name,
+        "folder": folder,
+        "title": meta.get("title", folder.name),
+        "kind": meta.get("kind", "session"),
+        **_record_paths(folder),
+    }
+
+
+def _record_paths(folder: Path) -> dict:
+    """Build the session file paths.
+
+    Parameters
+    ----------
+    folder : pathlib.Path
+        Session folder.
+
+    Returns
+    -------
+    dict
+        Transcript, notes, and metadata paths.
+    """
+    return {
+        "transcript": folder / "transcript.jsonl",
+        "notes": folder / "notes.jsonl",
+        "meta": folder / "meta.json",
+    }
+
+
+def _record(folder: Path, meta: dict) -> SessionRecord:
+    """Build a session record from a folder and its metadata.
+
+    Parameters
+    ----------
+    folder : pathlib.Path
+        Session folder.
+
+    meta : dict
+        Parsed metadata document.
+
+    Returns
+    -------
+    SessionRecord
+        Session description.
+    """
+    return SessionRecord(**_record_fields(folder, meta))
+
+
 class SessionStore:
     """Manage session folders with transcripts and notes."""
 
@@ -76,14 +169,7 @@ class SessionStore:
         session_id = uuid.uuid4().hex[:12]
         folder = self.root / session_id
         folder.mkdir(parents=True, exist_ok=True)
-        now = time.time()
-        meta = {
-            "id": session_id,
-            "title": title or "Untitled session",
-            "kind": kind,
-            "created": now,
-            "updated": now,
-        }
+        meta = _session_meta(session_id, title, kind)
         (folder / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
         return self._read_folder(folder)
 
@@ -152,15 +238,7 @@ class SessionStore:
             Parsed session description.
         """
         meta = self._read_meta(folder)
-        return SessionRecord(
-            session_id=folder.name,
-            folder=folder,
-            title=meta.get("title", folder.name),
-            kind=meta.get("kind", "session"),
-            transcript=folder / "transcript.jsonl",
-            notes=folder / "notes.jsonl",
-            meta=folder / "meta.json",
-        )
+        return _record(folder, meta)
 
     def _read_meta(self, folder: Path) -> dict:
         """Read a session meta file safely.

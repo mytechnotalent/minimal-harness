@@ -129,6 +129,10 @@ def _allowed_fields(message: dict[str, Any]) -> dict[str, Any]:
 def _provider_name() -> str:
     """Return the configured model provider.
 
+    Parameters
+    ----------
+    None
+
     Returns
     -------
     str
@@ -180,12 +184,25 @@ def _provider_model(provider: str) -> str:
     if provider == "opencode":
         return os.getenv("OPENCODE_MODEL", "deepseek-v4.1-flash")
     if provider == "local":
-        return (
-            os.getenv("LOCAL_MODEL")
-            or os.getenv("HARNESS_MODEL")
-            or "local-model"
-        )
+        return _local_model()
     return os.getenv("OPENROUTER_MODEL", "openrouter/free")
+
+
+def _local_model() -> str:
+    """Return the configured local model name.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        Local model name with fallbacks.
+    """
+    return (
+        os.getenv("LOCAL_MODEL") or os.getenv("HARNESS_MODEL") or "local-model"
+    )
 
 
 def _provider_url(provider: str) -> str:
@@ -257,6 +274,21 @@ class OpenRouterClient:
         self._provider = _provider_name()
         self.api_key = _provider_key(self._provider)
         self.model = model or _provider_model(self._provider)
+        self._apply_environment()
+        self._reset_usage()
+
+    def _apply_environment(self) -> None:
+        """Load optional endpoint settings from the environment.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Instance settings are updated.
+        """
         self.site_url = os.getenv("OPENROUTER_SITE_URL", "http://localhost")
         self.app_name = os.getenv("OPENROUTER_APP_NAME", "minimal-harness")
         self.user_agent = os.getenv(
@@ -265,6 +297,19 @@ class OpenRouterClient:
         self.session_id = uuid.uuid4().hex
         self.max_retries = int(os.getenv("OPENROUTER_MAX_RETRIES", "2"))
         self.timeout = int(os.getenv("HARNESS_MODEL_TIMEOUT", "180"))
+
+    def _reset_usage(self) -> None:
+        """Reset the usage counters.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Counters are zeroed.
+        """
         self.call_count = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
@@ -274,6 +319,10 @@ class OpenRouterClient:
     @property
     def provider(self) -> str:
         """Return the configured provider name.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -374,6 +423,10 @@ class OpenRouterClient:
     def _require_key(self) -> None:
         """Require an API key before a live request.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -384,6 +437,10 @@ class OpenRouterClient:
 
     def _missing_key_message(self) -> str:
         """Return the missing-key error for the active provider.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -469,6 +526,10 @@ class OpenRouterClient:
     def _url(self) -> str:
         """Return the completion endpoint.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         str
@@ -479,6 +540,10 @@ class OpenRouterClient:
 
     def _headers(self) -> dict[str, str]:
         """Return required request headers.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -518,6 +583,10 @@ class OpenRouterClient:
 
     def _arm_alarm(self) -> bool:
         """Arm the process timeout alarm when on the main thread.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -600,14 +669,47 @@ class OpenRouterClient:
             try:
                 return self._open(request)
             except urllib.error.HTTPError as exc:
-                if not self._retryable(exc) or attempt == self.max_retries:
-                    raise
-                time.sleep(self._retry_delay(exc, attempt))
+                self._handle_http_error(exc, attempt)
             except (urllib.error.URLError, TimeoutError):
-                if attempt == self.max_retries:
-                    raise
-                time.sleep(min(2**attempt, 8.0))
+                self._handle_transport_error(attempt)
         raise OpenRouterError("OpenRouter retry loop ended unexpectedly.")
+
+    def _handle_http_error(self, exc, attempt: int) -> None:
+        """Retry or re-raise an HTTP provider error.
+
+        Parameters
+        ----------
+        exc : urllib.error.HTTPError
+            Provider error response.
+
+        attempt : int
+            Zero-based retry attempt.
+
+        Returns
+        -------
+        None
+            A retryable error sleeps; otherwise the error is re-raised.
+        """
+        if not self._retryable(exc) or attempt == self.max_retries:
+            raise
+        time.sleep(self._retry_delay(exc, attempt))
+
+    def _handle_transport_error(self, attempt: int) -> None:
+        """Retry or re-raise a transport error.
+
+        Parameters
+        ----------
+        attempt : int
+            Zero-based retry attempt.
+
+        Returns
+        -------
+        None
+            The error sleeps before retrying, or is re-raised.
+        """
+        if attempt == self.max_retries:
+            raise
+        time.sleep(min(2**attempt, 8.0))
 
     def _retryable(self, error: urllib.error.HTTPError) -> bool:
         """Identify HTTP responses safe to retry.
@@ -688,6 +790,10 @@ class OpenRouterClient:
         ----------
         body : dict[str, Any]
             Decoded provider response.
+
+        Returns
+        -------
+        None
         """
         usage = body.get("usage") or {}
         details = usage.get("prompt_tokens_details") or {}
@@ -699,6 +805,10 @@ class OpenRouterClient:
 
     def usage_summary(self) -> str:
         """Return a one-line summary of accumulated token usage.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------

@@ -9,15 +9,42 @@ class SumListTests(unittest.TestCase):
     """Verify sum_list(xs) totals a list of numbers."""
 
     def test_ints(self) -> None:
-        """sum_list([1, 2, 3]) is 6."""
+        """sum_list([1, 2, 3]) is 6.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(sum_list([1, 2, 3]), 6)
 
     def test_empty(self) -> None:
-        """sum_list([]) is 0."""
+        """sum_list([]) is 0.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(sum_list([]), 0)
 
     def test_negative(self) -> None:
-        """sum_list([-1, -2, 3]) is 0."""
+        """sum_list([-1, -2, 3]) is 0.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.assertEqual(sum_list([-1, -2, 3]), 0)
 
 

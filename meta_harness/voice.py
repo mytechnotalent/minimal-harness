@@ -5,6 +5,7 @@ module can be imported, inspected, and unit tested without them.
 """
 
 import asyncio
+import importlib
 import os
 import queue
 import tempfile
@@ -25,8 +26,55 @@ class VoiceUnavailable(RuntimeError):
     """Raised when voice dependencies or models are unavailable."""
 
 
+def _input_stream(sd, rate: int, callback) -> Any:
+    """Create a mono float32 input stream.
+
+    Parameters
+    ----------
+    sd : Any
+        Imported sounddevice module.
+
+    rate : int
+        Sample rate in hertz.
+
+    callback : Any
+        Audio callback.
+
+    Returns
+    -------
+    Any
+        Unstarted input stream.
+    """
+    return sd.InputStream(
+        samplerate=rate,
+        channels=1,
+        dtype="float32",
+        callback=callback,
+    )
+
+
+def _local_only(token: str | None) -> bool:
+    """Return whether Whisper must run without network access.
+
+    Parameters
+    ----------
+    token : str or None
+        Hugging Face token, when configured.
+
+    Returns
+    -------
+    bool
+        Whether local-only mode is enabled.
+    """
+    return _env_flag("HARNESS_WHISPER_LOCAL_ONLY", not bool(token))
+
+
 def _hf_token() -> str | None:
     """Return a Hugging Face token from the environment.
+
+    Parameters
+    ----------
+    None
 
     Returns
     -------
@@ -64,6 +112,10 @@ def _env_flag(name: str, default: bool) -> bool:
 def missing_dependencies() -> list[str]:
     """Return optional voice modules that cannot be imported.
 
+    Parameters
+    ----------
+    None
+
     Returns
     -------
     list[str]
@@ -100,6 +152,10 @@ class Recorder:
     def __init__(self) -> None:
         """Prepare a stopped recorder.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -112,20 +168,18 @@ class Recorder:
     def start(self) -> None:
         """Open the microphone and begin buffering frames.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
             The stream starts delivering audio callbacks.
         """
-        import sounddevice as sd
-
+        sd = importlib.import_module("sounddevice")
         self._frames = []
-        self._stream = sd.InputStream(
-            samplerate=self.rate,
-            channels=1,
-            dtype="float32",
-            callback=self._callback,
-        )
+        self._stream = _input_stream(sd, self.rate, self._callback)
         self._stream.start()
 
     def _callback(
@@ -155,6 +209,10 @@ class Recorder:
     def stop(self) -> Any:
         """Stop capturing and return the recorded samples.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         numpy.ndarray
@@ -165,6 +223,10 @@ class Recorder:
 
     def _close_stream(self) -> None:
         """Stop and close the active input stream.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -178,6 +240,10 @@ class Recorder:
 
     def _take_frames(self) -> list:
         """Clear and return buffered audio blocks.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -202,8 +268,7 @@ class Recorder:
         numpy.ndarray
             Flat mono sample array.
         """
-        import numpy as np
-
+        np = importlib.import_module("numpy")
         if not frames:
             return np.zeros(0, dtype="float32")
         return np.concatenate(frames, axis=0).reshape(-1)
@@ -229,9 +294,7 @@ class Transcriber:
             "HARNESS_WHISPER_MODEL", "base.en"
         )
         self.token = _hf_token()
-        self.local_only = _env_flag(
-            "HARNESS_WHISPER_LOCAL_ONLY", not bool(self.token)
-        )
+        self.local_only = _local_only(self.token)
         self.cache_dir = os.getenv("HARNESS_WHISPER_CACHE")
         self._model: Any = None
 
@@ -256,6 +319,10 @@ class Transcriber:
     def _load(self) -> Any:
         """Load and cache the faster-whisper model.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         faster_whisper.WhisperModel
@@ -272,6 +339,10 @@ class Transcriber:
 
     def _options(self) -> dict[str, Any]:
         """Return authenticated, offline-aware model options.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -347,6 +418,10 @@ class Speaker:
     def stop(self) -> None:
         """Stop pending and active speech.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         None
@@ -357,6 +432,10 @@ class Speaker:
 
     def _start_worker(self) -> None:
         """Start the speech worker thread when it is not running.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -370,6 +449,10 @@ class Speaker:
 
     def _work(self) -> None:
         """Process queued utterances forever.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -443,6 +526,10 @@ class Speaker:
     def _temp_path() -> Path:
         """Create a temporary MP3 path.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         pathlib.Path
@@ -482,14 +569,17 @@ class Speaker:
         None
             Playback blocks until the file finishes.
         """
-        import sounddevice as sd
-
+        sd = importlib.import_module("sounddevice")
         samples, rate = _decode_mp3(path)
         sd.play(samples, rate)
         sd.wait()
 
     def _drain(self) -> None:
         """Discard all queued utterances.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -504,6 +594,10 @@ class Speaker:
 
     def _halt(self) -> None:
         """Stop the audio device if it is available.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -535,8 +629,7 @@ async def _save_speech(text: str, voice: str, path: Path) -> None:
     None
         The MP3 file is written.
     """
-    import edge_tts
-
+    edge_tts = importlib.import_module("edge_tts")
     await edge_tts.Communicate(text, voice).save(str(path))
 
 
@@ -553,9 +646,8 @@ def _decode_mp3(path: Path) -> tuple[Any, int]:
     tuple[numpy.ndarray, int]
         Sample array and sample rate.
     """
-    import miniaudio
-    import numpy as np
-
+    miniaudio = importlib.import_module("miniaudio")
+    np = importlib.import_module("numpy")
     decoded = miniaudio.decode_file(str(path))
     samples = np.array(decoded.samples, dtype=np.int16)
     if decoded.nchannels > 1:
@@ -588,6 +680,10 @@ class VoiceEngine:
     def recording(self) -> bool:
         """Return whether the microphone is currently recording.
 
+        Parameters
+        ----------
+        None
+
         Returns
         -------
         bool
@@ -597,6 +693,10 @@ class VoiceEngine:
 
     def start_recording(self) -> None:
         """Begin capturing microphone audio.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -608,6 +708,10 @@ class VoiceEngine:
 
     def stop_recording(self) -> str:
         """Stop capturing and transcribe the utterance.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -637,6 +741,10 @@ class VoiceEngine:
 
     def stop_speaking(self) -> None:
         """Stop active and pending speech.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------

@@ -7,7 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 try:
-    from gui.hal import HalWindow, _log_error
+    from gui.hal import HalWindow
+    from gui.hal import _log_error
 except Exception:
     HalWindow = None
     _log_error = None
@@ -35,6 +36,10 @@ class _FakeHal:
 
     def _resolve_pending(self) -> None:
         """Record one pending-question resolution.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -64,21 +69,48 @@ class HalStateTests(unittest.TestCase):
     """Verify the eye never stays stuck waiting for a spoken answer."""
 
     def test_empty_heard_resolves_and_idles(self) -> None:
-        """Unrecognized speech releases the question and returns to idle."""
+        """Unrecognized speech releases the question and returns to idle.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         fake = _FakeHal(pending=object())
         HalWindow._handle_empty_heard(fake)
         self.assertEqual(fake.resolved, 1)
         self.assertEqual(fake.state, "idle")
 
     def test_ask_timeout_ignores_stale_question(self) -> None:
-        """A timeout for an old question leaves the current one alone."""
+        """A timeout for an old question leaves the current one alone.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         fake = _FakeHal(pending=object())
         HalWindow._ask_timeout(fake, object())
         self.assertEqual(fake.resolved, 0)
         self.assertIsNone(fake.state)
 
     def test_ask_timeout_releases_active_question(self) -> None:
-        """A timeout releases the active question and returns to idle."""
+        """A timeout releases the active question and returns to idle.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         bridge = object()
         fake = _FakeHal(pending=bridge)
         HalWindow._ask_timeout(fake, bridge)
@@ -86,7 +118,16 @@ class HalStateTests(unittest.TestCase):
         self.assertEqual(fake.state, "idle")
 
     def test_log_error_appends_message(self) -> None:
-        """Diagnostics are written where the app can read them later."""
+        """Diagnostics are written where the app can read them later.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "hal.log"
             with patch.dict(os.environ, {"HARNESS_HAL_LOG": str(path)}):
