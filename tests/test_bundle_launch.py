@@ -99,12 +99,12 @@ class BundleLaunchTests(unittest.TestCase):
             _write_plist(contents / "Info.plist", "/tmp/other-repo")
             self.assertFalse(gui_app._bundle_matches(app))
 
-    @mock.patch.object(gui_app.subprocess, "Popen")
-    @mock.patch.object(
-        gui_app, "_bundle_executable", new=mock.Mock(return_value=Path("/b"))
+    @mock.patch("gui.app.subprocess.Popen")
+    @mock.patch(
+        "gui.app._bundle_executable", new=mock.Mock(return_value=Path("/b"))
     )
-    @mock.patch.object(gui_app.os, "getenv", new=mock.Mock(return_value=None))
-    @mock.patch.object(gui_app.sys, "argv", new=["harness-gui"])
+    @mock.patch("gui.app.os.getenv", new=mock.Mock(return_value=None))
+    @mock.patch("gui.app.sys.argv", new=["harness-gui"])
     def test_launch_bundle_spawns_detached_process(self, popen) -> None:
         """A launcher starts the bundle and returns without waiting.
 
