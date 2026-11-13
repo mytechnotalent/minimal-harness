@@ -404,6 +404,7 @@ def _run(config, command, prompt, timeout, cwd):
         Answer text and elapsed seconds.
     """
     env = {**os.environ, **config.get("env", {})}
+    env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
     args = [*command, *config.get("args", [])]
     started = time.monotonic()
     answer = run_once(args, prompt, timeout, cwd, env=env)

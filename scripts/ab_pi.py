@@ -236,6 +236,7 @@ def _scoped_env(env, cwd):
         Environment mapping for the child process.
     """
     merged = dict(os.environ if env is None else env)
+    merged.setdefault("PYTHONDONTWRITEBYTECODE", "1")
     if cwd:
         merged["PWD"] = str(cwd)
     return merged
