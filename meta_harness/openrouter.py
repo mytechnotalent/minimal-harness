@@ -315,6 +315,7 @@ class OpenRouterClient:
         self.completion_tokens = 0
         self.cached_tokens = 0
         self.cost = 0.0
+        self.model_seconds = 0.0
 
     @property
     def provider(self) -> str:
@@ -573,13 +574,33 @@ class OpenRouterClient:
             Decoded response body.
         """
         armed = self._arm_alarm()
+        started = time.monotonic()
         try:
             return self._send_body(request)
         except Exception as exc:
             raise self._request_error(exc) from exc
         finally:
-            if armed:
-                signal.alarm(0)
+            self._finish_send(armed, started)
+
+    def _finish_send(self, armed, started) -> None:
+        """Record request time and disarm the timeout alarm.
+
+        Parameters
+        ----------
+        armed : bool
+            Whether the alarm was armed.
+
+        started : float
+            Start time from ``time.monotonic``.
+
+        Returns
+        -------
+        None
+            Timing is recorded and the alarm is cleared.
+        """
+        self.model_seconds += time.monotonic() - started
+        if armed:
+            signal.alarm(0)
 
     def _arm_alarm(self) -> bool:
         """Arm the process timeout alarm when on the main thread.
@@ -820,7 +841,8 @@ class OpenRouterClient:
             f"prompt_tokens={self.prompt_tokens} "
             f"completion_tokens={self.completion_tokens} "
             f"cached_tokens={self.cached_tokens} "
-            f"cost=${self.cost:.6f}"
+            f"cost=${self.cost:.6f} "
+            f"seconds={self.model_seconds:.1f}"
         )
 
 

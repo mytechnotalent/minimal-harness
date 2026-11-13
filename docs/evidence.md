@@ -157,6 +157,28 @@ Stronger models exist in the catalog but are not usable with the current key:
 Only `beam-free` works. A stronger-model comparison requires enabling model
 access in the OpenCode console or supplying an OpenRouter/Anthropic/OpenAI key.
 
+## Latency diagnosis (deepseek-v4.1-flash)
+
+Five repeats on itsdangerous, default settings: harness 0.80 (4/5) versus Pi
+1.00 (5/5); 239s versus 79s average per task.
+
+Instrumented single runs:
+
+| Run | Calls | Prompt tokens | Model seconds | Wall | Hidden test |
+| --- | --- | --- | --- | --- | --- |
+| A | 26 | 275k | not recorded | 219s | pass |
+| B | 13 | 137k | 181.2 | 184s | fail |
+
+Model time is about 98% of wall time; tool execution and the test runner are
+negligible. Per-call latency is roughly 12-14 seconds. Turn count varies
+between 13 and 26, and that variance drives both latency and outcome. The
+answer-review call is one of those calls; the coding-standards prompt inflates
+prompt size but the provider latency is per call, not per token.
+
+Conclusion: the latency gap is a turn-count and provider-latency problem, not
+a tooling problem. Reducing turns trades quality against speed, and the
+current evidence does not show our extra turns buying reliable quality.
+
 ## Config search engine
 
 `scripts/search_harness.py` evaluates a configuration grid on a manifest and
