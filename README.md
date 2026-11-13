@@ -606,8 +606,10 @@ form: the agent's printed code block is extracted and scored against the test.
 `HARNESS_ANSWER_TESTS=1` enables answer-time verification: after the agent
 finishes, the reviewer writes executable unittest modules against the current
 workspace, the harness runs them, and one repair turn is applied when they
-fail. This is the test-time counterpart of the reviewer stage in optimize
-mode.
+fail. This is experimental: the tests are model-authored and can be wrong, so
+the repair can turn a correct workspace into an incorrect one. Measured runs
+show it helping one task and regressing another. It is off by default; enable
+it only with a ground-truth oracle or a human check.
 
 ### Harness configuration search
 

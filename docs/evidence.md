@@ -122,6 +122,24 @@ All three tasks fail for both agents. The harness finishes; Pi times out. This
 is a latency and completion signal, not a capability win. The free model is
 the limiting factor on real-project tasks.
 
+## Independent corpus with deepseek-v4.1-flash
+
+Default harness settings, 1200s, 1 run per task:
+
+| Task | Harness (verify off) | Harness (verify on) | Pi |
+| --- | --- | --- | --- |
+| itsdangerous_signer | 0 (146s) | 1 (377s) | 1 (55-118s) |
+| iniconfig_parser | 1 (276s) | 0 (497s) | 1 (88s) |
+| packaging_utils | 1 (272s) | not run | 1 (47s) |
+
+Verification flips which task passes: it fixes itsdangerous and breaks
+iniconfig. That is a coin flip, not a reliable gain, and it costs 2-4x more
+time. Pi passes all three tasks and is 2-6x faster.
+
+This is the current honest result: on real repository tasks at this model, Pi
+is equal or better on capability and clearly better on latency. The offline
+adversarial search remains this project's only proven differentiator.
+
 ## Model access blocker
 
 Stronger models exist in the catalog but are not usable with the current key:
