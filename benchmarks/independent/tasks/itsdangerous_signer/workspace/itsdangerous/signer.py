@@ -34,7 +34,7 @@ class NoneAlgorithm(SigningAlgorithm):
     """
 
     def get_signature(self, key: bytes, value: bytes) -> bytes:
-        return b""
+        raise NotImplementedError("not implemented")
 
 
 def _lazy_sha1(string: bytes = b"") -> t.Any:
@@ -60,8 +60,7 @@ class HMACAlgorithm(SigningAlgorithm):
         self.digest_method: t.Any = digest_method
 
     def get_signature(self, key: bytes, value: bytes) -> bytes:
-        mac = hmac.new(key, msg=value, digestmod=self.digest_method)
-        return mac.digest()
+        raise NotImplementedError("not implemented")
 
 
 def _make_keys_list(
@@ -192,95 +191,26 @@ class Signer:
         .. versionchanged:: 2.0
             Added the ``secret_key`` parameter.
         """
-        if secret_key is None:
-            secret_key = self.secret_keys[-1]
-        else:
-            secret_key = want_bytes(secret_key)
-
-        if self.key_derivation == "concat":
-            data = self.salt + secret_key
-        elif self.key_derivation == "django-concat":
-            data = self.salt + b"signer" + secret_key
-        elif self.key_derivation == "hmac":
-            return _hmac_key(secret_key, self.salt, self.digest_method)
-        elif self.key_derivation == "none":
-            return secret_key
-        else:
-            raise TypeError("Unknown key derivation method")
-
-        return t.cast(bytes, self.digest_method(data).digest())
+        raise NotImplementedError("not implemented")
 
     def get_signature(self, value: str | bytes) -> bytes:
         """Returns the signature for the given value."""
-        value = want_bytes(value)
-        key = self.derive_key()
-        sig = self.algorithm.get_signature(key, value)
-        return base64_encode(sig)
+        raise NotImplementedError("not implemented")
 
     def sign(self, value: str | bytes) -> bytes:
         """Signs the given string."""
-        value = want_bytes(value)
-        return value + self.sep + self.get_signature(value)
+        raise NotImplementedError("not implemented")
 
     def verify_signature(self, value: str | bytes, sig: str | bytes) -> bool:
         """Verifies the signature for the given value."""
-        try:
-            sig = base64_decode(sig)
-        except Exception:
-            return False
-
-        value = want_bytes(value)
-
-        for secret_key in reversed(self.secret_keys):
-            key = self.derive_key(secret_key)
-
-            if self.algorithm.verify_signature(key, value, sig):
-                return True
-
-        return False
+        raise NotImplementedError("not implemented")
 
     def unsign(self, signed_value: str | bytes) -> bytes:
         """Unsigns the given string."""
-        signed_value = want_bytes(signed_value)
-
-        if self.sep not in signed_value:
-            raise BadSignature(f"No {self.sep!r} found in value")
-
-        value, sig = signed_value.rsplit(self.sep, 1)
-
-        if self.verify_signature(value, sig):
-            return value
-
-        raise BadSignature(f"Signature {sig!r} does not match", payload=value)
+        raise NotImplementedError("not implemented")
 
     def validate(self, signed_value: str | bytes) -> bool:
         """Only validates the given signed value. Returns ``True`` if
         the signature exists and is valid.
         """
-        try:
-            self.unsign(signed_value)
-            return True
-        except BadSignature:
-            return False
-
-
-def _hmac_key(secret_key: bytes, salt: bytes, digest_method: t.Any) -> bytes:
-    """Derive a signing key by running HMAC of the salt under the secret.
-
-    Parameters
-    ----------
-    secret_key : bytes
-        The secret key used as the HMAC key.
-    salt : bytes
-        The salt used as the HMAC message.
-    digest_method : t.Any
-        The hash constructor passed to ``hmac.new``.
-
-    Returns
-    -------
-    bytes
-        The derived key digest.
-    """
-    mac = hmac.new(secret_key, digestmod=digest_method)
-    mac.update(salt)
-    return mac.digest()
+        raise NotImplementedError("not implemented")

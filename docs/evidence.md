@@ -124,21 +124,27 @@ the limiting factor on real-project tasks.
 
 ## Independent corpus with deepseek-v4.1-flash
 
-Default harness settings, 1200s, 1 run per task:
+Clean stubs, default harness settings (answer-time verification off), 1200s,
+1 run per task:
 
-| Task | Harness (verify off) | Harness (verify on) | Pi |
-| --- | --- | --- | --- |
-| itsdangerous_signer | 0 (146s) | 1 (377s) | 1 (55-118s) |
-| iniconfig_parser | 1 (276s) | 0 (497s) | 1 (88s) |
-| packaging_utils | 1 (272s) | not run | 1 (47s) |
+| Task | Harness | Pi | Our time | Pi |
+| --- | --- | --- | --- | --- |
+| itsdangerous_signer | 1/1 | 1/1 | 146s | 55s |
+| iniconfig_parser | 0/1 | 1/1 | 276s | 88s |
+| packaging_utils | 0/1 | 1/1 | 272s | 47s |
 
-Verification flips which task passes: it fixes itsdangerous and breaks
-iniconfig. That is a coin flip, not a reliable gain, and it costs 2-4x more
-time. Pi passes all three tasks and is 2-6x faster.
+Pi passes all three and is 2-6x faster. The harness passes one. A previous
+deepseek run produced a different split (itsdangerous miss, iniconfig and
+packaging pass), so single-run variance is large; these numbers are not
+stable estimates.
 
-This is the current honest result: on real repository tasks at this model, Pi
-is equal or better on capability and clearly better on latency. The offline
-adversarial search remains this project's only proven differentiator.
+During an earlier run an agent modified the vendored template, contaminating
+later runs. Stubs are restored, and `ab_pi.run_guarded` now snapshots and
+restores any template that changes during evaluation.
+
+Conclusion: on real repository tasks at this model, Pi is currently equal or
+better on capability and clearly better on latency. The offline adversarial
+search remains this project's only proven differentiator.
 
 ## Model access blocker
 

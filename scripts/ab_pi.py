@@ -1,6 +1,7 @@
 """Compare this harness against Pi on a task manifest."""
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -645,6 +646,77 @@ def _run_pair(
     return _workspace_result(task, mine, other)
 
 
+def run_guarded(template, action):
+    """Run an action and restore a template if it changes.
+
+    Parameters
+    ----------
+    template : pathlib.Path
+        Workspace template.
+
+    action : callable
+        Zero-argument action.
+
+    Returns
+    -------
+    object
+        The action result.
+    """
+    digest = _tree_digest(template)
+    with tempfile.TemporaryDirectory() as snapshot:
+        shutil.copytree(template, snapshot, dirs_exist_ok=True)
+        result = action()
+        if _tree_digest(template) != digest:
+            _restore_template(snapshot, template)
+            print(f"warning: restored {template}", file=sys.stderr)
+    return result
+
+
+def _tree_digest(root) -> str:
+    """Return a digest of a directory tree.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Directory root.
+
+    Returns
+    -------
+    str
+        SHA-256 digest over relative paths and file contents.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            digest.update(str(path.relative_to(root)).encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _restore_template(snapshot, root) -> None:
+    """Restore a directory from a snapshot.
+
+    Parameters
+    ----------
+    snapshot : str
+        Snapshot directory.
+
+    root : pathlib.Path
+        Destination directory.
+
+    Returns
+    -------
+    None
+        The destination contents are replaced.
+    """
+    for child in root.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+    shutil.copytree(snapshot, root, dirs_exist_ok=True)
+
+
 def _agent_workspace(command, prompt, timeout, template, test, runner):
     """Run one agent in a fresh workspace copy and score it.
 
@@ -661,6 +733,42 @@ def _agent_workspace(command, prompt, timeout, template, test, runner):
 
     template : pathlib.Path
         Workspace template to copy.
+
+    test : pathlib.Path
+        Hidden test module.
+
+    runner : str
+        ``unittest`` or ``pytest``.
+
+    Returns
+    -------
+    tuple
+        Passed flag, elapsed seconds, and status string.
+    """
+    return run_guarded(
+        template,
+        lambda: _workspace_run(
+            command, prompt, timeout, template, test, runner
+        ),
+    )
+
+
+def _workspace_run(command, prompt, timeout, template, test, runner):
+    """Run and score one agent in a fresh workspace copy.
+
+    Parameters
+    ----------
+    command : list[str]
+        Command prefix.
+
+    prompt : str
+        Task prompt.
+
+    timeout : int
+        Timeout in seconds.
+
+    template : pathlib.Path
+        Workspace template.
 
     test : pathlib.Path
         Hidden test module.

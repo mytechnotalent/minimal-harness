@@ -14,6 +14,7 @@ from meta_harness.task_evaluator import load_manifest
 from meta_harness.task_evaluator import score_candidate
 from meta_harness.task_evaluator import score_workspace
 from scripts.ab_pi import extract_code
+from scripts.ab_pi import run_guarded
 from scripts.ab_pi import run_once
 
 _CODE_SUFFIX = (
@@ -221,6 +222,41 @@ def _task_score(task, root, command, config, timeout):
 
 def _workspace_score(task, root, command, config, prompt, timeout):
     """Run and score one workspace task.
+
+    Parameters
+    ----------
+    task : dict
+        Task record.
+
+    root : pathlib.Path
+        Manifest root directory.
+
+    command : list[str]
+        Harness command prefix.
+
+    config : dict
+        Configuration record.
+
+    prompt : str
+        Task prompt.
+
+    timeout : int
+        Per-run timeout in seconds.
+
+    Returns
+    -------
+    dict
+        One config/task row.
+    """
+    template = root / task["workspace"]
+    return run_guarded(
+        template,
+        lambda: _workspace_run(task, root, command, config, prompt, timeout),
+    )
+
+
+def _workspace_run(task, root, command, config, prompt, timeout):
+    """Run one workspace task in a fresh copy and score it.
 
     Parameters
     ----------
