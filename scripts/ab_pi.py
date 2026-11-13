@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import re
 import shlex
 import shutil
@@ -118,6 +119,39 @@ def _run_status(command, prompt, timeout, cwd=None, env=None) -> tuple:
         Answer text, elapsed seconds, and status string.
     """
     started = time.monotonic()
+    command = _scoped_command(command, cwd)
+    env = _scoped_env(env, cwd)
+    return _attempt(command, prompt, timeout, cwd, env, started)
+
+
+def _attempt(command, prompt, timeout, cwd, env, started) -> tuple:
+    """Run one agent, converting failures to status strings.
+
+    Parameters
+    ----------
+    command : list[str]
+        Command prefix.
+
+    prompt : str
+        Task prompt.
+
+    timeout : int
+        Timeout in seconds.
+
+    cwd : str or None
+        Working directory.
+
+    env : dict
+        Environment mapping.
+
+    started : float
+        Start time from ``time.monotonic``.
+
+    Returns
+    -------
+    tuple
+        Answer text, elapsed seconds, and status string.
+    """
     try:
         completed = _invoke(command, prompt, timeout, cwd, env)
     except subprocess.TimeoutExpired:
@@ -161,6 +195,49 @@ def _elapsed(started: float) -> float:
         Elapsed seconds rounded to two decimals.
     """
     return round(time.monotonic() - started, 2)
+
+
+def _scoped_command(command, cwd) -> list:
+    """Append an explicit workspace for this harness CLI.
+
+    Parameters
+    ----------
+    command : list[str]
+        Command prefix.
+
+    cwd : str or None
+        Workspace directory.
+
+    Returns
+    -------
+    list
+        Command with an explicit workspace when supported.
+    """
+    if cwd and "meta_harness.cli" in command and "--workspace" not in command:
+        return [*command, "--workspace", str(cwd)]
+    return command
+
+
+def _scoped_env(env, cwd):
+    """Return an environment with PWD pinned to the workspace.
+
+    Parameters
+    ----------
+    env : dict or None
+        Environment overrides.
+
+    cwd : str or None
+        Workspace directory.
+
+    Returns
+    -------
+    dict
+        Environment mapping for the child process.
+    """
+    merged = dict(os.environ if env is None else env)
+    if cwd:
+        merged["PWD"] = str(cwd)
+    return merged
 
 
 def _invoke(command, prompt, timeout, cwd, env=None):
