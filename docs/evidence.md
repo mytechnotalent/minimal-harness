@@ -110,6 +110,14 @@ Every task fails with the stubbed source and passes with its reference file;
 `tests/test_independent_corpus.py` enforces this in CI. This is still a small
 sample; phase 1 targets 20-50 tasks.
 
+## Config search engine
+
+`scripts/search_harness.py` evaluates a configuration grid on a manifest and
+returns a Pareto archive over pass rate and elapsed time. Configs vary
+environment variables and CLI arguments (verification on/off, draft count,
+turn budget). Unit tests cover ranking, averaging, and invalid configs. The
+independent-corpus campaign has not yet been run at scale.
+
 ## Phase 0 pilot log (honest)
 
 - A 2-repeat pilot at a 300-second timeout was invalid: the harness verification

@@ -609,6 +609,24 @@ workspace, the harness runs them, and one repair turn is applied when they
 fail. This is the test-time counterpart of the reviewer stage in optimize
 mode.
 
+### Harness configuration search
+
+`scripts/search_harness.py` evaluates a grid of harness configurations on a
+manifest and returns a Pareto archive over pass rate and elapsed time:
+
+```bash
+python -m scripts.search_harness \
+  --manifest benchmarks/independent/manifest.json \
+  --configs benchmarks/independent/search-configs.json \
+  --harness-cmd ".venv/bin/python -m meta_harness.cli --no-web" \
+  --timeout 600 --repeats 2 --out runs/search.json
+```
+
+Each config is `{"name": ..., "env": {...}, "args": [...]}`. The script runs
+the harness per task and repeat, scores hidden tests, and marks non-dominated
+configs. `benchmarks/independent/search-configs.json` contains baseline,
+verification, and verification-plus-drafts examples.
+
 ## Testing
 
 ```bash

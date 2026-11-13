@@ -22,6 +22,7 @@ gate 2 → log → repeat**. See [docs/adversarial-loop.md](docs/adversarial-loo
 - `meta_harness/progress.py` — live `--optimize` progress dashboard.
 - `scripts/ab_pi.py` — headless A/B comparison against Pi.
 - `scripts/prove_advantage.py` — deterministic gate-2 and reviewer proofs.
+- `scripts/search_harness.py` — harness configuration search and Pareto archive.
 - `benchmarks/headtohead/` — single-file seed corpus for the A/B runner.
 - `benchmarks/repo/` — multi-file agentic corpus with hidden tests.
 - `benchmarks/independent/` — vendored real-project tasks with project tests

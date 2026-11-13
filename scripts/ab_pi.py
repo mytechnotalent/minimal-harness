@@ -64,7 +64,7 @@ def _harness_cmd() -> str:
     return shlex.join([sys.executable, "-m", "meta_harness.cli", "--no-web"])
 
 
-def run_once(command, prompt, timeout, cwd=None):
+def run_once(command, prompt, timeout, cwd=None, env=None):
     """Run one agent command and return its answer text.
 
     Parameters
@@ -81,15 +81,18 @@ def run_once(command, prompt, timeout, cwd=None):
     cwd : str or None
         Working directory for the agent.
 
+    env : dict or None
+        Environment overrides.
+
     Returns
     -------
     str
         Standard output, or an empty string on failure.
     """
-    return _run_status(command, prompt, timeout, cwd)[0]
+    return _run_status(command, prompt, timeout, cwd, env)[0]
 
 
-def _run_status(command, prompt, timeout, cwd=None) -> tuple:
+def _run_status(command, prompt, timeout, cwd=None, env=None) -> tuple:
     """Run one agent and classify its outcome.
 
     Parameters
@@ -106,6 +109,9 @@ def _run_status(command, prompt, timeout, cwd=None) -> tuple:
     cwd : str or None
         Working directory for the agent.
 
+    env : dict or None
+        Environment overrides.
+
     Returns
     -------
     tuple
@@ -113,7 +119,7 @@ def _run_status(command, prompt, timeout, cwd=None) -> tuple:
     """
     started = time.monotonic()
     try:
-        completed = _invoke(command, prompt, timeout, cwd)
+        completed = _invoke(command, prompt, timeout, cwd, env)
     except subprocess.TimeoutExpired:
         return "", _elapsed(started), "timeout"
     except OSError:
@@ -157,7 +163,7 @@ def _elapsed(started: float) -> float:
     return round(time.monotonic() - started, 2)
 
 
-def _invoke(command, prompt, timeout, cwd):
+def _invoke(command, prompt, timeout, cwd, env=None):
     """Run one agent subprocess.
 
     Parameters
@@ -174,6 +180,9 @@ def _invoke(command, prompt, timeout, cwd):
     cwd : str or None
         Working directory.
 
+    env : dict or None
+        Environment overrides.
+
     Returns
     -------
     subprocess.CompletedProcess
@@ -185,6 +194,7 @@ def _invoke(command, prompt, timeout, cwd):
         text=True,
         timeout=timeout,
         cwd=cwd,
+        env=env,
     )
 
 
