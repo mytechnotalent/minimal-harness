@@ -76,6 +76,38 @@ Reproduce with `scripts/ab_pi.py`; see the README for the exact command.
 - **Cost-normalized superiority.** Average latency is reported, but no
   frontier-model, per-dollar comparison exists.
 
+## Frozen protocol (phase 0)
+
+Every comparable run uses these settings:
+
+- Model: `beam-free` through the OpenCode Go OpenAI-compatible endpoint.
+- Pi: 1.5.2, `--provider opencode --model beam-free --print --mode text`
+  with sessions, context files, extensions, skills, templates, and MCP off.
+- Harness: `python -m meta_harness.cli --no-web`.
+- Timeout: 600 seconds per agent and task, recorded separately as a timeout
+  failure.
+- Repeats: 5 per task and configuration; report mean, spread, and timeout
+  counts.
+- Isolation: every agent runs in a fresh temporary copy of the task
+  workspace; hidden tests are injected only after the run.
+- Single-file tasks: each agent is asked for one Python block and the code is
+  extracted; workspace tasks: the agent edits files in place.
+
+Results from different settings are never mixed.
+
+## Phase 0 pilot log (honest)
+
+- A 2-repeat pilot at a 300-second timeout was invalid: the harness verification
+  loop timed out three times. The frozen protocol uses 600 seconds.
+- A 2-repeat logreport pilot at 600 seconds produced 0/2 for this harness and
+  2/2 for Pi. Diagnosis: the repair turn could replace a correct workspace with
+  a worse one when reviewer tests were wrong. The agent now snapshots the
+  workspace before repair and restores it when the tests still fail.
+- After that fix, two verification-on samples and one verification-off sample
+  all passed. This is a reliability improvement, not a superiority result.
+- The pilot flipped the sign of the earlier +50 result. No superiority claim is
+  made until the 5-repeat campaign completes.
+
 ## Next proof milestones
 
 1. Five or more repeats per configuration with confidence intervals.

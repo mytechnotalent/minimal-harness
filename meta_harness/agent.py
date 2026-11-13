@@ -3,6 +3,8 @@
 import json
 import os
 import re
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -239,8 +241,39 @@ class Agent:
         passed, output = run_workspace_tests(self.tools.root, tests)
         if passed:
             return answer
-        self._append(_repair_message(output))
-        return self._loop()
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = _snapshot(Path(temporary), self.tools.root)
+            self._append(_repair_message(output))
+            repaired = self._loop()
+            return self._accept_repair(tests, repaired, answer, snapshot)
+
+    def _accept_repair(self, tests, repaired, answer, snapshot) -> str:
+        """Accept a repair only when reviewer tests now pass.
+
+        Parameters
+        ----------
+        tests : list[str]
+            Reviewer-generated unittest sources.
+
+        repaired : str
+            Repaired answer.
+
+        answer : str
+            Original answer.
+
+        snapshot : pathlib.Path
+            Workspace snapshot.
+
+        Returns
+        -------
+        str
+            Repaired answer when tests pass, otherwise the original.
+        """
+        fixed, _ = run_workspace_tests(self.tools.root, tests)
+        if fixed:
+            return repaired
+        _restore_workspace(self.tools.root, snapshot)
+        return answer
 
     def _workspace_tests(self, prompt: str, answer: str) -> list[str]:
         """Ask the reviewer for executable workspace tests.
@@ -1100,3 +1133,48 @@ def _repair_message(output: str) -> dict[str, str]:
         "content": "Reviewer tests failed. Fix the workspace, then finish.\n"
         + detail,
     }
+
+
+def _snapshot(parent: Path, root: Path) -> Path:
+    """Copy a workspace into a snapshot directory.
+
+    Parameters
+    ----------
+    parent : pathlib.Path
+        Temporary directory.
+
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    pathlib.Path
+        Snapshot workspace path.
+    """
+    snapshot = parent / "workspace"
+    shutil.copytree(root, snapshot)
+    return snapshot
+
+
+def _restore_workspace(root: Path, snapshot: Path) -> None:
+    """Restore a workspace from a snapshot.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+
+    snapshot : pathlib.Path
+        Snapshot directory.
+
+    Returns
+    -------
+    None
+        The workspace contents are replaced.
+    """
+    for child in root.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+    shutil.copytree(snapshot, root, dirs_exist_ok=True)

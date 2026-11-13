@@ -539,6 +539,46 @@ def _draft_env(drafts: str) -> dict:
     }
 
 
+_REPEAT_ROWS = (
+    {
+        "id": "x",
+        "harness": 1.0,
+        "pi": 0.0,
+        "harness_s": 1.0,
+        "pi_s": 2.0,
+        "harness_status": "ok",
+        "pi_status": "ok",
+    },
+    {
+        "id": "x",
+        "harness": 0.0,
+        "pi": 1.0,
+        "harness_s": 3.0,
+        "pi_s": 4.0,
+        "harness_status": "timeout",
+        "pi_status": "ok",
+    },
+)
+
+
+def _repeat_report(directory):
+    """Run a repeated comparison with scripted rows.
+
+    Parameters
+    ----------
+    directory : pathlib.Path
+        Temporary directory.
+
+    Returns
+    -------
+    dict
+        Comparison report.
+    """
+    manifest = _write_manifest(directory, "x", "t.py")
+    with patch.object(ab_pi, "_task_row", side_effect=list(_REPEAT_ROWS)):
+        return ab_pi.compare(manifest, ["a"], ["b"], 5, repeats=2)
+
+
 def _compare_ab(directory):
     """Run the A/B comparison with patched collaborators.
 
@@ -553,7 +593,9 @@ def _compare_ab(directory):
         Runner mock and comparison report.
     """
     manifest = _write_manifest(directory, "double", "test_double.py")
-    with patch.object(ab_pi, "run_once", return_value="") as runner:
+    with patch.object(
+        ab_pi, "_run_status", return_value=("", 0.0, "ok")
+    ) as runner:
         with patch.object(ab_pi, "score_answer", side_effect=[1.0, 0.0]):
             report = ab_pi.compare(manifest, ["ours"], ["pi"], 5)
     return runner, report
@@ -575,10 +617,49 @@ class AnswerTestRepairTests(unittest.TestCase):
         """
         client = _RepairClient()
         with tempfile.TemporaryDirectory() as directory:
-            answer = _run_repair(directory, client)
+            answer = _run_repair(
+                directory, client, [(False, "boom"), (True, "")]
+            )
         self.assertEqual(answer, "repaired answer")
         self.assertEqual(client.chat_calls, 2)
         self.assertEqual(client.complete_calls, 1)
+
+    def test_failed_repair_restores_workspace(self) -> None:
+        """A repair that still fails restores the snapshot.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = _RepairClient()
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(agent_module, "_restore_workspace") as restore:
+                answer = _run_repair(
+                    directory, client, [(False, "boom"), (False, "worse")]
+                )
+        self.assertEqual(answer, "first answer")
+        restore.assert_called_once()
+
+    def test_restore_workspace_replaces_contents(self) -> None:
+        """Restoring replaces the workspace files.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root, snap = _snapshot_pair(Path(directory))
+            agent_module._restore_workspace(root, snap)
+            restored = (root / "a.py").read_text(encoding="utf-8")
+        self.assertEqual(restored, "old")
 
     def test_passing_tests_skip_repair(self) -> None:
         """Passing reviewer tests leave the answer untouched.
@@ -593,7 +674,7 @@ class AnswerTestRepairTests(unittest.TestCase):
         """
         client = _RepairClient()
         with tempfile.TemporaryDirectory() as directory:
-            answer = _run_repair(directory, client, passed=True)
+            answer = _run_repair(directory, client, [(True, "")])
         self.assertEqual(answer, "first answer")
         self.assertEqual(client.chat_calls, 1)
 
@@ -716,8 +797,8 @@ def _answer_env(value: str) -> dict:
     }
 
 
-def _run_repair(directory, client, passed=False):
-    """Run an agent with a patched workspace test result.
+def _run_repair(directory, client, results=None):
+    """Run an agent with scripted workspace test results.
 
     Parameters
     ----------
@@ -727,8 +808,8 @@ def _run_repair(directory, client, passed=False):
     client : _RepairClient
         Scripted chat-model double.
 
-    passed : bool
-        Whether reviewer tests are reported as passing.
+    results : list or None
+        Side effects for ``run_workspace_tests``.
 
     Returns
     -------
@@ -736,11 +817,34 @@ def _run_repair(directory, client, passed=False):
         Final agent answer.
     """
     agent = Agent(root=directory, client=client, max_turns=1)
+    effects = results if results is not None else [(True, "")]
     with patch.object(
-        agent_module, "run_workspace_tests", return_value=(passed, "out")
+        agent_module, "run_workspace_tests", side_effect=effects
     ):
         with patch.dict(os.environ, _answer_env("1")):
             return agent.run("fix it")
+
+
+def _snapshot_pair(directory):
+    """Build a workspace and snapshot with different contents.
+
+    Parameters
+    ----------
+    directory : pathlib.Path
+        Temporary directory.
+
+    Returns
+    -------
+    tuple
+        Workspace root and snapshot directory.
+    """
+    root = directory / "root"
+    snap = directory / "snap"
+    root.mkdir()
+    snap.mkdir()
+    (root / "a.py").write_text("new", encoding="utf-8")
+    (snap / "a.py").write_text("old", encoding="utf-8")
+    return root, snap
 
 
 class AbRunnerTests(unittest.TestCase):
@@ -773,6 +877,23 @@ class AbRunnerTests(unittest.TestCase):
         """
         answer = "```python\nx = 1\n```\ntext\n```python\ny = 2\n```"
         self.assertEqual(ab_pi.extract_code(answer), "x = 1\n\ny = 2")
+
+    def test_repeats_average_runs(self) -> None:
+        """Repeated runs are averaged per task.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            report = _repeat_report(Path(directory))
+        row = report["tasks"][0]
+        self.assertEqual(row["harness"], 0.5)
+        self.assertEqual(row["harness_timeouts"], 1)
 
     def test_report_averages_tasks(self) -> None:
         """The report averages per-task rates.

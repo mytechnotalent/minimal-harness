@@ -582,14 +582,15 @@ python scripts/ab_pi.py \
   --manifest benchmarks/headtohead/manifest.json \
   --harness-cmd "python -m meta_harness.cli --no-web" \
   --pi-cmd "pi --provider openrouter --model openrouter/free --print --mode text" \
-  --out runs/ab-pi.json
+  --repeats 5 --out runs/ab-pi.json
 ```
 
 Both commands receive the task prompt as their final argument and run in
 isolated temporary workspaces. Commands with flags must be passed as one
 quoted string because argparse would otherwise consume the flags. The report
-contains per-task pass rates, aggregate pass rates, the delta, and average
-elapsed seconds for each agent.
+contains per-task pass rates, aggregate pass rates, the delta, average
+elapsed seconds, timeout counts, and per-run values. `--repeats N` runs every
+task N times and averages the result, which is required for any claim.
 
 Manifests can describe two task kinds. A task with a `workspace` directory is
 copied into a fresh temporary directory per agent; the agent edits files in
