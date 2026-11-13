@@ -179,6 +179,23 @@ Conclusion: the latency gap is a turn-count and provider-latency problem, not
 a tooling problem. Reducing turns trades quality against speed, and the
 current evidence does not show our extra turns buying reliable quality.
 
+## Lean mode results (deepseek-v4.1-flash)
+
+`--lean` uses a short repo-editing prompt, hides web tools, skips the
+text-only answer review after file edits, and asks for few turns.
+
+| Task | Repeats | Harness | Pi | Harness time | Pi time |
+| --- | --- | --- | --- | --- | --- |
+| itsdangerous_signer | 5 | 0.80 | 1.00 | 116s mean | 155s mean |
+| iniconfig_parser | 3 | 0.67 | 1.00 | 177s median | 126s median |
+| packaging_utils | 3 | 0.67 | 1.00 | 186s median | 113s median |
+
+Lean mode cuts latency roughly in half versus the default harness on the
+first task (239s to 116s) and is sometimes faster than Pi, but it is not
+consistently faster and it is less accurate. The remaining gap is agent
+workflow quality and turn count, not tooling. This is an opt-in config, not
+a claimed default win.
+
 ## Config search engine
 
 `scripts/search_harness.py` evaluates a configuration grid on a manifest and

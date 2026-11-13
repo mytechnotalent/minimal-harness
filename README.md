@@ -233,6 +233,12 @@ python3 -m meta_harness.cli --tui --session runs/tui-session.jsonl "Inspect this
 
 Type prompts in the bottom editor. Press Enter to submit, Backspace to edit, and Ctrl-C or Ctrl-D to exit. While the agent is working, the status line animates `thinking.`, `thinking..`, `thinking...` so you can see it is still running. When a conversation is longer than the screen, scroll the transcript with Up/Down, PageUp/PageDown, Home/End, or the mouse wheel; submitting a new prompt jumps back to the newest text.
 
+`--lean` uses a short repo-editing prompt: inspect only the relevant files,
+edit, verify once, and stop. It roughly halves latency on some repository
+tasks but is less accurate than the full mode. It hides web tools and skips
+the text-only answer review after file edits. Treat it as a speed/quality
+trade-off, not a default.
+
 Use an isolated workspace for application generation:
 
 ```bash

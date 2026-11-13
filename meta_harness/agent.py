@@ -126,6 +126,8 @@ class Agent:
         max_turns: int = 12,
         session: Session | None = None,
         observer=None,
+        web_enabled: bool = True,
+        lean: bool = False,
     ) -> None:
         """Initialize an agent session.
 
@@ -142,19 +144,58 @@ class Agent:
         observer : callable or None
             Optional callback run after each tool call.
 
+        web_enabled : bool
+            Advertise web and browser tools.
+
+        lean : bool
+            Use the short repo-editing prompt.
+
         Returns
         -------
         None
             This initializer configures the agent.
         """
         self.observer = observer
+        self.lean = lean
         self.client = client or OpenRouterClient()
-        self.tools = ToolRegistry(root)
+        self.tools = ToolRegistry(root, web_enabled=web_enabled)
         self.max_turns = max_turns
         self.session = session
         self.messages: list[dict[str, Any]] = self._initial_messages(session)
+        self._init_task_state()
+
+    def _init_task_state(self) -> None:
+        """Initialize per-run task state.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Queue and mutation fields are initialized.
+        """
         self.steering: list[str] = []
         self.follow_up: list[str] = []
+        self._mutated = False
+
+    def _begin_run(self, prompt: str) -> None:
+        """Reset run state and append the user turn.
+
+        Parameters
+        ----------
+        prompt : str
+            User task.
+
+        Returns
+        -------
+        None
+            The conversation is updated.
+        """
+        self._mutated = False
+        self._append({"role": "user", "content": prompt})
+        self._trim_system(prompt)
 
     def _initial_messages(
         self, session: Session | None
@@ -176,7 +217,9 @@ class Agent:
             _repair_tool_calls(message)
         if messages and messages[0].get("role") == "system":
             return messages
-        return [{"role": "system", "content": _system_prompt()}] + messages
+        return [
+            {"role": "system", "content": _system_prompt(self.lean)}
+        ] + messages
 
     def run(self, prompt: str) -> str:
         """Run the agent until final text or turn limit.
@@ -193,8 +236,7 @@ class Agent:
         """
         if _adversarial_drafts() > 1 and hasattr(self.client, "complete"):
             return self._adversarial_run(prompt)
-        self._append({"role": "user", "content": prompt})
-        self._trim_system(prompt)
+        self._begin_run(prompt)
         answer = self._loop()
         answer = self._verified_answer(prompt, answer)
         return self._review_answer(prompt, answer)
@@ -311,8 +353,7 @@ class Agent:
         str
             Reviewed best draft.
         """
-        self._append({"role": "user", "content": prompt})
-        self._trim_system(prompt)
+        self._begin_run(prompt)
         base = _copy_messages(self.messages)
         drafts = self._drafts(base)
         best = self._pick_draft(prompt, drafts)
@@ -396,6 +437,23 @@ class Agent:
         None
             The system message may be shortened in place.
         """
+        if self.lean:
+            return
+        self._trim_standards(prompt)
+
+    def _trim_standards(self, prompt: str) -> None:
+        """Apply the coding-standards policy.
+
+        Parameters
+        ----------
+        prompt : str
+            User task.
+
+        Returns
+        -------
+        None
+            The system message may be shortened in place.
+        """
         mode = _standards_mode()
         if mode == "keep":
             return
@@ -419,7 +477,7 @@ class Agent:
         str
             Approved answer or a revised answer.
         """
-        if not self._review_enabled(answer):
+        if self._mutated or not self._review_enabled(answer):
             return answer
         review = self._answer_review(prompt, answer)
         revised = review.get("revised_answer")
@@ -786,6 +844,8 @@ class Agent:
             Tool result message.
         """
         function = call["function"]
+        if function.get("name") in ("write", "edit"):
+            self._mutated = True
         arguments, content = self._run_tool(function)
         self._notify(function["name"], arguments, content)
         return {"role": "tool", "tool_call_id": call["id"], "content": content}
@@ -876,7 +936,7 @@ def _repair_tool_calls(message: dict[str, Any]) -> None:
             function["arguments"] = "{}"
 
 
-def _system_prompt() -> str:
+def _system_prompt(lean: bool = False) -> str:
     """Build the combined interactive system prompt.
 
     Parameters
@@ -888,6 +948,8 @@ def _system_prompt() -> str:
     str
         Agent prompt followed by the coding standards.
     """
+    if lean:
+        return _load_prompt("lean")
     return _load_prompt("agent") + "\n\n" + _load_prompt("coding_standards")
 
 

@@ -122,6 +122,22 @@ class AgentTests(unittest.TestCase):
         registry.execute("suggest", {"options": expected})
         self.assertEqual(registry.suggestions, expected)
 
+    def test_web_tools_can_be_disabled(self) -> None:
+        """Web and browser tools are hidden when disabled.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        registry = ToolRegistry(".", web_enabled=False)
+        names = self._names(registry)
+        self.assertNotIn("web_search", names)
+        self.assertIn("read", names)
+
     def _names(self, registry: ToolRegistry) -> list[str]:
         """Return advertised tool names.
 
@@ -930,6 +946,77 @@ class ToolCallClient:
             "function": {"name": "write", "arguments": arguments},
         }
         return {"role": "assistant", "content": None, "tool_calls": [call]}
+
+
+class LeanModeTests(unittest.TestCase):
+    """Verify the lean repo-editing prompt."""
+
+    def test_lean_uses_short_prompt(self) -> None:
+        """Lean mode loads only the short prompt.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(".", client=object(), lean=True)
+        system = agent.messages[0]["content"]
+        self.assertIn("fewest possible turns", system)
+        self.assertNotIn("coding standards", system.lower())
+
+    def test_lean_trim_is_noop(self) -> None:
+        """Lean mode never strips its system prompt.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(".", client=object(), lean=True)
+        before = agent.messages[0]["content"]
+        agent._trim_system("write a script")
+        self.assertEqual(agent.messages[0]["content"], before)
+
+
+class MutationReviewTests(unittest.TestCase):
+    """Verify file edits skip the text-only answer review."""
+
+    def test_mutated_run_skips_review(self) -> None:
+        """A file edit makes answer review unnecessary.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(".", client=object())
+        agent._mutated = True
+        self.assertEqual(agent._review_answer("q", "a"), "a")
+
+    def test_begin_run_resets_mutation(self) -> None:
+        """Starting a run clears the mutation flag.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(".", client=object())
+        agent._mutated = True
+        agent._begin_run("next")
+        self.assertFalse(agent._mutated)
 
 
 if __name__ == "__main__":

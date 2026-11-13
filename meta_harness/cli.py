@@ -40,6 +40,7 @@ OPTION_SPECS = [
     (("--no-review-tests",), {"action": "store_true"}),
     (("--flake-runs",), {"type": int, "default": 2}),
     (("--no-web",), {"action": "store_true"}),
+    (("--lean",), {"action": "store_true"}),
     (("--task-manifest",), {"default": None}),
     (("--gate-command",), {"default": None}),
     (("--final-gate-command",), {"default": None}),
@@ -252,6 +253,8 @@ def _new_agent(args: Arguments) -> Agent:
         OpenRouterClient(args.model),
         args.max_turns,
         _session(args),
+        web_enabled=not args.no_web,
+        lean=args.lean,
     )
 
 

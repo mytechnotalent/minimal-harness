@@ -15,6 +15,12 @@ from .provider import ProviderCatalog
 
 PROTECTED_DIRS = {"meta_harness", "gui", "tests", "docs", "benchmarks", ".git"}
 
+_WEB_TOOLS = (
+    "web_search",
+    "browser_open",
+    "browser_screenshot",
+    "browser_assert",
+)
 TOOL_SCHEMAS = {
     "read": {"path": {"type": "string"}},
     "write": {"path": {"type": "string"}, "content": {"type": "string"}},
@@ -145,6 +151,7 @@ class ToolRegistry:
         root: Path | str = ".",
         questioner: Callable[[str, list[str]], str] | None = None,
         require_project_folder: bool = False,
+        web_enabled: bool = True,
     ) -> None:
         """Initialize tools rooted at one workspace.
 
@@ -159,6 +166,9 @@ class ToolRegistry:
         require_project_folder : bool
             Refuse new root-level files and harness source files.
 
+        web_enabled : bool
+            Advertise web and browser tools.
+
         Returns
         -------
         None
@@ -167,6 +177,7 @@ class ToolRegistry:
         self.root = Path(root).resolve()
         self.questioner = questioner
         self.require_project_folder = require_project_folder
+        self.web_enabled = web_enabled
         self.suggestions: list[str] = []
         self.tools = self._tool_map()
 
@@ -182,7 +193,12 @@ class ToolRegistry:
         dict[str, Callable[..., Any]]
             Tool names and bound implementations.
         """
-        return {name: getattr(self, name) for name in TOOL_SCHEMAS}
+        names = [
+            name
+            for name in TOOL_SCHEMAS
+            if self.web_enabled or name not in _WEB_TOOLS
+        ]
+        return {name: getattr(self, name) for name in names}
 
     def schema(self) -> list[dict[str, Any]]:
         """Return OpenAI-compatible tool schemas.

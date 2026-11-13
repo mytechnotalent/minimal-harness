@@ -405,6 +405,8 @@ def _average_row(task_id, runs) -> dict:
     row = _average_fields(task_id, runs)
     row["harness_runs"] = [item["harness"] for item in runs]
     row["pi_runs"] = [item["pi"] for item in runs]
+    row["harness_seconds_runs"] = [item["harness_s"] for item in runs]
+    row["pi_seconds_runs"] = [item["pi_s"] for item in runs]
     row["harness_timeouts"] = _count(runs, "harness_status")
     row["pi_timeouts"] = _count(runs, "pi_status")
     return row
