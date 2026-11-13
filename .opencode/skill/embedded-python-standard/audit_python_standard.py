@@ -14,6 +14,7 @@ SKIP_DIRS = {
     "build",
     "dist",
     "e2e-workspaces",
+    "independent",
     "minimal_harness.egg-info",
     "node_modules",
     "runs",

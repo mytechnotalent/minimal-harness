@@ -24,6 +24,8 @@ gate 2 → log → repeat**. See [docs/adversarial-loop.md](docs/adversarial-loo
 - `scripts/prove_advantage.py` — deterministic gate-2 and reviewer proofs.
 - `benchmarks/headtohead/` — single-file seed corpus for the A/B runner.
 - `benchmarks/repo/` — multi-file agentic corpus with hidden tests.
+- `benchmarks/independent/` — vendored real-project tasks with project tests
+  (excluded from formatting and audit).
 - `tests/` — offline unit tests.
 - `runs/` — per-run candidate artifacts (generated).
 

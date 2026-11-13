@@ -14,6 +14,7 @@ dev = [
     "black>=26.5",
     "flake8>=7.0",
     "pycodestyle>=2.12",
+    "pytest>=8",
     "playwright>=1.50",
     "py2app>=0.28; sys_platform == 'darwin'",
 ]
@@ -48,3 +49,4 @@ gui = ["assets/*.png"]
 
 [tool.black]
 line-length = 79
+extend-exclude = "benchmarks/independent"

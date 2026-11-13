@@ -1,6 +1,7 @@
 """Deterministic per-task evaluator for candidate proposals."""
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -256,6 +257,7 @@ def _unittest_proc(wd, module, timeout):
 def score_workspace(
     workspace: Path,
     test_path: Path,
+    runner: str = "unittest",
     timeout: int = 60,
 ) -> tuple[bool, str]:
     """Run a hidden test against an agent workspace.
@@ -268,6 +270,9 @@ def score_workspace(
     test_path : pathlib.Path
         Hidden test module to run.
 
+    runner : str
+        ``unittest`` or ``pytest``.
+
     timeout : int
         Subprocess timeout in seconds.
 
@@ -278,7 +283,7 @@ def score_workspace(
     """
     text = test_path.read_text(encoding="utf-8")
     return _staged_workspace_result(
-        workspace, "_hidden_test.py", text, timeout
+        workspace, "_hidden_test.py", text, timeout, runner
     )
 
 
@@ -336,7 +341,9 @@ def _stage_test(workspace: Path, name: str, text: str) -> Path:
     return path
 
 
-def _staged_workspace_result(workspace, name, text, timeout):
+def _staged_workspace_result(
+    workspace, name, text, timeout, runner="unittest"
+):
     """Run one staged test module and remove it afterwards.
 
     Parameters
@@ -353,6 +360,9 @@ def _staged_workspace_result(workspace, name, text, timeout):
     timeout : int
         Subprocess timeout in seconds.
 
+    runner : str
+        ``unittest`` or ``pytest``.
+
     Returns
     -------
     tuple[bool, str]
@@ -360,7 +370,89 @@ def _staged_workspace_result(workspace, name, text, timeout):
     """
     staged = _stage_test(workspace, name, text)
     try:
-        proc = _unittest_proc(workspace, Path(name).stem, timeout)
+        proc = _test_proc(workspace, name, runner, timeout)
     finally:
         staged.unlink(missing_ok=True)
     return proc.returncode == 0, (proc.stdout + proc.stderr).strip()
+
+
+def _test_proc(wd, name, runner, timeout):
+    """Run one staged test module.
+
+    Parameters
+    ----------
+    wd : pathlib.Path
+        Working directory.
+
+    name : str
+        Test filename.
+
+    runner : str
+        ``unittest`` or ``pytest``.
+
+    timeout : int
+        Subprocess timeout in seconds.
+
+    Returns
+    -------
+    subprocess.CompletedProcess
+        Completed test process.
+    """
+    if runner == "pytest":
+        return _pytest_proc(wd, name, timeout)
+    return _unittest_proc(wd, Path(name).stem, timeout)
+
+
+def _pytest_proc(wd, name, timeout):
+    """Run a pytest module in a working directory.
+
+    Parameters
+    ----------
+    wd : pathlib.Path
+        Working directory.
+
+    name : str
+        Test filename.
+
+    timeout : int
+        Subprocess timeout in seconds.
+
+    Returns
+    -------
+    subprocess.CompletedProcess
+        Completed test process.
+    """
+    env = {**os.environ, "PYTHONPATH": str(wd)}
+    return _run_pytest(wd, name, timeout, env)
+
+
+def _run_pytest(wd, name, timeout, env):
+    """Invoke pytest and return the completed process.
+
+    Parameters
+    ----------
+    wd : pathlib.Path
+        Working directory.
+
+    name : str
+        Test filename.
+
+    timeout : int
+        Subprocess timeout in seconds.
+
+    env : dict
+        Process environment.
+
+    Returns
+    -------
+    subprocess.CompletedProcess
+        Completed test process.
+    """
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", name],
+        cwd=wd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )

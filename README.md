@@ -596,7 +596,11 @@ Manifests can describe two task kinds. A task with a `workspace` directory is
 copied into a fresh temporary directory per agent; the agent edits files in
 place, and a hidden test that was never placed in the workspace is copied in
 afterwards to score it. `benchmarks/repo/manifest.json` contains four
-multi-file tasks of this kind. A task without a workspace is the single-file
+multi-file tasks of this kind. `benchmarks/independent/manifest.json` contains
+three tasks vendored from real projects (itsdangerous, iniconfig, packaging)
+whose hidden tests are the projects' own pytest suites; that directory is
+excluded from this repository's formatter and audit because the code is
+third-party. A task without a workspace is the single-file
 form: the agent's printed code block is extracted and scored against the test.
 
 `HARNESS_ANSWER_TESTS=1` enables answer-time verification: after the agent

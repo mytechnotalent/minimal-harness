@@ -509,12 +509,56 @@ def _workspace_row(task, root, harness_cmd, pi_cmd, timeout):
     prompt = task.get("prompt", "") + _REPO_SUFFIX
     template = root / task["workspace"]
     test = root / task["test"]
-    mine = _agent_workspace(harness_cmd, prompt, timeout, template, test)
-    other = _agent_workspace(pi_cmd, prompt, timeout, template, test)
+    runner = task.get("runner", "unittest")
+    return _run_pair(
+        task, prompt, timeout, template, test, runner, harness_cmd, pi_cmd
+    )
+
+
+def _run_pair(
+    task, prompt, timeout, template, test, runner, harness_cmd, pi_cmd
+):
+    """Run both agents and build a workspace row.
+
+    Parameters
+    ----------
+    task : dict
+        Task record.
+
+    prompt : str
+        Task prompt.
+
+    timeout : int
+        Per-task timeout in seconds.
+
+    template : pathlib.Path
+        Workspace template.
+
+    test : pathlib.Path
+        Hidden test module.
+
+    runner : str
+        ``unittest`` or ``pytest``.
+
+    harness_cmd : list[str]
+        This harness command prefix.
+
+    pi_cmd : list[str]
+        Pi command prefix.
+
+    Returns
+    -------
+    dict
+        Task row.
+    """
+    mine = _agent_workspace(
+        harness_cmd, prompt, timeout, template, test, runner
+    )
+    other = _agent_workspace(pi_cmd, prompt, timeout, template, test, runner)
     return _workspace_result(task, mine, other)
 
 
-def _agent_workspace(command, prompt, timeout, template, test):
+def _agent_workspace(command, prompt, timeout, template, test, runner):
     """Run one agent in a fresh workspace copy and score it.
 
     Parameters
@@ -534,6 +578,9 @@ def _agent_workspace(command, prompt, timeout, template, test):
     test : pathlib.Path
         Hidden test module.
 
+    runner : str
+        ``unittest`` or ``pytest``.
+
     Returns
     -------
     tuple
@@ -542,7 +589,7 @@ def _agent_workspace(command, prompt, timeout, template, test):
     with tempfile.TemporaryDirectory() as workspace:
         shutil.copytree(template, workspace, dirs_exist_ok=True)
         _, elapsed, status = _run_status(command, prompt, timeout, workspace)
-        passed = score_workspace(Path(workspace), test, timeout)[0]
+        passed = score_workspace(Path(workspace), test, runner, timeout)[0]
     return passed, elapsed, status
 
 
