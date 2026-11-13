@@ -110,6 +110,29 @@ Every task fails with the stubbed source and passes with its reference file;
 `tests/test_independent_corpus.py` enforces this in CI. This is still a small
 sample; phase 1 targets 20-50 tasks.
 
+## Independent corpus v1 results (beam-free)
+
+| Task | This harness | Pi | Our time | Pi |
+| --- | --- | --- | --- | --- |
+| itsdangerous_signer | 0/1 | 0/1 | 139-191s | 600s timeout |
+| iniconfig_parser | 0/1 | 0/1 | 246s | 600s timeout |
+| packaging_utils | 0/1 | 0/1 | 274s | 900s timeout |
+
+All three tasks fail for both agents. The harness finishes; Pi times out. This
+is a latency and completion signal, not a capability win. The free model is
+the limiting factor on real-project tasks.
+
+## Model access blocker
+
+Stronger models exist in the catalog but are not usable with the current key:
+
+- `big-pickle`: unavailable on the OpenCode Go inference endpoint.
+- `claude-fable-5`: listed on the Zen endpoint, but the key returns HTTP 403
+  `permission_error` with "Model access is disabled".
+
+Only `beam-free` works. A stronger-model comparison requires enabling model
+access in the OpenCode console or supplying an OpenRouter/Anthropic/OpenAI key.
+
 ## Config search engine
 
 `scripts/search_harness.py` evaluates a configuration grid on a manifest and
