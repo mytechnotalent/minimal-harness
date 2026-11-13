@@ -15,6 +15,8 @@ class Candidate:
     score: float | None = None
     review: dict[str, Any] = field(default_factory=dict)
     dynamic_test: dict[str, Any] = field(default_factory=dict)
+    gate1: dict[str, Any] = field(default_factory=dict)
+    gate2: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,8 @@ class SearchConfig:
     held_out_manifest: str | None = None
     allow_local_gate: bool = False
     baseline: bool = False
+    use_review_tests: bool = True
+    flake_runs: int = 2
 
 
 @dataclass(frozen=True)

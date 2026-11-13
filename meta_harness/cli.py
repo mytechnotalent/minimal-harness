@@ -37,6 +37,8 @@ OPTION_SPECS = [
     (("--no-docker",), {"action": "store_true"}),
     (("--local-gate",), {"action": "store_true"}),
     (("--baseline",), {"action": "store_true"}),
+    (("--no-review-tests",), {"action": "store_true"}),
+    (("--flake-runs",), {"type": int, "default": 2}),
     (("--no-web",), {"action": "store_true"}),
     (("--task-manifest",), {"default": None}),
     (("--gate-command",), {"default": None}),
@@ -535,6 +537,8 @@ def _flag_fields(args: Arguments) -> dict:
         "use_web_search": not args.no_web,
         "allow_local_gate": args.local_gate,
         "baseline": args.baseline,
+        "use_review_tests": not args.no_review_tests,
+        "flake_runs": args.flake_runs,
     }
 
 

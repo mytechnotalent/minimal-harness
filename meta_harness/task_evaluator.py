@@ -164,3 +164,203 @@ def _pytest(wd: Path, task_id: str, timeout: int) -> TaskResult:
         timeout=timeout,
     )
     return TaskResult(task_id, proc.returncode == 0, proc.stdout, proc.stderr)
+
+
+def score_review_tests(
+    code: str,
+    test_sources: list[str],
+    timeout: int = 5,
+) -> tuple[bool, str]:
+    """Run reviewer-generated tests against a candidate solution.
+
+    Parameters
+    ----------
+    code : str
+        Candidate solution source.
+
+    test_sources : list[str]
+        Reviewer-generated unittest sources.
+
+    timeout : int
+        Subprocess timeout in seconds.
+
+    Returns
+    -------
+    tuple[bool, str]
+        Whether every reviewer test passed, and combined output.
+    """
+    if not test_sources:
+        return True, ""
+    with tempfile.TemporaryDirectory() as work:
+        return _run_review_tests(Path(work), code, test_sources, timeout)
+
+
+def _run_review_tests(wd, code, test_sources, timeout):
+    """Stage and run reviewer tests in a scratch directory.
+
+    Parameters
+    ----------
+    wd : pathlib.Path
+        Working directory (temporary).
+
+    code : str
+        Candidate solution source.
+
+    test_sources : list[str]
+        Reviewer-generated unittest sources.
+
+    timeout : int
+        Subprocess timeout in seconds.
+
+    Returns
+    -------
+    tuple[bool, str]
+        Whether every reviewer test passed, and combined output.
+    """
+    (wd / "solution.py").write_text(code, encoding="utf-8")
+    (wd / "reviewer_test.py").write_text(
+        "\n\n".join(test_sources), encoding="utf-8"
+    )
+    proc = _unittest_proc(wd, "reviewer_test", timeout)
+    return proc.returncode == 0, (proc.stdout + proc.stderr).strip()
+
+
+def _unittest_proc(wd, module, timeout):
+    """Run one unittest module in a working directory.
+
+    Parameters
+    ----------
+    wd : pathlib.Path
+        Working directory containing the test module.
+
+    module : str
+        Test module name.
+
+    timeout : int
+        Subprocess timeout in seconds.
+
+    Returns
+    -------
+    subprocess.CompletedProcess
+        Completed test process with captured text output.
+    """
+    return subprocess.run(
+        [sys.executable, "-m", "unittest", module],
+        cwd=wd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def score_workspace(
+    workspace: Path,
+    test_path: Path,
+    timeout: int = 60,
+) -> tuple[bool, str]:
+    """Run a hidden test against an agent workspace.
+
+    Parameters
+    ----------
+    workspace : pathlib.Path
+        Workspace root modified by the agent.
+
+    test_path : pathlib.Path
+        Hidden test module to run.
+
+    timeout : int
+        Subprocess timeout in seconds.
+
+    Returns
+    -------
+    tuple[bool, str]
+        Whether the hidden test passed, and combined output.
+    """
+    text = test_path.read_text(encoding="utf-8")
+    return _staged_workspace_result(
+        workspace, "_hidden_test.py", text, timeout
+    )
+
+
+def run_workspace_tests(
+    workspace: Path,
+    test_sources: list[str],
+    timeout: int = 60,
+) -> tuple[bool, str]:
+    """Run reviewer-generated tests against an agent workspace.
+
+    Parameters
+    ----------
+    workspace : pathlib.Path
+        Workspace containing the agent's changes.
+
+    test_sources : list[str]
+        Reviewer-generated unittest sources.
+
+    timeout : int
+        Subprocess timeout in seconds.
+
+    Returns
+    -------
+    tuple[bool, str]
+        Whether every test passed, and combined output.
+    """
+    if not test_sources:
+        return True, ""
+    return _staged_workspace_result(
+        workspace, "_reviewer_test.py", "\n\n".join(test_sources), timeout
+    )
+
+
+def _stage_test(workspace: Path, name: str, text: str) -> Path:
+    """Write a staged test module into a workspace.
+
+    Parameters
+    ----------
+    workspace : pathlib.Path
+        Workspace root.
+
+    name : str
+        Test module filename.
+
+    text : str
+        Test source.
+
+    Returns
+    -------
+    pathlib.Path
+        Staged test path.
+    """
+    path = workspace / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _staged_workspace_result(workspace, name, text, timeout):
+    """Run one staged test module and remove it afterwards.
+
+    Parameters
+    ----------
+    workspace : pathlib.Path
+        Workspace root.
+
+    name : str
+        Test module filename.
+
+    text : str
+        Test source.
+
+    timeout : int
+        Subprocess timeout in seconds.
+
+    Returns
+    -------
+    tuple[bool, str]
+        Whether the test passed, and combined output.
+    """
+    staged = _stage_test(workspace, name, text)
+    try:
+        proc = _unittest_proc(workspace, Path(name).stem, timeout)
+    finally:
+        staged.unlink(missing_ok=True)
+    return proc.returncode == 0, (proc.stdout + proc.stderr).strip()

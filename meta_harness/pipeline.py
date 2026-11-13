@@ -1,6 +1,8 @@
 """Orchestrate proposal, review, testing, adjudication, and cycling."""
 
 import json
+import time
+from dataclasses import replace
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -17,6 +19,7 @@ from .openrouter import OpenRouterClient
 from .prompts import load as _load_prompt
 from .task_evaluator import load_manifest
 from .task_evaluator import score_candidate
+from .task_evaluator import score_review_tests
 from .web_search import WebSearchClient
 
 Proposer = Callable[[str, list[Candidate]], list[Candidate]]
@@ -252,7 +255,7 @@ class SearchPipeline:
         if not survivors:
             return self._record(evaluated, None, history, winner, iteration)
         selected = self._select_survivor(survivors, history)
-        final = self._final_survivor(selected, iteration)
+        final = self._final_survivor(selected, iteration, winner)
         return self._record(evaluated, final, history, winner, iteration)
 
     def _select_survivor(
@@ -277,7 +280,10 @@ class SearchPipeline:
         return self._adjudicate(survivors, history)
 
     def _final_survivor(
-        self, selected: Candidate, iteration: int
+        self,
+        selected: Candidate,
+        iteration: int,
+        incumbent: Candidate | None = None,
     ) -> Candidate:
         """Apply the configured final-gate behavior.
 
@@ -285,8 +291,12 @@ class SearchPipeline:
         ----------
         selected : Candidate
             Selected survivor.
+
         iteration : int
             Current iteration number.
+
+        incumbent : Candidate or None
+            Current winner, used for differential testing.
 
         Returns
         -------
@@ -295,7 +305,7 @@ class SearchPipeline:
         """
         if self.config.baseline:
             return self._baseline_final(selected)
-        return self._final_dynamic_test(selected, iteration)
+        return self._final_dynamic_test(selected, iteration, incumbent)
 
     def _baseline_final(self, candidate: Candidate) -> Candidate:
         """Mark a baseline survivor as final without a second gate.
@@ -647,11 +657,35 @@ class SearchPipeline:
         Candidate
             Candidate with score and gate data.
         """
+        started = time.monotonic()
         result = self._test_result(candidate, iteration)
+        result = self._review_test_result(candidate, result)
+        result["elapsed"] = round(time.monotonic() - started, 3)
         self._emit_gate("gate1", candidate, result)
         return self._with_test(
-            candidate, result, self._score(candidate, result)
+            candidate, result, self._score(candidate, result), gate1=result
         )
+
+    def _review_test_result(self, candidate: Candidate, result: dict) -> dict:
+        """Attach reviewer-generated test results to a gate result.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate with review data.
+
+        result : dict
+            Base gate result.
+
+        Returns
+        -------
+        dict
+            Gate result including reviewer test fields.
+        """
+        sources = _review_sources(candidate.review)
+        if not sources or not self.config.use_review_tests:
+            return result
+        return _with_review_tests(candidate.proposal, result, sources)
 
     def _score(self, candidate: Candidate, result: dict) -> float | None:
         """Choose an existing or gate-provided score.
@@ -860,14 +894,64 @@ class SearchPipeline:
         Candidate
             Selected candidate.
         """
+        raw = self._ask_adjudicator(candidates, history)
+        pareto = _pareto_survivors(candidates)
+        selected = self._select(pareto, self._selection_id(raw))
+        self._emit_adjudicated(selected, len(candidates), len(pareto))
+        return selected
+
+    def _ask_adjudicator(
+        self, candidates: list[Candidate], history: list[Candidate]
+    ) -> str:
+        """Request one adjudicator response.
+
+        Parameters
+        ----------
+        candidates : list[Candidate]
+            First-gate results.
+
+        history : list[Candidate]
+            Prior records.
+
+        Returns
+        -------
+        str
+            Raw adjudicator response.
+        """
         prompt = _load_prompt("adjudicator")
         context = self._json(self._adjudicator_payload(candidates, history))
         self._emit("stage_started", stage="adjudicator")
         raw = self.client.complete(prompt, context)
         self._record_call("adjudicator", prompt, context, raw)
-        selected = self._select(candidates, self._selection_id(raw))
-        self._emit("adjudicated", selected=selected.candidate_id)
-        return selected
+        return raw
+
+    def _emit_adjudicated(
+        self, selected: Candidate, total: int, pareto: int
+    ) -> None:
+        """Emit the adjudication result.
+
+        Parameters
+        ----------
+        selected : Candidate
+            Chosen candidate.
+
+        total : int
+            Number of first-gate survivors.
+
+        pareto : int
+            Number of non-dominated survivors.
+
+        Returns
+        -------
+        None
+            The event is emitted.
+        """
+        self._emit(
+            "adjudicated",
+            selected=selected.candidate_id,
+            survivors=total,
+            pareto=pareto,
+        )
 
     def _adjudicator_payload(
         self, candidates: list[Candidate], history: list[Candidate]
@@ -995,7 +1079,10 @@ class SearchPipeline:
         ]
 
     def _final_dynamic_test(
-        self, candidate: Candidate, iteration: int
+        self,
+        candidate: Candidate,
+        iteration: int,
+        incumbent: Candidate | None = None,
     ) -> Candidate:
         """Run the final dynamic gate.
 
@@ -1003,23 +1090,62 @@ class SearchPipeline:
         ----------
         candidate : Candidate
             Adjudicated candidate.
+
         iteration : int
             Current iteration number.
+
+        incumbent : Candidate or None
+            Current winner, used for differential testing.
 
         Returns
         -------
         Candidate
             Candidate with final-gate data.
         """
-        result = self._final_result(candidate, iteration)
+        result = self._gate_two_result(candidate, iteration, incumbent)
         self._emit_gate("gate2", candidate, result)
+        merged = {**candidate.dynamic_test, **result}
         return self._with_test(
-            candidate,
-            {**candidate.dynamic_test, **result},
-            candidate.score,
+            candidate, merged, candidate.score, gate2=result
         )
 
-    def _final_result(self, candidate: Candidate, iteration: int) -> dict:
+    def _gate_two_result(
+        self,
+        candidate: Candidate,
+        iteration: int,
+        incumbent: Candidate | None,
+    ) -> dict:
+        """Compute gate 2 with timing, consistency, and disagreement.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Adjudicated candidate.
+
+        iteration : int
+            Current iteration number.
+
+        incumbent : Candidate or None
+            Current winner, used for differential testing.
+
+        Returns
+        -------
+        dict
+            Gate 2 result with independence evidence.
+        """
+        started = time.monotonic()
+        result = self._final_result(candidate, iteration, incumbent)
+        result["elapsed"] = round(time.monotonic() - started, 3)
+        result["disagreement"] = _gate_disagreement(candidate, result)
+        _emit_disagreement(self, candidate, result)
+        return result
+
+    def _final_result(
+        self,
+        candidate: Candidate,
+        iteration: int,
+        incumbent: Candidate | None = None,
+    ) -> dict:
         """Compute the final-gate result without emitting.
 
         Parameters
@@ -1030,6 +1156,9 @@ class SearchPipeline:
         iteration : int
             Current iteration number.
 
+        incumbent : Candidate or None
+            Current winner, used for differential testing.
+
         Returns
         -------
         dict
@@ -1037,7 +1166,75 @@ class SearchPipeline:
         """
         if not candidate.dynamic_test.get("passed"):
             return {"final_passed": False}
-        return self._final_gate(candidate, iteration)
+        result = self._final_gate(candidate, iteration)
+        return self._independent_result(candidate, result, incumbent)
+
+    def _independent_result(
+        self, candidate: Candidate, result: dict, incumbent: Candidate | None
+    ) -> dict:
+        """Add flake, differential, and consistency data to gate 2.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate under final testing.
+
+        result : dict
+            Base final-gate result.
+
+        incumbent : Candidate or None
+            Current winner, when one exists.
+
+        Returns
+        -------
+        dict
+            Final-gate result with independence evidence.
+        """
+        enriched = self._flake_check(candidate, result)
+        return self._differential_check(enriched, incumbent)
+
+    def _flake_check(self, candidate: Candidate, result: dict) -> dict:
+        """Re-run the configured final manifest to detect flakiness.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate under final testing.
+
+        result : dict
+            Base final-gate result.
+
+        Returns
+        -------
+        dict
+            Result with ``consistent``, ``runs``, and ``scores`` fields.
+        """
+        runs = max(1, self.config.flake_runs)
+        if runs < 2 or not self.config.final_task_manifest:
+            return {**result, "consistent": None, "runs": 1}
+        return _consistency(self, candidate, runs, result)
+
+    def _differential_check(
+        self, result: dict, incumbent: Candidate | None
+    ) -> dict:
+        """Compare the candidate against the incumbent winner.
+
+        Parameters
+        ----------
+        result : dict
+            Final-gate result.
+
+        incumbent : Candidate or None
+            Current winner.
+
+        Returns
+        -------
+        dict
+            Result with differential fields when an incumbent exists.
+        """
+        if incumbent is None or not self.config.final_task_manifest:
+            return {**result, "beats_incumbent": None}
+        return _with_differential(result, self, incumbent)
 
     def _final_gate(self, candidate: Candidate, iteration: int) -> dict:
         """Run or simulate the final dynamic gate.
@@ -1263,12 +1460,9 @@ class SearchPipeline:
         """
         if not candidate.dynamic_test.get("final_passed"):
             return winner
-        return (
-            candidate
-            if winner is None
-            or (candidate.score or 0.0) > (winner.score or 0.0)
-            else winner
-        )
+        if winner is None or _better(candidate, winner):
+            return candidate
+        return winner
 
     def _candidate_dir(self, candidate: Candidate, iteration: int) -> Path:
         """Create a candidate artifact directory.
@@ -1623,7 +1817,12 @@ class SearchPipeline:
         )
 
     def _with_test(
-        self, candidate: Candidate, result: dict, score: float | None = None
+        self,
+        candidate: Candidate,
+        result: dict,
+        score: float | None = None,
+        gate1: dict | None = None,
+        gate2: dict | None = None,
     ) -> Candidate:
         """Attach dynamic-test data.
 
@@ -1631,23 +1830,30 @@ class SearchPipeline:
         ----------
         candidate : Candidate
             Candidate under testing.
+
         result : dict
             Test result.
+
         score : float or None
             Candidate score.
+
+        gate1 : dict or None
+            First-gate result, when available.
+
+        gate2 : dict or None
+            Final-gate result, when available.
 
         Returns
         -------
         Candidate
             Updated candidate.
         """
-        return Candidate(
-            candidate.candidate_id,
-            candidate.source,
-            candidate.proposal,
-            score,
-            candidate.review,
-            result,
+        return replace(
+            candidate,
+            score=score,
+            dynamic_test=result,
+            gate1=gate1 or candidate.gate1,
+            gate2=gate2 or candidate.gate2,
         )
 
     def _blocked_result(self) -> dict:
@@ -1834,3 +2040,291 @@ def _candidate_payload(iteration: int, candidate: Candidate) -> dict:
         "gate_passed": bool(candidate.dynamic_test.get("passed")),
         "final_passed": bool(candidate.dynamic_test.get("final_passed")),
     }
+
+
+def _review_sources(review: dict) -> list[str]:
+    """Return non-empty reviewer test sources.
+
+    Parameters
+    ----------
+    review : dict
+        Parsed reviewer output.
+
+    Returns
+    -------
+    list[str]
+        Reviewer-generated unittest sources.
+    """
+    values = review.get("tests") or []
+    if not isinstance(values, list):
+        return []
+    return [item for item in values if isinstance(item, str) and item.strip()]
+
+
+def _with_review_tests(code: str, result: dict, sources: list[str]) -> dict:
+    """Merge reviewer-test results into a gate result.
+
+    Parameters
+    ----------
+    code : str
+        Candidate solution source.
+
+    result : dict
+        Base gate result.
+
+    sources : list[str]
+        Reviewer-generated unittest sources.
+
+    Returns
+    -------
+    dict
+        Gate result including reviewer test fields.
+    """
+    passed, output = score_review_tests(code, sources)
+    result = {**result, "review_tests_passed": passed}
+    result["review_tests"] = len(sources)
+    result["review_tests_output"] = output[-1000:]
+    result["passed"] = bool(result.get("passed")) and passed
+    return result
+
+
+def _gate_disagreement(candidate: Candidate, result: dict) -> bool:
+    """Report whether gate 1 and gate 2 disagree.
+
+    Parameters
+    ----------
+    candidate : Candidate
+        Candidate after gate 2.
+
+    result : dict
+        Gate 2 result.
+
+    Returns
+    -------
+    bool
+        Whether the gate outcomes differ.
+    """
+    first = bool(candidate.dynamic_test.get("passed"))
+    second = bool(result.get("final_passed", result.get("passed")))
+    return first != second
+
+
+def _emit_disagreement(
+    pipeline: "SearchPipeline", candidate: Candidate, result: dict
+) -> None:
+    """Emit an event when the two gates disagree.
+
+    Parameters
+    ----------
+    pipeline : SearchPipeline
+        Pipeline owning the observer.
+
+    candidate : Candidate
+        Candidate after gate 2.
+
+    result : dict
+        Gate 2 result.
+
+    Returns
+    -------
+    None
+        An event is emitted only on disagreement.
+    """
+    if result.get("disagreement"):
+        pipeline._emit(
+            "gate_disagreement", candidate_id=candidate.candidate_id
+        )
+
+
+def _pareto_survivors(candidates: list[Candidate]) -> list[Candidate]:
+    """Return the non-dominated gate-1 survivors.
+
+    Parameters
+    ----------
+    candidates : list[Candidate]
+        First-gate survivors.
+
+    Returns
+    -------
+    list[Candidate]
+        Candidates not dominated on score and elapsed time.
+    """
+    return [
+        item
+        for item in candidates
+        if not any(_dominates(other, item) for other in candidates)
+    ]
+
+
+def _dominates(first: Candidate, second: Candidate) -> bool:
+    """Report whether one candidate dominates another.
+
+    Parameters
+    ----------
+    first : Candidate
+        Candidate that may dominate.
+
+    second : Candidate
+        Candidate compared against.
+
+    Returns
+    -------
+    bool
+        Whether ``first`` is at least as good and strictly better once.
+    """
+    score_a = first.score or 0.0
+    score_b = second.score or 0.0
+    time_a = float(first.dynamic_test.get("elapsed") or 0.0)
+    time_b = float(second.dynamic_test.get("elapsed") or 0.0)
+    better = score_a > score_b or (score_a == score_b and time_a < time_b)
+    return better and time_a <= time_b
+
+
+def _elapsed(candidate: Candidate) -> float:
+    """Return a candidate's gate time.
+
+    Parameters
+    ----------
+    candidate : Candidate
+        Candidate record.
+
+    Returns
+    -------
+    float
+        Elapsed seconds, or infinity when unrecorded.
+    """
+    value = candidate.dynamic_test.get("elapsed")
+    return float("inf") if value is None else float(value)
+
+
+def _better(candidate: Candidate, winner: Candidate) -> bool:
+    """Report whether a candidate should replace the incumbent.
+
+    Parameters
+    ----------
+    candidate : Candidate
+        Final-gated candidate.
+
+    winner : Candidate
+        Current winner.
+
+    Returns
+    -------
+    bool
+        Whether the candidate is strictly better or cheaper.
+    """
+    score = candidate.score or 0.0
+    best = winner.score or 0.0
+    if score != best:
+        return score > best
+    return _elapsed(candidate) < _elapsed(winner)
+
+
+def _repeated_scores(pipeline, candidate, runs, first) -> list:
+    """Collect gate scores across repeated runs.
+
+    Parameters
+    ----------
+    pipeline : SearchPipeline
+        Pipeline owning the gate.
+
+    candidate : Candidate
+        Candidate under test.
+
+    runs : int
+        Number of total runs.
+
+    first : float or None
+        Score from the first run.
+
+    Returns
+    -------
+    list
+        One score per run.
+    """
+    scores = [first]
+    for _ in range(runs - 1):
+        rerun = pipeline._final_gate(candidate, pipeline._current_iteration)
+        scores.append(rerun.get("score"))
+    return scores
+
+
+def _with_differential(result: dict, pipeline, incumbent) -> dict:
+    """Attach incumbent-comparison fields to a gate result.
+
+    Parameters
+    ----------
+    result : dict
+        Final-gate result.
+
+    pipeline : SearchPipeline
+        Pipeline owning the evaluator.
+
+    incumbent : Candidate
+        Current winner.
+
+    Returns
+    -------
+    dict
+        Result with incumbent and delta fields.
+    """
+    manifest = pipeline.config.final_task_manifest
+    other = pipeline._score_manifest(incumbent, manifest)
+    score = result.get("score")
+    delta = None if score is None else score - other
+    return _differential_fields(result, other, delta)
+
+
+def _consistency(pipeline, candidate, runs, result) -> dict:
+    """Measure final-gate score consistency across runs.
+
+    Parameters
+    ----------
+    pipeline : SearchPipeline
+        Pipeline owning the gate.
+
+    candidate : Candidate
+        Candidate under test.
+
+    runs : int
+        Number of repeated runs.
+
+    result : dict
+        Base final-gate result.
+
+    Returns
+    -------
+    dict
+        Result with consistency fields.
+    """
+    scores = _repeated_scores(pipeline, candidate, runs, result.get("score"))
+    return {
+        **result,
+        "consistent": len(set(scores)) == 1,
+        "runs": runs,
+        "scores": scores,
+    }
+
+
+def _differential_fields(result, other, delta) -> dict:
+    """Merge incumbent comparison fields into a result.
+
+    Parameters
+    ----------
+    result : dict
+        Final-gate result.
+
+    other : float
+        Incumbent score.
+
+    delta : float or None
+        Candidate minus incumbent score.
+
+    Returns
+    -------
+    dict
+        Result with incumbent and delta fields.
+    """
+    result = {**result, "incumbent_score": other, "delta": delta}
+    result["beats_incumbent"] = bool(delta is not None and delta >= 0)
+    return result

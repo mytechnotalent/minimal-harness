@@ -10,6 +10,7 @@ from ._json_util import json_value
 from .openrouter import OpenRouterClient
 from .prompts import load as _load_prompt
 from .session import Session
+from .task_evaluator import run_workspace_tests
 from .tools import ToolError
 from .tools import ToolRegistry
 
@@ -188,9 +189,166 @@ class Agent:
         str
             Final assistant response.
         """
+        if _adversarial_drafts() > 1 and hasattr(self.client, "complete"):
+            return self._adversarial_run(prompt)
         self._append({"role": "user", "content": prompt})
         self._trim_system(prompt)
-        return self._review_answer(prompt, self._loop())
+        answer = self._loop()
+        answer = self._verified_answer(prompt, answer)
+        return self._review_answer(prompt, answer)
+
+    def _verified_answer(self, prompt: str, answer: str) -> str:
+        """Run reviewer tests and apply one repair turn.
+
+        Parameters
+        ----------
+        prompt : str
+            User task.
+
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        str
+            Original or repaired answer.
+        """
+        if not _answer_tests_enabled() or not hasattr(self.client, "complete"):
+            return answer
+        tests = self._workspace_tests(prompt, answer)
+        if not tests:
+            return answer
+        return self._repair_if_failing(tests, answer)
+
+    def _repair_if_failing(self, tests, answer: str) -> str:
+        """Run tests and repair the workspace once on failure.
+
+        Parameters
+        ----------
+        tests : list[str]
+            Reviewer-generated unittest sources.
+
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        str
+            Original answer when tests pass, otherwise a repaired answer.
+        """
+        passed, output = run_workspace_tests(self.tools.root, tests)
+        if passed:
+            return answer
+        self._append(_repair_message(output))
+        return self._loop()
+
+    def _workspace_tests(self, prompt: str, answer: str) -> list[str]:
+        """Ask the reviewer for executable workspace tests.
+
+        Parameters
+        ----------
+        prompt : str
+            User task.
+
+        answer : str
+            Agent's draft answer.
+
+        Returns
+        -------
+        list[str]
+            Reviewer-generated unittest sources.
+        """
+        context = _workspace_context(prompt, answer, self.tools.root)
+        try:
+            raw = self.client.complete(_load_prompt("repo_reviewer"), context)
+        except Exception:
+            return []
+        return _test_sources(raw)
+
+    def _adversarial_run(self, prompt: str) -> str:
+        """Generate drafts, adjudicate, and review the best answer.
+
+        Parameters
+        ----------
+        prompt : str
+            User task.
+
+        Returns
+        -------
+        str
+            Reviewed best draft.
+        """
+        self._append({"role": "user", "content": prompt})
+        self._trim_system(prompt)
+        base = _copy_messages(self.messages)
+        drafts = self._drafts(base)
+        best = self._pick_draft(prompt, drafts)
+        self.messages = _copy_messages(base)
+        self._append({"role": "assistant", "content": best})
+        return self._review_answer(prompt, best)
+
+    def _drafts(self, base: list[dict]) -> list[str]:
+        """Run independent draft loops without touching the session.
+
+        Parameters
+        ----------
+        base : list[dict]
+            Base conversation messages.
+
+        Returns
+        -------
+        list[str]
+            One final answer per draft.
+        """
+        session = self.session
+        self.session = None
+        try:
+            return self._run_drafts(base)
+        finally:
+            self.session = session
+
+    def _run_drafts(self, base: list[dict]) -> list[str]:
+        """Run the configured number of draft loops.
+
+        Parameters
+        ----------
+        base : list[dict]
+            Base conversation messages.
+
+        Returns
+        -------
+        list[str]
+            One final answer per draft.
+        """
+        drafts = []
+        for _ in range(_adversarial_drafts()):
+            self.messages = _copy_messages(base)
+            drafts.append(self._loop())
+        return drafts
+
+    def _pick_draft(self, prompt: str, drafts: list[str]) -> str:
+        """Ask the adjudicator model to choose the best draft.
+
+        Parameters
+        ----------
+        prompt : str
+            User task.
+
+        drafts : list[str]
+            Candidate final answers.
+
+        Returns
+        -------
+        str
+            Chosen draft, defaulting to the first.
+        """
+        try:
+            raw = self.client.complete(
+                _load_prompt("adversarial"), _draft_context(prompt, drafts)
+            )
+        except Exception:
+            return drafts[0]
+        return _chosen_draft(raw, drafts)
 
     def _trim_system(self, prompt: str) -> None:
         """Drop coding standards for non-coding tasks when configured.
@@ -738,3 +896,207 @@ def _complete_tail(tail: list[dict[str, Any]]) -> list[dict[str, Any]]:
     while index < len(tail) and tail[index].get("role") == "tool":
         index += 1
     return tail[index:]
+
+
+def _copy_messages(messages: list[dict]) -> list[dict]:
+    """Return a shallow copy of each message mapping.
+
+    Parameters
+    ----------
+    messages : list[dict]
+        Conversation messages.
+
+    Returns
+    -------
+    list[dict]
+        Copied messages.
+    """
+    return [dict(item) for item in messages]
+
+
+def _adversarial_drafts() -> int:
+    """Return the configured draft count.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    int
+        Number of drafts, zero when adversarial mode is off.
+    """
+    raw = os.getenv("HARNESS_ADVERSARIAL_DRAFTS", "0").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
+def _draft_context(prompt: str, drafts: list[str]) -> str:
+    """Build the adjudicator payload for draft answers.
+
+    Parameters
+    ----------
+    prompt : str
+        User task.
+
+    drafts : list[str]
+        Candidate final answers.
+
+    Returns
+    -------
+    str
+        JSON adjudicator context.
+    """
+    return json.dumps({"question": prompt, "drafts": drafts})
+
+
+def _chosen_draft(raw: str, drafts: list[str]) -> str:
+    """Decode the chosen draft index.
+
+    Parameters
+    ----------
+    raw : str
+        Adjudicator response.
+
+    drafts : list[str]
+        Candidate final answers.
+
+    Returns
+    -------
+    str
+        Chosen draft, defaulting to the first.
+    """
+    try:
+        value = json_value(raw)
+        index = int(value.get("selected_index", 0))
+    except (ValueError, TypeError, AttributeError):
+        return drafts[0]
+    return drafts[index] if 0 <= index < len(drafts) else drafts[0]
+
+
+def _answer_tests_enabled() -> bool:
+    """Return whether answer-time reviewer tests are enabled.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    bool
+        Whether ``HARNESS_ANSWER_TESTS`` enables verification.
+    """
+    value = os.getenv("HARNESS_ANSWER_TESTS", "0").strip().lower()
+    return value in ("1", "true", "yes", "on")
+
+
+def _workspace_context(prompt: str, answer: str, root: Path) -> str:
+    """Build a reviewer context from a workspace snapshot.
+
+    Parameters
+    ----------
+    prompt : str
+        User task.
+
+    answer : str
+        Draft answer.
+
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    str
+        JSON context with file contents.
+    """
+    return json.dumps(
+        {
+            "task": prompt,
+            "answer": answer,
+            "files": _workspace_files(root),
+        }
+    )
+
+
+def _workspace_files(root: Path) -> dict[str, str]:
+    """Read workspace Python files for the reviewer.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    dict
+        Relative path to source text for up to twenty files.
+    """
+    files = {}
+    for path in sorted(root.rglob("*.py")):
+        relative = str(path.relative_to(root))
+        if len(files) < 20 and "__pycache__" not in relative:
+            files[relative] = path.read_text(encoding="utf-8")[:4000]
+    return files
+
+
+def _test_sources(raw: str) -> list[str]:
+    """Extract reviewer test sources from a response.
+
+    Parameters
+    ----------
+    raw : str
+        Reviewer response.
+
+    Returns
+    -------
+    list[str]
+        Non-empty unittest sources.
+    """
+    try:
+        value = json_value(raw)
+    except ValueError:
+        return []
+    if not isinstance(value, dict):
+        return []
+    return _clean_tests(value.get("tests"))
+
+
+def _clean_tests(tests) -> list[str]:
+    """Return non-empty test sources from a decoded field.
+
+    Parameters
+    ----------
+    tests : object
+        Decoded ``tests`` field.
+
+    Returns
+    -------
+    list[str]
+        Non-empty unittest sources.
+    """
+    if not isinstance(tests, list):
+        return []
+    return [item for item in tests if isinstance(item, str) and item.strip()]
+
+
+def _repair_message(output: str) -> dict[str, str]:
+    """Build the system message that requests a repair.
+
+    Parameters
+    ----------
+    output : str
+        Failing test output.
+
+    Returns
+    -------
+    dict[str, str]
+        System message with the failure details.
+    """
+    detail = output[-2000:]
+    return {
+        "role": "system",
+        "content": "Reviewer tests failed. Fix the workspace, then finish.\n"
+        + detail,
+    }

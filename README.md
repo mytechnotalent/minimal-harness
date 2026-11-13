@@ -190,6 +190,11 @@ and the tool evidence, and removes or revises unsupported claims.
 `HARNESS_ANSWER_REVIEW` accepts `1` (always review), `0` (never), or `auto`
 (review only tool-backed answers and answers of 400+ characters).
 
+Set `HARNESS_ADVERSARIAL_DRAFTS=N` (default `0`) to generate N independent
+drafts, adjudicate them with `adversarial.md`, and then review the winner. This
+is test-time adversarial compute: more model calls for harder tasks, bounded
+by the draft count.
+
 ### Token efficiency
 
 Token use is controlled without switching models:
@@ -388,7 +393,7 @@ The three manifests are a strict split:
 
 For a Docker command instead, use `--gate-command '...'` and, optionally, `--final-gate-command '...'`. The target score stops the loop as soon as a winner reaches it. If Docker is unavailable, `--local-gate` runs the command on the host with no isolation; it is opt-in and clearly marked `isolated: false`.
 
-`--proposers N` controls how many candidates each iteration requests (default 2). `--gate-threshold` is the minimum pass rate for a manifest gate (default `1.0`); a candidate that misses even one task is rejected. `HARNESS_MODEL_TIMEOUT` bounds a model call in seconds (default 180) and retries one transient timeout. A live one-iteration run against OpenCode Go completed with `winner=candidate-1 score=1.0` and `held_out=1.0` using one proposer, one reviewer, and one adjudicator call.
+`--proposers N` controls how many candidates each iteration requests (default 2). `--gate-threshold` is the minimum pass rate for a manifest gate (default `1.0`); a candidate that misses even one task is rejected. `--no-review-tests` disables reviewer-generated Gate 1 tests, and `--flake-runs N` sets the Gate 2 repeat count (default `2`). `HARNESS_MODEL_TIMEOUT` bounds a model call in seconds (default 180) and retries one transient timeout. A live one-iteration run against OpenCode Go completed with `winner=candidate-1 score=1.0` and `held_out=1.0` using one proposer, one reviewer, and one adjudicator call.
 
 ### Hard benchmark and evidence
 
@@ -494,12 +499,12 @@ Install browser support with `pip install -e ".[browser]"` then `playwright inst
 Every optimization candidate follows this order:
 
 1. **Proposal:** OpenRouter receives the seed, prior artifacts, and optional web context.
-2. **Review:** a separate adversarial prompt checks correctness, security, testability, and benchmark gaming.
-3. **Dynamic gate 1:** the candidate is executed in the Docker gate abstraction.
-4. **Adjudication:** OpenRouter selects one first-gate survivor.
-5. **Dynamic gate 2:** the selected candidate is checked again.
-6. **Recording:** source/proposal, review, score, and gate results are written to `runs/iteration-N/candidate-ID/candidate.json`.
-7. **Cycle:** the best verified candidate is retained until the target or iteration budget.
+2. **Review:** a separate adversarial prompt checks correctness, security, testability, and benchmark gaming. It also emits executable `unittest` sources that Gate 1 runs against the candidate, so review produces evidence rather than prose.
+3. **Dynamic gate 1:** the candidate is scored on the search manifest and the reviewer tests must also pass. The result records both pass rates and elapsed time.
+4. **Adjudication:** OpenRouter ranks the non-dominated survivors (score versus elapsed time) and selects one.
+5. **Dynamic gate 2:** an independent mechanism checks the selection: unseen validation split, a differential comparison against the incumbent winner, and repeated runs to detect flakiness.
+6. **Recording:** source/proposal, review, `gate1`, `gate2`, score, and a gate-disagreement flag are written to `runs/iteration-N/candidate-ID/candidate.json`.
+7. **Cycle:** a new candidate replaces the incumbent only when it is strictly better or cheaper, so search cannot regress.
 
 Invalid model JSON is handled defensively: proposal prose becomes a raw proposal, invalid review output blocks the candidate, and invalid adjudication falls back to deterministic candidate selection.
 
@@ -523,7 +528,9 @@ The evaluator must pin and record:
 - per-task outputs, traces, and scores
 - code and evaluator hashes
 
-Gate 1 runs the manifest named by `--task-manifest`, or the command given by `--gate-command`. Gate 2 runs `--final-task-manifest` or `--final-gate-command`; when neither is set, it re-runs the gate 1 command and records `independent: false` in the result. If Docker is enabled and no manifest or command is configured, the gate fails closed instead of assigning a fake score. `--no-docker` remains a wiring-only mode that passes with score `0.0`.
+Gate 1 runs the manifest named by `--task-manifest`, or the command given by `--gate-command`, and also runs the reviewer's generated tests when `--no-review-tests` is absent. Gate 2 runs `--final-task-manifest` or `--final-gate-command`; when neither is set, it re-runs the gate 1 command and records `independent: false` in the result. With a final manifest, Gate 2 also repeats the run (`--flake-runs`, default `2`) and compares the candidate against the incumbent winner. If Docker is enabled and no manifest or command is configured, the gate fails closed instead of assigning a fake score. `--no-docker` remains a wiring-only mode that passes with score `0.0`.
+
+Reviewer-generated tests execute in the same scratch process as manifest scoring. Treat manifest-based gates as trusted-input only, or use a Docker command gate, before pointing this at untrusted code.
 
 The paper's test-set rule must remain strict: proposer, reviewer, adjudicator, and search-time summaries must not receive held-out results. Final held-out evaluation belongs in a separate process after search.
 
@@ -552,6 +559,50 @@ The gate uses `python:3.12-slim` with:
 - automatic container removal
 
 These controls reduce risk but are not a complete hostile-code sandbox. Production execution should add rootless containers, dropped capabilities, seccomp/AppArmor, PID limits, strict process timeouts, minimal mounts, and an external isolation boundary.
+
+## Evidence
+
+What is proven, measured, and not yet proven is recorded in
+[docs/evidence.md](docs/evidence.md). The deterministic mechanism proofs run
+with:
+
+```bash
+python scripts/prove_advantage.py
+```
+
+## Head-to-head A/B against Pi
+
+`scripts/ab_pi.py` runs this harness and Pi headless on the same manifest,
+extracts each answer's Python block, and scores it with the deterministic
+evaluator:
+
+```bash
+pip install -e .
+python scripts/ab_pi.py \
+  --manifest benchmarks/headtohead/manifest.json \
+  --harness-cmd "python -m meta_harness.cli --no-web" \
+  --pi-cmd "pi --provider openrouter --model openrouter/free --print --mode text" \
+  --out runs/ab-pi.json
+```
+
+Both commands receive the task prompt as their final argument and run in
+isolated temporary workspaces. Commands with flags must be passed as one
+quoted string because argparse would otherwise consume the flags. The report
+contains per-task pass rates, aggregate pass rates, the delta, and average
+elapsed seconds for each agent.
+
+Manifests can describe two task kinds. A task with a `workspace` directory is
+copied into a fresh temporary directory per agent; the agent edits files in
+place, and a hidden test that was never placed in the workspace is copied in
+afterwards to score it. `benchmarks/repo/manifest.json` contains four
+multi-file tasks of this kind. A task without a workspace is the single-file
+form: the agent's printed code block is extracted and scored against the test.
+
+`HARNESS_ANSWER_TESTS=1` enables answer-time verification: after the agent
+finishes, the reviewer writes executable unittest modules against the current
+workspace, the harness runs them, and one repair turn is applied when they
+fail. This is the test-time counterpart of the reviewer stage in optimize
+mode.
 
 ## Testing
 

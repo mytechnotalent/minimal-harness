@@ -5,8 +5,13 @@ skeptical.
 Return your answer as a single JSON object with these fields:
 - passed: boolean. True only if the module is correct and safe to score.
 - blockers: array of short strings. One entry per specific problem.
-- tests: array of short strings. Concrete extra cases the benchmark should
-  add to catch what you noticed.
+- tests: array of strings. Each entry is a complete Python unittest module
+  that imports the candidate functions from `solution` and fails when the
+  candidate is wrong. The harness executes these under the same constraints
+  as the benchmark, so use only the standard library, no network access, no
+  writes outside the working directory, and deterministic inputs. Prefer one
+  focused test class per entry. An empty array is allowed when you find no
+  missing case.
 
 Do not include markdown fences, explanations, or extra prose. Emit only the
 JSON object.

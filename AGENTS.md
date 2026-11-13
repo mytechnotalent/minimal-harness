@@ -20,6 +20,10 @@ gate 2 → log → repeat**. See [docs/adversarial-loop.md](docs/adversarial-loo
 - `meta_harness/session.py` — JSONL trajectory persistence.
 - `meta_harness/tui.py` — full-screen curses TUI.
 - `meta_harness/progress.py` — live `--optimize` progress dashboard.
+- `scripts/ab_pi.py` — headless A/B comparison against Pi.
+- `scripts/prove_advantage.py` — deterministic gate-2 and reviewer proofs.
+- `benchmarks/headtohead/` — single-file seed corpus for the A/B runner.
+- `benchmarks/repo/` — multi-file agentic corpus with hidden tests.
 - `tests/` — offline unit tests.
 - `runs/` — per-run candidate artifacts (generated).
 
@@ -66,7 +70,12 @@ scanning for `proposer` and `reviewer` in the system string.
 to ask one question at a time (via the `ask` tool) instead of assuming. The
 `ask` tool is only advertised when an interactive questioner is wired up.
 Every final Q&A answer is reviewed by `answer_reviewer.md`; disable it with
-`HARNESS_ANSWER_REVIEW=0`.
+`HARNESS_ANSWER_REVIEW=0`. `HARNESS_ADVERSARIAL_DRAFTS=N` generates N drafts
+and picks one with `adversarial.md`. `reviewer.md` also emits executable
+`unittest` sources that Gate 1 runs; keep them standard-library only and
+deterministic. `HARNESS_ANSWER_TESTS=1` enables test-time verification with
+`repo_reviewer.md`, which writes workspace tests and triggers one repair turn
+on failure.
 
 ## Held-out data
 
