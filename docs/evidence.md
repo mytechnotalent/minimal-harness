@@ -97,7 +97,7 @@ Results from different settings are never mixed.
 
 ## Independent corpus v1
 
-Three tasks vendored from real projects, with the projects' own tests as the
+Five tasks vendored from real projects, with the projects' own tests as the
 hidden oracle (not authored here):
 
 | Task | Source | License | Tests |
@@ -105,6 +105,8 @@ hidden oracle (not authored here):
 | itsdangerous_signer | pallets/itsdangerous | BSD-3-Clause | 17 |
 | iniconfig_parser | pytest-dev/iniconfig | MIT | 90 |
 | packaging_utils | pypa/packaging | Apache-2.0 OR BSD-2-Clause | 79 |
+| itsdangerous_serializer | pallets/itsdangerous | BSD-3-Clause | 41 |
+| packaging_markers | pypa/packaging | Apache-2.0 OR BSD-2-Clause | 2500 |
 
 Every task fails with the stubbed source and passes with its reference file;
 `tests/test_independent_corpus.py` enforces this in CI. This is still a small

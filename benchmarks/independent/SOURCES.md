@@ -13,5 +13,10 @@ audit. Hidden tests are the projects' own test files, not authored here.
 - `packaging_utils`: https://github.com/pypa/packaging at
   `284ff8900e59115dc86f85ca4e9d87d95e7dbc75` (Apache-2.0 OR BSD-2-Clause).
   Hidden test: `tests/test_utils.py`.
+- `itsdangerous_serializer`: same itsdangerous commit (BSD-3-Clause). Hidden
+  test: `tests/test_itsdangerous/test_serializer.py`.
+- `packaging_markers`: same packaging commit (Apache-2.0 OR BSD-2-Clause).
+  Hidden test: `tests/test_markers.py`; `conftest.py` is included in the
+  workspace.
 
 License texts are in `benchmarks/independent/licenses/`.

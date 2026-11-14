@@ -22,5 +22,21 @@
     "reference": "tasks/packaging_utils/reference",
     "runner": "pytest",
     "prompt": "Implement the distribution helpers in packaging/utils.py so the project's utility tests pass. Keep the public API and exceptions. Implement name canonicalization and validation, version canonicalization, and wheel and sdist filename parsing."
+  },
+  {
+    "id": "itsdangerous_serializer",
+    "workspace": "tasks/itsdangerous_serializer/workspace",
+    "test": "tasks/itsdangerous_serializer/test_itsdangerous_serializer.py",
+    "reference": "tasks/itsdangerous_serializer/reference",
+    "runner": "pytest",
+    "prompt": "Implement the serialization core in itsdangerous/serializer.py so the project's serializer behavior is correct. Keep the public API, signatures, and exceptions. Implement payload dumping and loading, signer creation, dump/load, and the unsafe variants."
+  },
+  {
+    "id": "packaging_markers",
+    "workspace": "tasks/packaging_markers/workspace",
+    "test": "tasks/packaging_markers/test_packaging_markers.py",
+    "reference": "tasks/packaging_markers/reference",
+    "runner": "pytest",
+    "prompt": "Implement marker evaluation in packaging/markers.py so the project's marker tests pass. Keep the public API and exceptions. Implement the comparison operators and the walk over marker expressions, including extras."
   }
 ]

@@ -45,7 +45,7 @@ class IndependentCorpusTests(unittest.TestCase):
         tasks = json.loads(
             (ROOT / "manifest.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(len(tasks), 3)
+        self.assertEqual(len(tasks), 5)
         for task in tasks:
             self.assertFalse(self._run(task, False), task["id"])
             self.assertTrue(self._run(task, True), task["id"])

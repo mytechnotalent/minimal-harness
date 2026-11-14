@@ -1,0 +1,1393 @@
+# This file is dual licensed under the terms of the Apache License, Version
+# 2.0, and the BSD License. See the LICENSE file in the root of this repository
+# for complete details.
+
+from __future__ import annotations
+
+import functools
+import itertools
+import operator
+import os
+import pickle
+import platform
+import sys
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from unittest import mock
+
+import pytest
+
+import packaging.markers
+from packaging._parser import Node, Op, Value, Variable, process_python_str
+from packaging.markers import (
+    EvaluateContext,
+    InvalidMarker,
+    Marker,
+    UndefinedComparison,
+    UndefinedEnvironmentName,
+    _cached_default_environment,
+    _format_full_version,
+    default_environment,
+    prepare_environment,
+)
+from packaging.utils import canonicalize_name
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from collections.abc import Set as AbstractSet
+
+VARIABLES = [
+    "extra",
+    "implementation_name",
+    "implementation_version",
+    "os_name",
+    "platform_machine",
+    "platform_release",
+    "platform_system",
+    "platform_version",
+    "python_full_version",
+    "python_version",
+    "platform_python_implementation",
+    "sys_platform",
+]
+
+PEP_345_VARIABLES = [
+    "os.name",
+    "sys.platform",
+    "platform.version",
+    "platform.machine",
+    "platform.python_implementation",
+]
+
+SETUPTOOLS_VARIABLES = ["python_implementation"]
+
+OPERATORS = ["===", "==", ">=", "<=", "!=", "~=", ">", "<", "in", "not in"]
+
+VALUES = [
+    "1.0",
+    "5.6a0",
+    "dog",
+    "freebsd",
+    "literally any string can go here",
+    "things @#4 dsfd (((",
+]
+
+
+class TestNode:
+    @pytest.mark.parametrize("value", ["one", "two", None, 3, 5, []])
+    def test_accepts_value(self, value: str | int | list[str] | None) -> None:
+        assert Node(value).value == value  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("value", ["one", "two"])
+    def test_str(self, value: str) -> None:
+        assert str(Node(value)) == str(value)
+
+    @pytest.mark.parametrize("value", ["one", "two"])
+    def test_repr(self, value: str) -> None:
+        assert repr(Node(value)) == f"<Node({str(value)!r})>"
+
+    def test_base_class(self) -> None:
+        with pytest.raises(NotImplementedError):
+            Node("cover all the code").serialize()
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("plain", '"plain"'),
+            ('a"b', "'a\"b'"),
+            ("a'b", '"a\'b"'),
+        ],
+    )
+    def test_value_serialize_chooses_quote_delimiter(
+        self, value: str, expected: str
+    ) -> None:
+        assert Value(value).serialize() == expected
+
+    def test_value_serialize_rejects_both_quote_delimiters(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match="Cannot serialize marker value containing both quote characters",
+        ):
+            Value("a\"b'c").serialize()
+
+    @pytest.mark.parametrize(
+        ("python_str", "expected"),
+        [
+            ('"plain"', "plain"),
+            ('"C:/Program Files/Python"', "C:/Program Files/Python"),
+            ('"/Users/name"', "/Users/name"),
+            ('"/home/name"', "/home/name"),
+            ('"a/b/c"', "a/b/c"),
+            ("'a\"b'", 'a"b'),
+        ],
+    )
+    def test_process_python_str_skips_literal_eval_for_plain_string(
+        self, python_str: str, expected: str
+    ) -> None:
+        with mock.patch("packaging._parser.ast.literal_eval") as literal_eval:
+            value = process_python_str(python_str)
+
+        assert value.value == expected
+        literal_eval.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "python_str",
+        [
+            r'"a\\b"',
+            r'"C:\\Program Files\\Python"',
+            '"a\tb"',
+            '"a\nb"',
+            '"a\rb"',
+            '"a\x00b"',
+        ],
+    )
+    def test_process_python_str_uses_literal_eval_for_complex_string(
+        self, python_str: str
+    ) -> None:
+        with mock.patch(
+            "packaging._parser.ast.literal_eval", return_value="decoded"
+        ) as literal_eval:
+            value = process_python_str(python_str)
+
+        assert value.value == "decoded"
+        literal_eval.assert_called_once_with(python_str)
+
+
+class TestOperatorEvaluation:
+    def test_prefers_pep440(self) -> None:
+        assert Marker('"2.7.9" < python_full_version').evaluate(
+            dict(python_full_version="2.7.10")
+        )
+        assert not Marker('"2.7.9" < python_full_version').evaluate(
+            dict(python_full_version="2.7.8")
+        )
+
+    def test_new_string_rules(self) -> None:
+        assert not Marker('"b" < python_full_version').evaluate(
+            dict(python_full_version="c")
+        )
+        assert not Marker('"b" < python_full_version').evaluate(
+            dict(python_full_version="a")
+        )
+        assert not Marker('"b" > "a"').evaluate(dict(a="a"))
+        assert not Marker('"b" < "a"').evaluate(dict(a="a"))
+        assert not Marker('"b" >= "a"').evaluate(dict(a="a"))
+        assert not Marker('"b" <= "a"').evaluate(dict(a="a"))
+        assert Marker('"a" <= "a"').evaluate(dict(a="a"))
+
+    def test_fails_when_undefined(self) -> None:
+        with pytest.raises(UndefinedComparison):
+            Marker("'2.7.0' ~= os_name").evaluate()
+
+    def test_arbitrary_equality_on_non_version_key_is_undefined(self) -> None:
+        # ``===`` has no entry in ``_operators`` and the version-specifier path
+        # only runs for ``MARKERS_REQUIRING_VERSION`` keys, so evaluating ``===``
+        # against a non-version key raises ``UndefinedComparison``. This pins the
+        # post-#939 behavior (``packaging`` <= 25.0 evaluated it as plain string
+        # equality); see #1239.
+        for marker in ("os_name === 'posix'", "sys_platform === 'linux'"):
+            with pytest.raises(UndefinedComparison):
+                Marker(marker).evaluate()
+
+    def test_allows_prerelease(self) -> None:
+        assert Marker('python_full_version > "3.6.2"').evaluate(
+            {"python_full_version": "3.11.0a5"}
+        )
+
+
+class FakeVersionInfo(NamedTuple):
+    major: int
+    minor: int
+    micro: int
+    releaselevel: str
+    serial: int
+
+
+class TestDefaultEnvironment:
+    def test_matches_expected(self) -> None:
+        environment = default_environment()
+
+        iver = (
+            f"{sys.implementation.version.major}."
+            f"{sys.implementation.version.minor}."
+            f"{sys.implementation.version.micro}"
+        )
+        if sys.implementation.version.releaselevel != "final":
+            iver = (
+                f"{iver}{sys.implementation.version.releaselevel[0]}"
+                f"{sys.implementation.version.serial}"
+            )
+
+        assert environment == {
+            "implementation_name": sys.implementation.name,
+            "implementation_version": iver,
+            "os_name": os.name,
+            "platform_machine": platform.machine(),
+            "platform_release": platform.release(),
+            "platform_system": platform.system(),
+            "platform_version": platform.version(),
+            "python_full_version": platform.python_version(),
+            "platform_python_implementation": platform.python_implementation(),
+            "python_version": ".".join(platform.python_version_tuple()[:2]),
+            "sys_platform": sys.platform,
+        }
+
+    def test_multidigit_minor_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        version_info = (3, 10, 0, "final", 0)
+        monkeypatch.setattr(sys, "version_info", version_info, raising=False)
+
+        monkeypatch.setattr(platform, "python_version", lambda: "3.10.0", raising=False)
+        monkeypatch.setattr(
+            platform, "python_version_tuple", lambda: ("3", "10", "0"), raising=False
+        )
+
+        environment = default_environment()
+        assert environment["python_version"] == "3.10"
+
+    def tests_when_releaselevel_final(self) -> None:
+        v = FakeVersionInfo(3, 4, 2, "final", 0)
+        assert _format_full_version(v) == "3.4.2"  # type: ignore[arg-type]
+
+    def tests_when_releaselevel_not_final(self) -> None:
+        v = FakeVersionInfo(3, 4, 2, "beta", 4)
+        assert _format_full_version(v) == "3.4.2b4"  # type: ignore[arg-type]
+
+
+class TestMarker:
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                'python_implementation == "CPython"',
+                'platform_python_implementation == "CPython"',
+            ),
+            ('"foo" not\t in extras', '"foo" not in extras'),
+            ("os.name == sys.platform", "os_name == sys_platform"),
+            ("'hello' == 'world'", '"hello" == "world"'),
+            ('os_name == "na\u00efve"', 'os_name == "na\u00efve"'),
+            ('os_name in "na\u00efve"', 'os_name in "na\u00efve"'),
+            ('os_name not in "na\u00efve"', 'os_name not in "na\u00efve"'),
+            (
+                'extra == "a"and python_version >= "3.10"',
+                'extra == "a" and python_version >= "3.10"',
+            ),
+        ],
+    )
+    def test_marker_item_token_boundaries(self, text: str, expected: str) -> None:
+        assert str(Marker(text)) == expected
+
+    @pytest.mark.parametrize("padding", ["", " ", "\t", " \t "])
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_marker_atom_whitespace(self, padding: str, nested: bool) -> None:
+        text = f'{padding}os_name{padding}=={padding}"posix"{padding}'
+        if nested:
+            text = f"{padding}({text}){padding}"
+        marker = Marker(text)
+        assert str(marker) == 'os_name == "posix"'
+        assert marker.evaluate({"os_name": "posix"})
+
+    @pytest.mark.parametrize(
+        "marker_string",
+        [
+            "{} {} {!r}".format(*i)
+            for i in itertools.product(VARIABLES, OPERATORS, VALUES)
+        ]
+        + [
+            "{2!r} {1} {0}".format(*i)
+            for i in itertools.product(VARIABLES, OPERATORS, VALUES)
+        ],
+    )
+    def test_parses_valid(self, marker_string: str) -> None:
+        Marker(marker_string)
+
+    @pytest.mark.parametrize(
+        "marker_string",
+        [
+            "this_isnt_a_real_variable >= '1.0'",
+            "python_version",
+            "(python_version)",
+            "python_version >= 1.0 and (python_version)",
+            '(python_version == "2.7" and os_name == "linux"',
+            '(python_version == "2.7") with random text',
+        ],
+    )
+    def test_parses_invalid(self, marker_string: str) -> None:
+        with pytest.raises(InvalidMarker):
+            Marker(marker_string)
+
+    @pytest.mark.parametrize("line_break", ["\n", "\r", "\r\n"])
+    def test_parses_invalid_trailing_line_break(self, line_break: str) -> None:
+        with pytest.raises(InvalidMarker):
+            Marker('python_version >= "3"' + line_break)
+
+    @pytest.mark.parametrize("whitespace", [" ", "\t", " \t"])
+    def test_parses_trailing_horizontal_whitespace(self, whitespace: str) -> None:
+        assert Marker('python_version >= "3"' + whitespace) == Marker(
+            'python_version >= "3"'
+        )
+
+    @pytest.mark.parametrize(
+        ("marker_string", "expected"),
+        [
+            (
+                'os_name == "C:\\"',
+                "packaging.markers.InvalidMarker: Invalid quoted string\n"
+                '    os_name == "C:\\"\n'
+                "               ~~~~~^",
+            ),
+            (
+                r'os_name == "\x"',
+                "packaging.markers.InvalidMarker: Invalid quoted string\n"
+                r'    os_name == "\x"'
+                "\n"
+                "               ~~~~^",
+            ),
+        ],
+    )
+    def test_parses_invalid_malformed_quoted_string(
+        self, marker_string: str, expected: str
+    ) -> None:
+        with pytest.raises(InvalidMarker) as ctx:
+            Marker(marker_string)
+        assert ctx.exconly() == expected
+
+    @pytest.mark.parametrize(
+        ("marker_string", "expected"),
+        [
+            # Test the different quoting rules
+            ("python_version == '2.7'", 'python_version == "2.7"'),
+            ('python_version == "2.7"', 'python_version == "2.7"'),
+            (
+                '\'a" == os_name or python_version >= "0" or "b\' == os_name',
+                '\'a" == os_name or python_version >= "0" or "b\' == os_name',
+            ),
+            # Test and/or expressions
+            (
+                'python_version == "2.7" and os_name == "linux"',
+                'python_version == "2.7" and os_name == "linux"',
+            ),
+            (
+                'python_version == "2.7" or os_name == "linux"',
+                'python_version == "2.7" or os_name == "linux"',
+            ),
+            (
+                'python_version == "2.7" and os_name == "linux" or '
+                'sys_platform == "win32"',
+                'python_version == "2.7" and os_name == "linux" or '
+                'sys_platform == "win32"',
+            ),
+            # Test nested expressions and grouping with ()
+            ('(python_version == "2.7")', 'python_version == "2.7"'),
+            (
+                '(python_version == "2.7" and sys_platform == "win32")',
+                'python_version == "2.7" and sys_platform == "win32"',
+            ),
+            (
+                'python_version == "2.7" and (sys_platform == "win32" or '
+                'sys_platform == "linux")',
+                'python_version == "2.7" and (sys_platform == "win32" or '
+                'sys_platform == "linux")',
+            ),
+        ],
+    )
+    def test_str_repr_eq_hash(self, marker_string: str, expected: str) -> None:
+        m = Marker(marker_string)
+        assert str(m) == expected
+        assert repr(m) == f"<Marker({str(m)!r})>"
+        # Objects created from the same string should be equal.
+        assert m == Marker(marker_string)
+        # Objects created from the equivalent strings should also be equal.
+        assert m == Marker(expected)
+        # Objects created from the same string should have the same hash.
+        assert hash(Marker(marker_string)) == hash(Marker(marker_string))
+        # Objects created from equivalent strings should also have the same hash.
+        assert hash(Marker(marker_string)) == hash(Marker(expected))
+
+    @pytest.mark.parametrize(
+        ("example1", "example2"),
+        [
+            # Test trivial comparisons.
+            ('python_version == "2.7"', 'python_version == "3.7"'),
+            (
+                'python_version == "2.7"',
+                'python_version == "2.7" and os_name == "linux"',
+            ),
+            (
+                'python_version == "2.7"',
+                '(python_version == "2.7" and os_name == "linux")',
+            ),
+            # Test different precedence.
+            (
+                'python_version == "2.7" and (os_name == "linux" or '
+                'sys_platform == "win32")',
+                'python_version == "2.7" and os_name == "linux" or '
+                'sys_platform == "win32"',
+            ),
+        ],
+    )
+    def test_different_markers_different_hashes(
+        self, example1: str, example2: str
+    ) -> None:
+        marker1, marker2 = Marker(example1), Marker(example2)
+        # Markers created from strings that are not equivalent should differ.
+        assert marker1 != marker2
+        # Different Marker objects should have different hashes.
+        assert hash(marker1) != hash(marker2)
+
+    def test_compare_markers_to_other_objects(self) -> None:
+        # Markers should not be comparable to other kinds of objects.
+        assert Marker("os_name == 'nt'") != "os_name == 'nt'"
+
+    def test_environment_assumes_empty_extra(self) -> None:
+        assert Marker('extra == "im_valid"').evaluate() is False
+
+    def test_environment_with_extra_none(self) -> None:
+        # GIVEN
+        marker_str = 'extra == "im_valid"'
+
+        # Pretend that this is dict[str, str], even though it's not. This is a
+        # test for being bug-for-bug compatible with the older implementation.
+        environment = cast("dict[str, str]", {"extra": None})
+
+        # WHEN
+        marker = Marker(marker_str)
+
+        # THEN
+        assert marker.evaluate(environment) is False
+
+    def test_environment_with_no_extras(self) -> None:
+        # Environment is set but no 'extra' key is present; branch only hit on
+        # non-metadata context.
+        marker = Marker("os_name == 'foo'")
+        assert marker.evaluate({"os_name": "foo"}, context="requirement")
+        assert not marker.evaluate({"os_name": "bar"}, context="requirement")
+
+    @pytest.mark.parametrize(
+        ("marker_string", "environment", "expected"),
+        [
+            (f"os_name == '{os.name}'", None, True),
+            ("os_name == 'foo'", {"os_name": "foo"}, True),
+            ("os_name == 'foo'", {"os_name": "bar"}, False),
+            ("'2.7' in python_version", {"python_version": "2.7.5"}, True),
+            ("'2.7' not in python_version", {"python_version": "2.7"}, False),
+            (
+                "os_name == 'foo' and python_version ~= '2.7.0'",
+                {"os_name": "foo", "python_version": "2.7.6"},
+                True,
+            ),
+            (
+                "python_version ~= '2.7.0' and (os_name == 'foo' or os_name == 'bar')",
+                {"os_name": "foo", "python_version": "2.7.4"},
+                True,
+            ),
+            (
+                "python_version ~= '2.7.0' and (os_name == 'foo' or os_name == 'bar')",
+                {"os_name": "bar", "python_version": "2.7.4"},
+                True,
+            ),
+            (
+                "python_version ~= '2.7.0' and (os_name == 'foo' or os_name == 'bar')",
+                {"os_name": "other", "python_version": "2.7.4"},
+                False,
+            ),
+            ("extra == 'security'", {"extra": "quux"}, False),
+            ("extra == 'security'", {"extra": "security"}, True),
+            ("extra == 'SECURITY'", {"extra": "security"}, True),
+            ("extra == 'security'", {"extra": "SECURITY"}, True),
+            ("extra == 'pep-685-norm'", {"extra": "PEP_685...norm"}, True),
+            (
+                "extra == 'Different.punctuation..is...equal'",
+                {"extra": "different__punctuation_is_EQUAL"},
+                True,
+            ),
+        ],
+    )
+    def test_evaluates(
+        self, marker_string: str, environment: dict[str, str] | None, expected: bool
+    ) -> None:
+        if environment is None:
+            assert Marker(marker_string).evaluate() == expected
+        else:
+            assert Marker(marker_string).evaluate(environment) == expected
+
+    @pytest.mark.parametrize(
+        "marker_string",
+        [
+            "{} {} {!r}".format(*i)
+            for i in itertools.product(PEP_345_VARIABLES, OPERATORS, VALUES)
+        ]
+        + [
+            "{2!r} {1} {0}".format(*i)
+            for i in itertools.product(PEP_345_VARIABLES, OPERATORS, VALUES)
+        ],
+    )
+    def test_parses_pep345_valid(self, marker_string: str) -> None:
+        Marker(marker_string)
+
+    @pytest.mark.parametrize(
+        ("marker_string", "environment", "expected"),
+        [
+            (f"os.name == '{os.name}'", None, True),
+            ("sys.platform == 'win32'", {"sys_platform": "linux2"}, False),
+            ("platform.version in 'Ubuntu'", {"platform_version": "#39"}, False),
+            ("platform.machine=='x86_64'", {"platform_machine": "x86_64"}, True),
+            (
+                "platform.python_implementation=='Jython'",
+                {"platform_python_implementation": "CPython"},
+                False,
+            ),
+            (
+                "python_version == '2.5' and platform.python_implementation!= 'Jython'",
+                {"python_version": "2.7"},
+                False,
+            ),
+        ],
+    )
+    def test_evaluate_pep345_markers(
+        self, marker_string: str, environment: dict[str, str] | None, expected: bool
+    ) -> None:
+        if environment is None:
+            assert Marker(marker_string).evaluate() == expected
+        else:
+            assert Marker(marker_string).evaluate(environment) == expected
+
+    @pytest.mark.parametrize(
+        "marker_string",
+        [
+            "{} {} {!r}".format(*i)
+            for i in itertools.product(SETUPTOOLS_VARIABLES, OPERATORS, VALUES)
+        ]
+        + [
+            "{2!r} {1} {0}".format(*i)
+            for i in itertools.product(SETUPTOOLS_VARIABLES, OPERATORS, VALUES)
+        ],
+    )
+    def test_parses_setuptools_legacy_valid(self, marker_string: str) -> None:
+        Marker(marker_string)
+
+    def test_evaluate_setuptools_legacy_markers(self) -> None:
+        marker_string = "python_implementation=='Jython'"
+        args = ({"platform_python_implementation": "CPython"},)
+        assert Marker(marker_string).evaluate(*args) is False
+
+    def test_extra_str_normalization(self) -> None:
+        raw_name = "S_P__A_M"
+        normalized_name = "s-p-a-m"
+        lhs = f"{raw_name!r} == extra"
+        rhs = f"extra == {raw_name!r}"
+
+        assert str(Marker(lhs)) == f'"{normalized_name}" == extra'
+        assert str(Marker(rhs)) == f'extra == "{normalized_name}"'
+
+    def test_extra_compared_to_variable_not_normalized(self) -> None:
+        # A variable-vs-variable atom must not be rewritten into a string
+        # literal, even when one side is ``extra``.
+        assert str(Marker("extra == os_name")) == "extra == os_name"
+        assert str(Marker("os_name == extra")) == "os_name == extra"
+
+    def test_nested_extra_str_normalization(self) -> None:
+        marker = Marker(
+            '(extra == "Foo_Bar" or extra == "Baz") and python_version >= "3"'
+        )
+
+        assert (
+            str(marker)
+            == '(extra == "foo-bar" or extra == "baz") and python_version >= "3"'
+        )
+        assert marker.evaluate({"extra": "foo-bar", "python_version": "3.12"})
+
+    @pytest.mark.parametrize("variable", ["extras", "dependency_groups"])
+    def test_membership_value_str_normalization(self, variable: str) -> None:
+        # PEP 685 (extras) / PEP 735 (dependency_groups): the set-membership literal
+        # is normalized at parse time, so __str__/__eq__/__hash__ stay consistent with
+        # evaluate() (which already canonicalizes both operands for these keys).
+        raw = Marker(f'"S_P__A_M" in {variable}')
+        normalized = Marker(f'"s-p-a-m" in {variable}')
+
+        assert str(raw) == f'"s-p-a-m" in {variable}'
+        assert raw == normalized
+        assert hash(raw) == hash(normalized)
+
+    @pytest.mark.parametrize("variable", ["extras", "dependency_groups"])
+    def test_membership_value_str_normalization_negated(self, variable: str) -> None:
+        raw = Marker(f'"Foo_Bar" not in {variable}')
+
+        assert str(raw) == f'"foo-bar" not in {variable}'
+        assert raw == Marker(f'"foo-bar" not in {variable}')
+        assert hash(raw) == hash(Marker(f'"foo-bar" not in {variable}'))
+
+    def test_python_full_version_untagged_user_provided(self) -> None:
+        """A user-provided python_full_version ending with a + is also repaired."""
+        assert Marker("python_full_version < '3.12'").evaluate(
+            {"python_full_version": "3.11.1+"}
+        )
+
+    def test_python_full_version_untagged(self) -> None:
+        with mock.patch("platform.python_version", return_value="3.11.1+"):
+            assert Marker("python_full_version < '3.12'").evaluate()
+
+    def test_evaluate_does_not_mutate_cached_environment(self) -> None:
+        # An evaluate() call that overrides values (and adds "extra") must not
+        # leak those overrides into the cached environment used by later calls.
+        marker = Marker("os_name == 'magic'")
+        assert marker.evaluate({"os_name": "magic"})
+
+        cached = _cached_default_environment()
+        assert cached["os_name"] == os.name
+        assert "extra" not in cached
+
+        # A second evaluate with no overrides must not see the first call's
+        # overrides, confirming the cache was copied rather than mutated.
+        assert not marker.evaluate()
+
+    @pytest.mark.parametrize("variable", ["extras", "dependency_groups"])
+    @pytest.mark.parametrize(
+        "values", [{"foo", "bar", "docs"}, frozenset({"foo", "bar", "docs"})]
+    )
+    @pytest.mark.parametrize(
+        ("expression", "result"),
+        [
+            pytest.param('"foo" in {0}', True, id="value-in-foo"),
+            pytest.param('"bar" in {0}', True, id="value-in-bar"),
+            pytest.param('"baz" in {0}', False, id="value-not-in"),
+            pytest.param('"baz" not in {0}', True, id="value-not-in-negated"),
+            pytest.param('"foo" in {0} and "bar" in {0}', True, id="and-in"),
+            pytest.param('"foo" in {0} or "bar" in {0}', True, id="or-in"),
+            pytest.param(
+                '"baz" in {0} and "foo" in {0}', False, id="short-circuit-and"
+            ),
+            pytest.param('"foo" in {0} or "baz" in {0}', True, id="short-circuit-or"),
+            pytest.param('"Foo" in {0}', True, id="case-normalization"),
+            pytest.param('"doc" in {0}', False, id="substring-not-in"),
+            pytest.param('"doc" not in {0}', True, id="substring-not-in-negated"),
+        ],
+    )
+    def test_extras_and_dependency_groups(
+        self,
+        variable: str,
+        values: set[str] | frozenset[str],
+        expression: str,
+        result: bool,
+    ) -> None:
+        environment = {variable: values}
+        assert Marker(expression.format(variable)).evaluate(environment) is result
+
+    @pytest.mark.parametrize("variable", ["extras", "dependency_groups"])
+    @pytest.mark.parametrize("op", ["in", "not in"])
+    @pytest.mark.parametrize("value", ["", "doc", "docs"])
+    def test_set_valued_marker_rejects_string(
+        self, variable: str, op: str, value: str
+    ) -> None:
+        marker = Marker(f'"doc" {op} {variable}')
+
+        with pytest.raises(
+            UndefinedComparison, match=f"Marker '{variable}' must be a set"
+        ):
+            marker.evaluate({variable: value}, context="lock_file")
+
+    @pytest.mark.parametrize("variable", ["extras", "dependency_groups"])
+    def test_extras_and_dependency_groups_disallowed(self, variable: str) -> None:
+        marker = Marker(f'"foo" in {variable}')
+        assert not marker.evaluate(context="lock_file")
+
+        with pytest.raises(KeyError):
+            marker.evaluate()
+
+        with pytest.raises(KeyError):
+            marker.evaluate(context="requirement")
+
+    def test_missing_environment_key_raises_undefined_environment_name(self) -> None:
+        marker = Marker('"foo" in extras')
+        with pytest.raises(UndefinedEnvironmentName) as ctx:
+            marker.evaluate()
+        assert ctx.value.args == ("extras",)
+        # UndefinedEnvironmentName subclasses KeyError, so the historical
+        # bare ``except KeyError`` for a missing environment key still works.
+        assert issubclass(UndefinedEnvironmentName, KeyError)
+        with pytest.raises(KeyError):
+            marker.evaluate()
+
+    @pytest.mark.parametrize("variable", ["extras", "dependency_groups"])
+    @pytest.mark.parametrize("op", ["==", "!=", ">=", "<="])
+    def test_set_valued_marker_on_lhs_raises_undefined_comparison(
+        self, variable: str, op: str
+    ) -> None:
+        """Set-valued markers are only defined in the membership form, so using
+        one on the left-hand side of a comparison raises ``UndefinedComparison``."""
+        marker = Marker(f"{variable} {op} 'foo'")
+        with pytest.raises(UndefinedComparison):
+            marker.evaluate(context="lock_file")
+
+    @pytest.mark.parametrize(
+        ("marker_string", "environment", "expected"),
+        [
+            ('extra == "v2"', None, False),
+            ('extra == "v2"', {"extra": ""}, False),
+            ('extra == "v2"', {"extra": "v2"}, True),
+            ('extra == "v2"', {"extra": "v2a3"}, False),
+            ('extra == "v2a3"', {"extra": "v2"}, False),
+            ('extra == "v2a3"', {"extra": "v2a3"}, True),
+        ],
+    )
+    def test_version_like_equality(
+        self, marker_string: str, environment: dict[str, str] | None, expected: bool
+    ) -> None:
+        """
+        Test for issue #938: Extras are meant to be literal strings, even if
+        they look like versions, and therefore should not be parsed as version.
+        """
+        marker = Marker(marker_string)
+        assert marker.evaluate(environment) is expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            'python_version >= "3.10" and sys_platform == "linux"',
+            '(os_name == "posix" or sys_platform == "win32") and extra == "Some_Extra"',
+        ],
+    )
+    def test_repeated_serialization_reuses_the_string(self, text: str) -> None:
+        marker = Marker(text)
+        expected = str(marker)
+
+        assert str(marker) is expected
+        assert repr(marker) == f"<Marker({expected!r})>"
+        assert hash(marker) == hash(expected)
+        assert marker == Marker(expected)
+
+    @pytest.mark.parametrize("operator", ["and", "or"])
+    def test_combined_markers_have_their_own_serialization(self, operator: str) -> None:
+        left = Marker('python_version >= "3.10"')
+        right = Marker('sys_platform == "linux"')
+        left_text, right_text = str(left), str(right)
+        combined = left & right if operator == "and" else left | right
+
+        assert str(combined) == f"{left_text} {operator} {right_text}"
+        assert str(left) == left_text
+        assert str(right) == right_text
+
+    def test_reinitialization_discards_cached_serialization(self) -> None:
+        marker = Marker('os_name == "posix"')
+        assert str(marker) == 'os_name == "posix"'
+
+        Marker.__init__(marker, 'sys_platform == "win32"')
+
+        assert str(marker) == 'sys_platform == "win32"'
+
+
+def test_and_operator_evaluates_true() -> None:
+    env = {"python_version": "3.8", "os_name": "posix"}
+
+    m = Marker('python_version >= "3.6"') & Marker('os_name == "posix"')
+    assert m.evaluate(env) is True
+
+
+def test_and_operator_str_equality() -> None:
+    a = Marker('python_version >= "3.6" and os_name == "posix"')
+    b = Marker('python_version >= "3.6"') & Marker('os_name == "posix"')
+    assert a == b
+    assert str(a) == str(b)
+
+
+def test_or_operator_evaluates_true() -> None:
+    env = {"python_version": "3.7", "os_name": "windows"}
+
+    m = Marker('python_version < "3.6"') | Marker('os_name == "windows"')
+    assert m.evaluate(env) is True
+
+
+def test_or_operator_str_equality() -> None:
+    a = Marker('python_version < "3.6" or os_name == "windows"')
+    b = Marker('python_version < "3.6"') | Marker('os_name == "windows"')
+    assert a == b
+    assert str(a) == str(b)
+
+
+def test_operator_rejects_non_marker() -> None:
+    m = Marker('python_version >= "3.6"')
+    # dunder returns NotImplemented for non-Marker
+    assert m.__and__(cast("Any", "not-a-marker")) is NotImplemented
+    assert m.__or__(cast("Any", 123)) is NotImplemented
+
+
+def test_inplace_operators_fallback() -> None:
+    m = Marker('python_version >= "3.6"')
+    m &= Marker('os_name == "posix"')
+    assert isinstance(m, Marker)
+    assert m == Marker('python_version >= "3.6"') & Marker('os_name == "posix"')
+
+
+def test_right_hand_ops_and_typeerror() -> None:
+    m = Marker('python_version >= "3.6"')
+    assert m.__and__(cast("Any", "x")) is NotImplemented
+    with pytest.raises(TypeError):
+        cast("Any", "not-a-marker") & Marker('python_version >= "3.6"')
+
+
+def test_chaining_associativity_and_str() -> None:
+    a = Marker(
+        'python_version >= "3.6" and os_name == "posix" and platform_system == "Linux"'
+    )
+    b = (
+        Marker('python_version >= "3.6"')
+        & Marker('os_name == "posix"')
+        & Marker('platform_system == "Linux"')
+    )
+    assert a == b
+    assert str(a) == str(b)
+
+
+@pytest.mark.parametrize("op", [operator.and_, operator.or_])
+def test_long_chain_round_trips(op: Callable[[Marker, Marker], Marker]) -> None:
+    # Chaining must not add one nesting level per operation.
+    m = functools.reduce(op, [Marker(f'os_name == "{i}"') for i in range(2000)])
+    assert "(" not in str(m)
+    assert Marker(str(m)) == m
+    assert pickle.loads(pickle.dumps(m)) == m
+
+
+def test_chain_keeps_mixed_groups() -> None:
+    a = Marker('os_name == "a" or os_name == "b"')
+    b = Marker('os_name == "c"')
+    assert (
+        str(a & b & b) == '(os_name == "a" or os_name == "b") and os_name == "c" '
+        'and os_name == "c"'
+    )
+    assert str(b | (b & b)) == 'os_name == "c" or (os_name == "c" and os_name == "c")'
+    # A parenthesized group of the same operator is spliced in too.
+    assert str(Marker('(os_name == "a" or os_name == "b")') | b) == (
+        'os_name == "a" or os_name == "b" or os_name == "c"'
+    )
+
+
+def test_str_preserves_nested_group_precedence() -> None:
+    # A nested group must keep its parentheses so str(Marker(...)) round-trips.
+    m = Marker(
+        'python_version < "3.10" and '
+        '((sys_platform == "linux" or sys_platform == "darwin"))'
+    )
+    reparsed = Marker(str(m))
+    for env in (
+        {"python_version": "3.12", "sys_platform": "darwin"},
+        {"python_version": "3.12", "sys_platform": "linux"},
+        {"python_version": "3.9", "sys_platform": "darwin"},
+    ):
+        assert reparsed.evaluate(env) == m.evaluate(env)
+
+
+def test_hash_eq_for_combined_markers() -> None:
+    assert hash(Marker('python_version >= "3.6" and os_name == "posix"')) == hash(
+        Marker('python_version >= "3.6"') & Marker('os_name == "posix"')
+    )
+
+
+def test_evaluation_of_combined_markers() -> None:
+    env = {"python_version": "3.8", "os_name": "posix", "platform_system": "Linux"}
+    m = (
+        Marker('python_version >= "3.6"')
+        & Marker('os_name == "posix"')
+        & Marker('platform_system == "Linux"')
+    )
+    assert m.evaluate(env) is True
+
+
+@pytest.mark.parametrize("format", ["string", "dict", "slots"])
+def test_restoring_state_discards_cached_serialization(format: str) -> None:
+    marker = Marker('os_name == "posix"')
+    assert str(marker) == 'os_name == "posix"'
+    replacement = Marker('sys_platform == "win32"')
+    state: object = str(replacement)
+    if format == "dict":
+        state = {"_markers": replacement._markers}
+    elif format == "slots":
+        state = (None, {"_markers": replacement._markers})
+
+    marker.__setstate__(state)
+
+    assert str(marker) == str(replacement)
+    assert hash(marker) == hash(replacement)
+    assert marker == replacement
+
+
+def test_pickle_contains_only_the_expression() -> None:
+    marker = Marker('sys_platform == "linux"')
+    expected = str(marker)
+
+    assert marker.__getstate__() == expected
+    restored = pickle.loads(pickle.dumps(marker))
+    assert str(restored) == expected
+    assert restored == marker
+
+
+@pytest.mark.parametrize(
+    "marker_str",
+    [
+        'python_version >= "3.8"',
+        'python_version >= "3.8" and os_name == "posix"',
+        'python_version >= "3.8" or platform_system == "Windows"',
+        'extra == "security"',
+    ],
+)
+def test_pickle_marker_roundtrip(marker_str: str) -> None:
+    # Make sure equality and str() work between a pickle/unpickle round trip.
+    m = Marker(marker_str)
+    loaded = pickle.loads(pickle.dumps(m))
+    assert loaded == m
+    assert str(loaded) == str(m)
+
+
+def test_pickle_marker_setstate_rejects_invalid_state() -> None:
+    # Cover the TypeError branches in __setstate__ for invalid input.
+    m = Marker.__new__(Marker)
+    with pytest.raises(TypeError, match="Cannot restore Marker"):
+        m.__setstate__(12345)
+    with pytest.raises(TypeError, match="Cannot restore Marker"):
+        m.__setstate__((1, 2, 3))  # Wrong tuple length
+
+
+# Pickle bytes generated with packaging==26.1, Python 3.13.1, pickle protocol 2.
+# Format: __slots__ (no __getstate__), state is (None, {slot: value}).
+_PACKAGING_26_1_PICKLE_MARKER_PYTHON_VERSION_GE_3_8 = (
+    b"\x80\x02cpackaging.markers\nMarker\nq\x00)\x81q\x01N}q\x02X\x08\x00"
+    b"\x00\x00_markersq\x03]q\x04cpackaging._parser\nVariable\nq\x05)\x81"
+    b"q\x06N}q\x07X\x05\x00\x00\x00valueq\x08X\x0e\x00\x00\x00python_vers"
+    b"ionq\ts\x86q\nbcpackaging._parser\nOp\nq\x0b)\x81q\x0cN}q\rh\x08X\x02"
+    b"\x00\x00\x00>=q\x0es\x86q\x0fbcpackaging._parser\nValue\nq\x10)\x81q"
+    b"\x11N}q\x12h\x08X\x03\x00\x00\x003.8q\x13s\x86q\x14b\x87q\x15as\x86"
+    b"q\x16b."
+)
+
+
+# Pickle bytes generated with packaging==26.0, Python 3.13.1, pickle protocol 2.
+# Format: __slots__ (no __getstate__), state is plain __dict__.
+_PACKAGING_26_0_PICKLE_MARKER_PYTHON_VERSION_GE_3_8 = (
+    b"\x80\x02cpackaging.markers\nMarker\nq\x00)\x81q\x01}q\x02X\x08\x00\x00"
+    b"\x00_markersq\x03]q\x04cpackaging._parser\nVariable\nq\x05)\x81q\x06N}"
+    b"q\x07X\x05\x00\x00\x00valueq\x08X\x0e\x00\x00\x00python_versionq\ts\x86"
+    b"q\nbcpackaging._parser\nOp\nq\x0b)\x81q\x0cN}q\rh\x08X\x02\x00\x00"
+    b"\x00>=q\x0es\x86q\x0fbcpackaging._parser\nValue\nq\x10)\x81q\x11N}q\x12"
+    b"h\x08X\x03\x00\x00\x003.8q\x13s\x86q\x14b\x87q\x15asb."
+)
+
+# Format: __slots__ with Node objects using __dict__ format (packaging <= 25.0).
+# Now loadable because Node classes have __getstate__/__setstate__.
+_PACKAGING_25_0_PICKLE_MARKER_PYTHON_VERSION_GE_3_8 = (
+    b"\x80\x02cpackaging.markers\nMarker\nq\x00)\x81q\x01}q\x02X\x08\x00\x00"
+    b"\x00_markersq\x03]q\x04cpackaging._parser\nVariable\nq\x05)\x81q\x06}q\x07"
+    b"X\x05\x00\x00\x00valueq\x08X\x0e\x00\x00\x00python_versionq\tsbcpackaging"
+    b"._parser\nOp\nq\n)\x81q\x0b}q\x0ch\x08X\x02\x00\x00\x00>=q\rsbcpackaging"
+    b"._parser\nValue\nq\x0e)\x81q\x0f}q\x10h\x08X\x03\x00\x00\x003.8q\x11sb\x87"
+    b"q\x12asb."
+)
+
+
+def test_pickle_marker_old_format_loads() -> None:
+    # Verify that Marker pickles created with packaging <= 26.1 (__slots__,
+    # no __getstate__) can be loaded and produce correct Marker objects.
+    m = pickle.loads(_PACKAGING_26_1_PICKLE_MARKER_PYTHON_VERSION_GE_3_8)
+    assert isinstance(m, Marker)
+    assert str(m) == 'python_version >= "3.8"'
+    assert m == Marker('python_version >= "3.8"')
+
+
+def test_pickle_marker_26_0_format_loads() -> None:
+    # Verify that Marker pickles created with packaging 26.0 (plain __dict__)
+    # can be loaded and produce correct Marker objects.
+    m = pickle.loads(_PACKAGING_26_0_PICKLE_MARKER_PYTHON_VERSION_GE_3_8)
+    assert isinstance(m, Marker)
+    assert str(m) == 'python_version >= "3.8"'
+    assert m == Marker('python_version >= "3.8"')
+
+
+def test_pickle_marker_25_0_format_loads() -> None:
+    # Verify that Marker pickles created with packaging 25.0 (with Node __dict__)
+    # can now be loaded thanks to __getstate__/__setstate__ in Node classes.
+    m = pickle.loads(_PACKAGING_25_0_PICKLE_MARKER_PYTHON_VERSION_GE_3_8)
+    assert isinstance(m, Marker)
+    assert str(m) == 'python_version >= "3.8"'
+    assert m == Marker('python_version >= "3.8"')
+
+
+def test_pickle_node_roundtrip() -> None:
+    # Cover Node.__getstate__ and Node.__setstate__ with the new string format.
+    for node in (Variable("python_version"), Value("3.8"), Op(">=")):
+        loaded = pickle.loads(pickle.dumps(node))
+        assert loaded.value == node.value
+        assert str(loaded) == str(node)
+
+
+def test_pickle_node_setstate_rejects_invalid_state() -> None:
+    # Cover the TypeError branch in Node.__setstate__ for invalid input.
+    node = Variable.__new__(Variable)
+    with pytest.raises(TypeError, match="Cannot restore Variable"):
+        node.__setstate__(12345)
+
+    node2 = Variable.__new__(Variable)
+    with pytest.raises(TypeError, match="Cannot restore Variable"):
+        node2.__setstate__((1, 2, 3))  # Wrong tuple length
+
+    # Cover the legacy tuple branch where slot_dict doesn't have "value".
+    node3 = Variable.__new__(Variable)
+    with pytest.raises(TypeError, match="Cannot restore Variable"):
+        node3.__setstate__((None, {"wrong_key": "foo"}))
+
+    # Cover the legacy tuple branch where slot_dict has "value" but it's not a str.
+    node4 = Variable.__new__(Variable)
+    with pytest.raises(TypeError, match="Cannot restore Variable value from 123"):
+        node4.__setstate__((None, {"value": 123}))
+
+    # Cover the legacy dict branch where "value" exists but it's not a str.
+    node5 = Value.__new__(Value)
+    with pytest.raises(TypeError, match="Cannot restore Value value from 456"):
+        node5.__setstate__({"value": 456})
+
+    # Cover the legacy dict branch on Op (different subclass to ensure coverage).
+    node6 = Op.__new__(Op)
+    with pytest.raises(TypeError, match="Cannot restore Op value from 789"):
+        node6.__setstate__({"value": 789})
+
+
+def test_pickle_marker_setstate_legacy_slot_dict_without_markers_key() -> None:
+    # Cover Marker.__setstate__ legacy tuple branch where slot_dict has no "_markers".
+    m = Marker.__new__(Marker)
+    with pytest.raises(TypeError, match="Cannot restore Marker"):
+        m.__setstate__((None, {"other_key": "value"}))
+
+
+def test_pickle_marker_setstate_rejects_invalid_markers_type() -> None:
+    # Cover the dict branch where "_markers" exists but is not a list.
+    m1 = Marker.__new__(Marker)
+    with pytest.raises(TypeError, match="Cannot restore Marker"):
+        m1.__setstate__({"_markers": "not a list"})
+
+    # Cover the tuple branch where "_markers" exists but is not a list.
+    m2 = Marker.__new__(Marker)
+    with pytest.raises(TypeError, match="Cannot restore Marker"):
+        m2.__setstate__((None, {"_markers": "not a list"}))
+
+
+def test_pickle_marker_setstate_rejects_invalid_marker_string() -> None:
+    # Cover the string branch where parsing raises ParserSyntaxError.
+    m = Marker.__new__(Marker)
+    with pytest.raises(TypeError, match="Cannot restore Marker"):
+        m.__setstate__("this is not a valid marker")
+
+
+Outcome = bool | type[Exception]
+
+PREPARED_EVALUATIONS: list[
+    tuple[str, dict[str, Any] | None, EvaluateContext, Outcome]
+] = [
+    ("os_name == 'posix'", {"os_name": "posix"}, "metadata", True),
+    ("os_name == 'posix'", {"os_name": "nt"}, "requirement", False),
+    ("os_name == 'posix'", {"os_name": "posix", "nonsense": "kept"}, "lock_file", True),
+    ('extra == "fancy-feature"', {"extra": "Fancy.Feature"}, "metadata", True),
+    ('extra == "fancy-feature"', {"extra": "fancy-feature"}, "metadata", True),
+    ('extra == "fancy-feature"', {"extra": ""}, "metadata", False),
+    (
+        'extra == "fancy-feature"',
+        {"extra": None},
+        "metadata",
+        False,
+    ),
+    ('extra == "fancy-feature"', None, "metadata", False),
+    ('extra == "fancy-feature"', None, "requirement", UndefinedEnvironmentName),
+    ('extra == "fancy-feature"', None, "lock_file", UndefinedEnvironmentName),
+    ('"fancy-feature" in extras', None, "lock_file", False),
+    (
+        '"fancy-feature" in extras',
+        {"extras": frozenset({"fancy-feature"})},
+        "lock_file",
+        True,
+    ),
+    ('"fancy-feature" in extras', None, "metadata", UndefinedEnvironmentName),
+    ('"dev" in dependency_groups', None, "lock_file", False),
+    ("extras == 'fancy-feature'", None, "lock_file", UndefinedComparison),
+    (
+        "python_full_version >= '3'",
+        {"python_full_version": "3.11.1+"},
+        "metadata",
+        True,
+    ),
+    (
+        "python_version >= '3' and sys_platform == 'linux'",
+        {"sys_platform": "linux"},
+        "metadata",
+        True,
+    ),
+]
+
+
+def outcome(evaluate: Callable[[], bool]) -> Outcome:
+    """Run evaluate, returning its result or the class of the error it raised."""
+    try:
+        return evaluate()
+    except (UndefinedComparison, UndefinedEnvironmentName) as exc:
+        return type(exc)
+
+
+class TestPrepareEnvironment:
+    def test_is_exported(self) -> None:
+        assert "prepare_environment" in dir(packaging.markers)
+
+    def test_requirement_context_adds_nothing(self) -> None:
+        # The version is pinned because a non-tagged build reports one that
+        # prepare_environment repairs and default_environment does not.
+        with mock.patch("platform.python_version", return_value="3.12.1"):
+            assert prepare_environment(context="requirement") == default_environment()
+
+    def test_metadata_context_defines_an_empty_extra(self) -> None:
+        assert prepare_environment()["extra"] == ""
+
+    def test_lock_file_context_defines_the_set_valued_keys(self) -> None:
+        prepared = prepare_environment(context="lock_file")
+
+        assert prepared["extras"] == frozenset()
+        assert prepared["dependency_groups"] == frozenset()
+        assert "extra" not in prepared
+
+    @pytest.mark.parametrize("context", ["metadata", "requirement"])
+    def test_overrides_replace_detected_values(self, context: EvaluateContext) -> None:
+        assert prepare_environment({"os_name": "magic"}, context)["os_name"] == "magic"
+
+    def test_overrides_may_be_any_mapping(self) -> None:
+        overrides = MappingProxyType({"os_name": "magic"})
+
+        assert prepare_environment(overrides)["os_name"] == "magic"
+
+    @pytest.mark.parametrize(
+        ("given", "expected"),
+        [
+            ("Fancy.Feature", "fancy-feature"),
+            ("fancy-feature", "fancy-feature"),
+            ("", ""),
+            (None, ""),
+        ],
+    )
+    def test_extra_is_canonicalized(self, given: str | None, expected: str) -> None:
+        # Match Marker.evaluate's compatibility handling of extra=None.
+        environment: dict[str, Any] = {"extra": given}
+        assert prepare_environment(environment)["extra"] == expected
+
+    def test_overrides_are_not_mutated(self) -> None:
+        overrides: dict[str, str | AbstractSet[str]] = {"extra": "Fancy.Feature"}
+
+        prepare_environment(overrides)
+
+        assert overrides == {"extra": "Fancy.Feature"}
+
+    def test_untagged_python_full_version_is_repaired(self) -> None:
+        with mock.patch("platform.python_version", return_value="3.11.1+"):
+            assert prepare_environment()["python_full_version"] == "3.11.1+local"
+
+    @pytest.mark.parametrize(
+        ("key", "value", "other_key"),
+        [
+            ("python_version", "2.7", "python_full_version"),
+            ("python_full_version", "2.7.18", "python_version"),
+        ],
+    )
+    def test_version_overrides_are_independent(
+        self, key: str, value: str, other_key: str
+    ) -> None:
+        default = prepare_environment()
+        prepared = prepare_environment({key: value})
+
+        assert prepared[key] == value
+        assert prepared[other_key] == default[other_key]
+
+    def test_unknown_keys_are_kept(self) -> None:
+        # The marker grammar has no variable for them, so they are carried
+        # through and never read.
+        assert prepare_environment({"nonsense": "kept"})["nonsense"] == "kept"
+
+    def test_result_is_not_shared_between_calls(self) -> None:
+        prepared = prepare_environment({"os_name": "magic"})
+        prepared["os_name"] = "mutated"
+
+        assert prepare_environment()["os_name"] == os.name
+        assert _cached_default_environment()["os_name"] == os.name
+
+    @pytest.mark.parametrize("key", ["extras", "dependency_groups"])
+    def test_set_valued_overrides_remain_live(self, key: str) -> None:
+        values = {"docs"}
+        prepared = prepare_environment({key: values}, "lock_file")
+        marker = Marker(f"'fancy-feature' in {key}")
+
+        assert prepared[key] is values
+        assert not marker.evaluate_prepared(prepared)
+
+        values.add("Fancy.Feature")
+        assert marker.evaluate_prepared(prepared)
+
+        values.remove("Fancy.Feature")
+        assert not marker.evaluate_prepared(prepared)
+
+
+class TestEvaluatePrepared:
+    def test_evaluates_against_a_prepared_environment(self) -> None:
+        prepared = prepare_environment({"os_name": "magic"})
+
+        assert Marker("os_name == 'magic'").evaluate_prepared(prepared) is True
+        assert Marker("os_name == 'other'").evaluate_prepared(prepared) is False
+
+    def test_missing_key_raises_undefined_environment_name(self) -> None:
+        with pytest.raises(UndefinedEnvironmentName):
+            Marker("os_name == 'magic'").evaluate_prepared({})
+
+    def test_environment_is_read_as_given(self) -> None:
+        # Marker canonicalizes its own literal when parsed, so an environment
+        # that skipped prepare_environment's canonicalization does not match.
+        marker = Marker('extra == "fancy-feature"')
+
+        assert marker.evaluate_prepared({"extra": "Fancy.Feature"}) is False
+        assert marker.evaluate_prepared({"extra": "fancy-feature"}) is True
+
+    def test_accepts_any_mapping(self) -> None:
+        prepared = MappingProxyType(prepare_environment({"os_name": "magic"}))
+
+        assert Marker("os_name == 'magic'").evaluate_prepared(prepared) is True
+
+    def test_reuses_environment_without_detecting_host_values(self) -> None:
+        prepared = prepare_environment({"os_name": "magic"})
+        markers = [Marker("os_name == 'magic'"), Marker("os_name == 'other'")]
+        with mock.patch(
+            "packaging.markers.default_environment",
+            side_effect=AssertionError("Prepared evaluation must not detect the host"),
+        ):
+            assert [marker.evaluate_prepared(prepared) for marker in markers] == [
+                True,
+                False,
+            ]
+
+    def test_explicit_environment_does_not_fill_missing_host_keys(self) -> None:
+        environment = {"sys_platform": "other-platform"}
+
+        assert Marker("sys_platform == 'other-platform'").evaluate_prepared(environment)
+        with pytest.raises(UndefinedEnvironmentName, match=r"^'os_name'$"):
+            Marker("os_name == 'posix'").evaluate_prepared(environment)
+
+    def test_reuses_environment_with_normalized_extras(self) -> None:
+        prepared = prepare_environment()
+        marker = Marker('extra == "fancy-feature"')
+        results = []
+        for extra in ("Fancy.Feature", "docs", "fancy_feature"):
+            prepared["extra"] = canonicalize_name(extra)
+            results.append(marker.evaluate_prepared(prepared))
+
+        assert results == [True, False, True]
+
+    def test_unrepaired_python_full_version_answers_instead_of_raising(self) -> None:
+        # "3.11.1+" is what default_environment() reports on a non-tagged
+        # build. No version comparison can parse it, so both directions are
+        # False here, while evaluate repairs the value and answers.
+        environment = {"python_full_version": "3.11.1+"}
+        above = Marker("python_full_version >= '3'")
+        below = Marker("python_full_version < '3'")
+
+        assert above.evaluate_prepared(environment) is False
+        assert below.evaluate_prepared(environment) is False
+
+        assert above.evaluate_prepared({"python_full_version": "3.11.1+local"}) is True
+        assert above.evaluate(environment) is True
+
+    @pytest.mark.parametrize(
+        "marker_string",
+        [
+            'extra == "docs"',
+            '"docs" == extra',
+            'extra in "docs"',
+            '"docs" in extra',
+        ],
+    )
+    def test_non_string_extra_raises_undefined_comparison(
+        self, marker_string: str
+    ) -> None:
+        # A set of extras evaluates set-wide; see TestExtraSetEvaluation.
+        marker = Marker(marker_string)
+        env = {"extra": None}
+
+        with pytest.raises(
+            UndefinedComparison, match="Marker 'extra' must be a string"
+        ):
+            # Exercise invalid extra values.
+            marker.evaluate_prepared(
+                env,  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+            )
+
+    @pytest.mark.parametrize(
+        ("marker_string", "environment", "context", "expected"), PREPARED_EVALUATIONS
+    )
+    def test_answers_match_evaluate(
+        self,
+        marker_string: str,
+        environment: dict[str, Any] | None,
+        context: EvaluateContext,
+        expected: Outcome,
+    ) -> None:
+        marker = Marker(marker_string)
+        prepared = prepare_environment(environment, context)
+
+        assert outcome(lambda: marker.evaluate_prepared(prepared)) == expected
+        assert outcome(lambda: marker.evaluate(environment, context)) == expected
+
+
+class TestExtraSetEvaluation:
+    @pytest.mark.parametrize(
+        ("expression", "extras", "expected"),
+        [
+            ('extra == "gpu"', {"gpu"}, True),
+            ('extra == "gpu"', {"cpu"}, False),
+            ('extra == "gpu"', set(), False),
+            ('extra != "gpu"', {"cpu"}, True),
+            ('extra != "gpu"', {"gpu"}, False),
+            # The pypa/pip#14139 case: a negated marker must not match when
+            # the named extra is selected alongside others.
+            ('extra != "gpu"', {"gpu", "cpu"}, False),
+            ('extra != "gpu"', set(), True),
+            ('extra == ""', set(), True),
+            ('extra == ""', {"gpu"}, False),
+            ('"gpu" == extra', {"gpu"}, True),
+            ('"gpu" != extra', {"gpu", "cpu"}, False),
+            ('extra == "PDF_Support"', {"pdf.support"}, True),
+            # Two required extras can only both match set-wide.
+            ('extra == "a" and extra == "b"', {"a", "b"}, True),
+            ('extra == "a" and extra == "b"', {"a"}, False),
+            ('extra == "a" or extra == "b"', {"b"}, True),
+        ],
+    )
+    @pytest.mark.parametrize("wrap", [set, frozenset, list, tuple])
+    def test_marker_evaluation(
+        self, expression: str, extras: set[str], expected: bool, wrap: type[Any]
+    ) -> None:
+        # Any non-string iterable passed as ``extra`` is accepted.
+        environment = cast("Any", {"extra": wrap(extras)})
+        assert Marker(expression).evaluate(environment) is expected
+        # Prepared environments hold normalized names.
+        if wrap in {set, frozenset} and all(canonicalize_name(e) == e for e in extras):
+            assert Marker(expression).evaluate_prepared(environment) is expected
+
+    @pytest.mark.parametrize(
+        "expression",
+        [
+            'extra ~= "gpu"',
+            'extra < "gpu"',
+            'extra >= "gpu"',
+            '"gpu" in extra',
+            '"gpu" not in extra',
+            'extra in "gpu,docs"',
+            'extra not in "gpu"',
+        ],
+    )
+    def test_undefined_operator(self, expression: str) -> None:
+        # Only ``==`` and ``!=`` are defined on ``extra`` for a set of extras.
+        with pytest.raises(UndefinedComparison):
+            Marker(expression).evaluate({"extra": frozenset({"gpu"})})
+
+    def test_prepared(self) -> None:
+        prepared = prepare_environment({"extra": {"GPU", "docs"}})
+        assert prepared["extra"] == frozenset({"gpu", "docs"})
+        assert Marker('extra == "gpu"').evaluate_prepared(prepared)
+        assert not Marker('extra != "docs"').evaluate_prepared(prepared)
+        assert Marker('extra == "gpu"').evaluate_prepared({"extra": {"gpu"}})
+        assert prepare_environment({"extra": set()})["extra"] == ""
