@@ -194,11 +194,10 @@ class WorkspaceSearchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             _workspace_file(root, "src/a.py", "x = 1\n")
-            registry = ToolRegistry(root)
-            globbed = registry.glob("**/*.py")
-            mapped = registry.repo_map()
-        self.assertEqual(globbed["files"], ["src/a.py"])
-        self.assertEqual(mapped["files"], ["src/a.py"])
+            globbed, mapped = _search_results(root)
+        expected = str(Path("src") / "a.py")
+        self.assertEqual(globbed["files"], [expected])
+        self.assertEqual(mapped["files"], [expected])
 
     def test_grep_and_list_report_workspace_entries(self) -> None:
         """Grep finds lines and list reports directory entries.
@@ -1228,6 +1227,23 @@ def _rejected_review() -> str:
             "revised_answer": "better answer",
         }
     )
+
+
+def _search_results(root: Path) -> tuple:
+    """Return glob and repo-map results for a workspace.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    tuple
+        Glob result and repo-map result.
+    """
+    registry = ToolRegistry(root)
+    return registry.glob("**/*.py"), registry.repo_map()
 
 
 def _two_edits() -> list[dict[str, str]]:
