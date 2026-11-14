@@ -148,16 +148,14 @@ Conclusion: on real repository tasks at this model, Pi is currently equal or
 better on capability and clearly better on latency. The offline adversarial
 search remains this project's only proven differentiator.
 
-## Model access blocker
+## Model access update
 
-Stronger models exist in the catalog but are not usable with the current key:
+`deepseek-v4.1-flash` is now enabled and works. It is the default model in
+`.env.example`. Stronger models remain blocked:
 
 - `big-pickle`: unavailable on the OpenCode Go inference endpoint.
 - `claude-fable-5`: listed on the Zen endpoint, but the key returns HTTP 403
   `permission_error` with "Model access is disabled".
-
-Only `beam-free` works. A stronger-model comparison requires enabling model
-access in the OpenCode console or supplying an OpenRouter/Anthropic/OpenAI key.
 
 ## Latency diagnosis (deepseek-v4.1-flash)
 
@@ -226,6 +224,29 @@ last edge cases at this model.
 
 Do not claim a capability win from these runs. The harness improvements raise
 edit rate and reduce wasted exploration; the model is the ceiling.
+
+## DeepSeek 4.1 Flash campaign (5 tasks, 5 repeats)
+
+Same harness, same profile, after model access was enabled.
+
+| Task | Pass | Runs | Mean seconds | Mean calls |
+| --- | --- | --- | --- | --- |
+| itsdangerous_signer | 3 | 5 | 86.3 | 14.2 |
+| packaging_utils | 2 | 5 | 174.6 | 21.6 |
+| itsdangerous_serializer | 2 | 5 | 154.5 | 21.8 |
+| iniconfig_parser | 0 | 5 | 186.5 | 22.2 |
+| packaging_markers | 0 | 5 | 205.9 | 21.8 |
+
+Overall: **7/25 pass (28%)**, mean 161.5 seconds, 20.3 calls, about 200k
+prompt and 12.3k completion tokens per run. Every failure is `tests_fail`;
+there are zero timeouts, provider errors, or no-edit runs. The harness
+mechanics work; the remaining gap is implementation quality on these real
+projects.
+
+For comparison, beam-free scored 0/25 under the same harness (22.5 seconds
+mean, 12.8 calls). Pi's earlier single-run sample passed 3/3 on a three-task
+subset at 47-118 seconds, so Pi remains faster and likely stronger. A 5x5 Pi
+comparison is still required before any head-to-head claim.
 
 ## Config search engine
 
