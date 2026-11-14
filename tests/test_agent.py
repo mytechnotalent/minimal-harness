@@ -295,6 +295,46 @@ class WorkspaceSearchTests(unittest.TestCase):
         self.assertLess(len(compact), 5000)
 
 
+class PythonEditSafetyTests(unittest.TestCase):
+    """Verify invalid Python edits are rejected before writing."""
+
+    def test_write_rejects_invalid_python(self) -> None:
+        """A write with a syntax error leaves no file behind.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            registry = ToolRegistry(directory)
+            with self.assertRaises(ToolError):
+                registry.write("bad.py", "def broken(:\n")
+            self.assertFalse((Path(directory) / "bad.py").exists())
+
+    def test_edit_rejects_invalid_python(self) -> None:
+        """An invalid edit leaves the original file untouched.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = _workspace_file(root, "a.py", "x = 1\n")
+            registry = ToolRegistry(root)
+            with self.assertRaises(ToolError):
+                registry.edit("a.py", "x = 1", "x = (")
+            self.assertEqual(path.read_text(), "x = 1\n")
+
+
 class EditNudgeTests(unittest.TestCase):
     """Verify exploration is cut off with an edit nudge."""
 

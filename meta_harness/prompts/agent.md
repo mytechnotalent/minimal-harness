@@ -14,6 +14,8 @@ what the user wants, **stop and ask before acting**.
 - Never invent facts about the user, their identity, their files, or their
   intent. Do not silently "fix" something the user did not ask you to change.
 - If you are unsure about anything at all, ask instead of assuming.
+- If the `ask` tool is not available in this session, do not ask; make the
+  most reasonable assumption and continue.
 
 Once you have the user's answer, continue the task. Ask again only if a new
 gap appears.

@@ -248,6 +248,53 @@ mean, 12.8 calls). Pi's earlier single-run sample passed 3/3 on a three-task
 subset at 47-118 seconds, so Pi remains faster and likely stronger. A 5x5 Pi
 comparison is still required before any head-to-head claim.
 
+## Head-to-head: DeepSeek 4.1 Flash, 5 tasks x 5 repeats
+
+Pi was run against the same manifest with the same model id
+(`deepseek-v4.1-flash`) through a custom OpenCode Go provider that supplies
+the required `x-opencode-session` header. Both agents ran five repeats per
+task at a 900-second timeout.
+
+| Task | Harness | Pi |
+| --- | --- | --- |
+| itsdangerous_signer | 3/5 | 5/5 |
+| iniconfig_parser | 0/5 | 5/5 |
+| packaging_utils | 2/5 | 5/5 |
+| itsdangerous_serializer | 2/5 | 5/5 |
+| packaging_markers | 0/5 | 5/5 |
+| **Overall** | **7/25 (28%)** | **25/25 (100%)** |
+
+Mean wall time: harness 161.5 seconds, Pi 204.7 seconds. The harness is about
+27% faster but passes 3.6x fewer tasks. At this model, Pi is clearly the
+stronger agent; the harness has no capability win on this corpus.
+
+Failure review showed two harness-specific causes worth fixing: the model
+sometimes asked for clarification although the CLI advertises no `ask` tool,
+and some edits introduced Python syntax errors. The harness now tells the
+model to proceed when `ask` is unavailable and rejects Python writes, edits,
+or patches that do not compile.
+
+A focused five-repeat rerun after those fixes scored 1/5 on iniconfig_parser
+(up from 0/5) and 0/5 on packaging_markers. The fixes remove two failure
+modes but do not close the capability gap.
+
+Reproduce Pi with the same model through a custom provider in
+`~/.pi/agent/models.json`:
+
+```json
+{
+  "providers": {
+    "opencode-go-manual": {
+      "baseUrl": "https://opencode.ai/inference/go/openai/v1",
+      "api": "openai-completions",
+      "apiKey": "OPENCODE_API_KEY",
+      "headers": {"x-opencode-session": "pi-benchmark-session"},
+      "models": [{"id": "deepseek-v4.1-flash"}]
+    }
+  }
+}
+```
+
 ## Config search engine
 
 `scripts/search_harness.py` evaluates a configuration grid on a manifest and

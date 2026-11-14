@@ -730,6 +730,30 @@ def _escapes_workspace(token: str, root: Path) -> bool:
     return False
 
 
+def _validate_python(path: Path, text: str) -> None:
+    """Reject Python edits that do not compile.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Target file path.
+    text : str
+        Candidate file content.
+
+    Returns
+    -------
+    None
+        Valid content returns; invalid content raises ``ToolError``.
+    """
+    if path.suffix != ".py":
+        return
+    try:
+        compile(text, str(path), "exec")
+    except SyntaxError as exc:
+        message = f"syntax error at line {exc.lineno}: {exc.msg}"
+        raise ToolError(message) from exc
+
+
 class ToolError(RuntimeError):
     """Represent a rejected or failed tool operation."""
 
@@ -881,6 +905,7 @@ class ToolRegistry:
         """
         target = self._path(path)
         self._check_project_path(target)
+        _validate_python(target, content)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
         return {"path": path, "bytes": len(content.encode())}
@@ -926,6 +951,7 @@ class ToolRegistry:
         target = self._path(path)
         content = target.read_text()
         updated, count = _apply_edit(content, old, new)
+        _validate_python(target, updated)
         target.write_text(updated)
         return {"path": path, "replacements": count}
 
@@ -946,6 +972,7 @@ class ToolRegistry:
         """
         target = self._path(path)
         updated = _apply_patches(target.read_text(), edits)
+        _validate_python(target, updated)
         target.write_text(updated)
         return {"path": path, "replacements": len(edits)}
 
