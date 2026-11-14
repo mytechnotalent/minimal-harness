@@ -1,5 +1,7 @@
 """Minimal OpenRouter client for agent calls."""
 
+from __future__ import annotations
+
 import json
 import os
 import signal
@@ -8,6 +10,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -249,6 +252,81 @@ def _chat_url(url: str) -> str:
     if not urlparse(base).path:
         return base + "/v1/chat/completions"
     return base
+
+
+def _timeout_error(timeout: int) -> OpenRouterError:
+    """Build a timeout error.
+
+    Parameters
+    ----------
+    timeout : int
+        Configured timeout in seconds.
+
+    Returns
+    -------
+    OpenRouterError
+        Timeout error.
+    """
+    return OpenRouterError(f"OpenRouter request exceeded {timeout} seconds.")
+
+
+def _http_error(exc: urllib.error.HTTPError) -> OpenRouterError:
+    """Build an HTTP provider error with a bounded body.
+
+    Parameters
+    ----------
+    exc : urllib.error.HTTPError
+        Provider error response.
+
+    Returns
+    -------
+    OpenRouterError
+        Normalized error.
+    """
+    detail = _error_body(exc)
+    return OpenRouterError(
+        f"OpenRouter request failed: HTTP {exc.code}: {detail}"
+    )
+
+
+def _error_body(exc: urllib.error.HTTPError) -> str:
+    """Return a bounded provider error body.
+
+    Parameters
+    ----------
+    exc : urllib.error.HTTPError
+        Provider error response.
+
+    Returns
+    -------
+    str
+        Decoded body prefix.
+    """
+    try:
+        text = exc.read().decode("utf-8", "replace")
+    except Exception:
+        return ""
+    return text[:300]
+
+
+def _append_usage(path: Path, record: dict[str, Any]) -> None:
+    """Append one JSON usage record to a log file.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Log path.
+    record : dict[str, Any]
+        Usage record.
+
+    Returns
+    -------
+    None
+        The record is appended.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
 
 
 class OpenRouterError(RuntimeError):
@@ -638,9 +716,9 @@ class OpenRouterClient:
             Normalized error.
         """
         if isinstance(exc, TimeoutError):
-            return OpenRouterError(
-                f"OpenRouter request exceeded {self.timeout} seconds."
-            )
+            return _timeout_error(self.timeout)
+        if isinstance(exc, urllib.error.HTTPError):
+            return _http_error(exc)
         return OpenRouterError(f"OpenRouter request failed: {exc}")
 
     def _send_body(self, request: urllib.request.Request) -> dict[str, Any]:
@@ -745,7 +823,7 @@ class OpenRouterClient:
         bool
             Whether retrying is appropriate.
         """
-        return error.code == 429 or error.code >= 500
+        return error.code in (408, 409, 425, 429) or error.code >= 500
 
     def _retry_delay(
         self, error: urllib.error.HTTPError, attempt: int
@@ -823,6 +901,28 @@ class OpenRouterClient:
         self.completion_tokens += int(usage.get("completion_tokens", 0) or 0)
         self.cached_tokens += int(details.get("cached_tokens", 0) or 0)
         self.cost += float(usage.get("cost", 0.0) or 0.0)
+        self._log_usage(usage)
+
+    def _log_usage(self, usage: dict[str, Any]) -> None:
+        """Append one usage record when HARNESS_USAGE_LOG is set.
+
+        Parameters
+        ----------
+        usage : dict[str, Any]
+            Provider usage record.
+
+        Returns
+        -------
+        None
+            The log is appended when configured.
+        """
+        path = os.getenv("HARNESS_USAGE_LOG")
+        if not path:
+            return
+        try:
+            _append_usage(Path(path), {"model": self.model, **usage})
+        except OSError:
+            return
 
     def usage_summary(self) -> str:
         """Return a one-line summary of accumulated token usage.

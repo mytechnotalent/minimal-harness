@@ -8,9 +8,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from meta_harness.agent import Agent
+from meta_harness.agent import _repair_attempts
 from meta_harness.session import Session
 from meta_harness.tools import ToolError
 from meta_harness.tools import ToolRegistry
+from meta_harness.tools import _compact_test_output
 
 
 class AgentTests(unittest.TestCase):
@@ -173,6 +175,178 @@ class ToolOutputTests(unittest.TestCase):
         self.assertTrue(value["truncated"])
         self.assertLessEqual(len(value["output"]), 2100)
         self.assertIn("...[truncated]...", value["output"])
+
+
+class WorkspaceSearchTests(unittest.TestCase):
+    """Verify repository search and patch tools."""
+
+    def test_glob_and_repo_map_find_files(self) -> None:
+        """Glob and repo map list nested source files.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _workspace_file(root, "src/a.py", "x = 1\n")
+            registry = ToolRegistry(root)
+            globbed = registry.glob("**/*.py")
+            mapped = registry.repo_map()
+        self.assertEqual(globbed["files"], ["src/a.py"])
+        self.assertEqual(mapped["files"], ["src/a.py"])
+
+    def test_grep_and_list_report_workspace_entries(self) -> None:
+        """Grep finds lines and list reports directory entries.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _workspace_file(root, "src/a.py", "value = 42\n")
+            registry = ToolRegistry(root)
+            found = registry.grep("42")
+            listed = registry.list("src")
+        self.assertEqual(found["matches"][0]["line"], 1)
+        self.assertEqual(listed["entries"][0]["name"], "a.py")
+
+    def test_edit_accepts_whitespace_variant(self) -> None:
+        """A whitespace-insensitive match still edits safely.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = _workspace_file(
+                root, "a.py", "def  add(a, b):\n    return a + b\n"
+            )
+            registry = ToolRegistry(root)
+            registry.edit("a.py", "def add(a, b):", "def add(a, b, c):")
+            self.assertIn("def add(a, b, c):", path.read_text())
+
+    def test_edit_reports_duplicate_match(self) -> None:
+        """A repeated fragment is rejected with a line hint.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _workspace_file(root, "a.py", "same\nsame\n")
+            registry = ToolRegistry(root)
+            with self.assertRaises(ToolError) as raised:
+                registry.edit("a.py", "same", "other")
+        self.assertIn("not unique", str(raised.exception))
+
+    def test_patch_applies_multiple_edits(self) -> None:
+        """A patch applies every fragment in one call.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = _workspace_file(root, "a.py", "one = 1\ntwo = 2\n")
+            registry = ToolRegistry(root)
+            result = registry.patch("a.py", _two_edits())
+            content = path.read_text()
+        self.assertEqual(result["replacements"], 2)
+        self.assertIn("one = 10", content)
+
+    def test_test_output_is_compacted(self) -> None:
+        """Long test logs keep only failure lines.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        text = "noise\n" * 5000 + "FAILED test_x - AssertionError\n"
+        compact = _compact_test_output(text)
+        self.assertIn("FAILED test_x", compact)
+        self.assertLess(len(compact), 5000)
+
+
+class EditNudgeTests(unittest.TestCase):
+    """Verify exploration is cut off with an edit nudge."""
+
+    def test_nudge_restricts_tools(self) -> None:
+        """After three quiet turns only edit tools are advertised.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".", client=object())
+        agent._maybe_nudge(3)
+        names = {item["function"]["name"] for item in agent._tool_schemas(3)}
+        self.assertEqual(names, {"edit", "write", "patch"})
+
+    def test_nudge_blocks_non_edit_tools(self) -> None:
+        """Non-edit tools fail until a file is modified.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".", client=object())
+        agent._nudged = True
+        call = {"id": "1", "function": {"name": "bash", "arguments": "{}"}}
+        result = agent._tool_result(call)
+        self.assertIn("unavailable", result["content"])
+
+    def test_bash_blocks_outside_paths(self) -> None:
+        """Shell commands cannot escape the workspace.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            registry = ToolRegistry(directory)
+            with self.assertRaises(ToolError):
+                registry.bash("find / -name signer.py")
 
 
 class LoopingClient:
@@ -1056,6 +1230,47 @@ def _rejected_review() -> str:
     )
 
 
+def _two_edits() -> list[dict[str, str]]:
+    """Return two simple edits for patch tests.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    list[dict[str, str]]
+        Old and new fragments.
+    """
+    return [
+        {"old": "one = 1", "new": "one = 10"},
+        {"old": "two = 2", "new": "two = 20"},
+    ]
+
+
+def _workspace_file(root: Path, relative: str, text: str) -> Path:
+    """Write a file inside a temporary workspace.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+    relative : str
+        Relative file path.
+    text : str
+        File content.
+
+    Returns
+    -------
+    pathlib.Path
+        Written file path.
+    """
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
 def _read_output() -> str:
     """Read a large file through the tool registry.
 
@@ -1264,3 +1479,25 @@ class _RecordingQuestioner:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RepairBudgetTests(unittest.TestCase):
+    """Verify the bounded reviewer-test repair budget."""
+
+    def test_repair_attempts_is_bounded(self) -> None:
+        """The repair count is positive and tolerant of bad input.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with patch.dict(os.environ, {"HARNESS_REPAIR_ATTEMPTS": "3"}):
+            self.assertEqual(_repair_attempts(), 3)
+        with patch.dict(os.environ, {"HARNESS_REPAIR_ATTEMPTS": "0"}):
+            self.assertEqual(_repair_attempts(), 1)
+        with patch.dict(os.environ, {"HARNESS_REPAIR_ATTEMPTS": "bad"}):
+            self.assertEqual(_repair_attempts(), 2)

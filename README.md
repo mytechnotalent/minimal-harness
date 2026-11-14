@@ -161,7 +161,12 @@ The default runtime now includes a bounded Pi-like tool loop. OpenRouter can req
 
 - `read`: read a file inside the workspace.
 - `write`: create or replace a file inside the workspace.
-- `edit`: replace exactly one matching text fragment.
+- `edit`: replace one unique text fragment, tolerant of whitespace differences.
+- `patch`: apply several old/new edits to one file in a single call.
+- `list`: list a workspace directory with names, types, and sizes.
+- `glob`: find files by a glob pattern such as `**/*.py`.
+- `grep`: search file contents with a regular expression.
+- `repo_map`: return a compact sorted list of workspace files.
 - `bash`: run a shell command from the workspace with a timeout.
 - `web_search`: retrieve public search results and GitHub profile fallback data.
 - `browser_open`: inspect a page title, URL, and visible text with Playwright.
@@ -169,7 +174,8 @@ The default runtime now includes a bounded Pi-like tool loop. OpenRouter can req
 - `ask`: present a question with clickable options and a "type your own answer" entry.
 - `suggest`: record short optional next-step buttons shown after an answer.
 
-File paths are confined to the workspace root. This loop supports real website generation, local commands, web retrieval, browser inspection, screenshots, JSONL sessions, steering, follow-ups, context compaction, and a full-screen curses TUI.
+File paths are confined to the workspace root, and shell commands may not
+reference paths outside it. This loop supports real website generation, local commands, web retrieval, browser inspection, screenshots, JSONL sessions, steering, follow-ups, context compaction, and a full-screen curses TUI.
 
 The agent is instructed to **ask rather than assume**: when a request is
 missing information, it asks one question at a time through the `ask` tool
@@ -208,8 +214,12 @@ Token use is controlled without switching models:
   messages survive.
 - `HARNESS_TOOL_OUTPUT_LIMIT` (default `12000`) caps how many characters one
   tool result can add to the context.
-- `--usage` prints `calls`, `prompt_tokens`, and `completion_tokens` after an
-  answer so you can measure a change.
+- `--usage` prints `calls`, `prompt_tokens`, `completion_tokens`, cached
+  tokens, and cost after an answer so you can measure a change.
+- `HARNESS_USAGE_LOG` appends one JSON usage record per model call.
+- `HARNESS_REPAIR_ATTEMPTS` bounds reviewer-test repair turns (default `2`).
+- After three turns without an edit, the agent is nudged and only edit, write,
+  and patch tools are accepted until a file changes.
 
 ```bash
 python3 -m meta_harness.cli --usage "Summarize this repository"

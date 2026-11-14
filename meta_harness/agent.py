@@ -17,6 +17,7 @@ from .tools import ToolError
 from .tools import ToolRegistry
 
 _CONTEXT_CHARS = 60000
+_EDIT_TOOLS = ("edit", "write", "patch")
 _CONTEXT_KEEP = 16
 _CODING_WORDS = (
     "code",
@@ -179,6 +180,7 @@ class Agent:
         self.steering: list[str] = []
         self.follow_up: list[str] = []
         self._mutated = False
+        self._nudged = False
 
     def _begin_run(self, prompt: str) -> None:
         """Reset run state and append the user turn.
@@ -285,20 +287,15 @@ class Agent:
             return answer
         with tempfile.TemporaryDirectory() as temporary:
             snapshot = _snapshot(Path(temporary), self.tools.root)
-            self._append(_repair_message(output))
-            repaired = self._loop()
-            return self._accept_repair(tests, repaired, answer, snapshot)
+            return self._repair_loop(tests, answer, snapshot, output)
 
-    def _accept_repair(self, tests, repaired, answer, snapshot) -> str:
-        """Accept a repair only when reviewer tests now pass.
+    def _repair_loop(self, tests, answer, snapshot, output) -> str:
+        """Attempt bounded repairs until tests pass or output repeats.
 
         Parameters
         ----------
         tests : list[str]
             Reviewer-generated unittest sources.
-
-        repaired : str
-            Repaired answer.
 
         answer : str
             Original answer.
@@ -306,16 +303,40 @@ class Agent:
         snapshot : pathlib.Path
             Workspace snapshot.
 
+        output : str
+            Initial failing test output.
+
         Returns
         -------
         str
             Repaired answer when tests pass, otherwise the original.
         """
-        fixed, _ = run_workspace_tests(self.tools.root, tests)
-        if fixed:
-            return repaired
+        for _ in range(_repair_attempts()):
+            repaired, output = self._repair_step(tests, output)
+            if repaired is not None:
+                return repaired
         _restore_workspace(self.tools.root, snapshot)
         return answer
+
+    def _repair_step(self, tests, output) -> tuple:
+        """Run one bounded repair attempt and retest the workspace.
+
+        Parameters
+        ----------
+        tests : list[str]
+            Reviewer-generated unittest sources.
+        output : str
+            Failing test output.
+
+        Returns
+        -------
+        tuple
+            Repaired answer or ``None``, and the latest test output.
+        """
+        self._append(_repair_message(output))
+        repaired = self._loop()
+        passed, output = run_workspace_tests(self.tools.root, tests)
+        return (repaired if passed else None), output
 
     def _workspace_tests(self, prompt: str, answer: str) -> list[str]:
         """Ask the reviewer for executable workspace tests.
@@ -734,9 +755,10 @@ class Agent:
         str
             Final response or turn-limit message.
         """
-        for _ in range(self.max_turns):
+        for turn in range(self.max_turns):
             self._maybe_compact()
-            message = self._message()
+            self._maybe_nudge(turn)
+            message = self._message(turn)
             if not message.get("tool_calls"):
                 return str(message.get("content", ""))
             self._execute_calls(message["tool_calls"])
@@ -763,12 +785,13 @@ class Agent:
             or "Agent stopped after reaching the turn limit."
         )
 
-    def _message(self) -> dict[str, Any]:
+    def _message(self, turn: int = 0) -> dict[str, Any]:
         """Request and append one assistant message.
 
         Parameters
         ----------
-        None
+        turn : int
+            Zero-based turn index.
 
         Returns
         -------
@@ -776,11 +799,46 @@ class Agent:
             Assistant message.
         """
         self._inject_steering()
-        response = self.client.chat(self.messages, self.tools.schema())
+        response = self.client.chat(self.messages, self._tool_schemas(turn))
         message = response["choices"][0]["message"]
         _repair_tool_calls(message)
         self._append(message)
         return message
+
+    def _maybe_nudge(self, turn: int) -> None:
+        """Nudge a model that explores without editing files.
+
+        Parameters
+        ----------
+        turn : int
+            Zero-based turn index.
+
+        Returns
+        -------
+        None
+            A nudge is appended once.
+        """
+        if self._mutated or self._nudged or turn < 3:
+            return
+        self._nudged = True
+        self._append(_edit_nudge_message())
+
+    def _tool_schemas(self, turn: int) -> list[dict[str, Any]]:
+        """Return the tools advertised for a turn.
+
+        Parameters
+        ----------
+        turn : int
+            Zero-based turn index.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            Full tools, or edit tools after the nudge.
+        """
+        if self._mutated or turn < 3:
+            return self.tools.schema()
+        return self.tools.schema(("edit", "write", "patch"))
 
     def _inject_steering(self) -> None:
         """Append queued steering messages before a model call.
@@ -844,10 +902,50 @@ class Agent:
             Tool result message.
         """
         function = call["function"]
-        if function.get("name") in ("write", "edit"):
+        name = function.get("name")
+        if name in _EDIT_TOOLS:
             self._mutated = True
+        if self._nudged and not self._mutated:
+            return self._blocked_result(call)
+        return self._allowed_result(call, function, name)
+
+    def _allowed_result(self, call, function, name) -> dict[str, Any]:
+        """Execute one allowed tool call.
+
+        Parameters
+        ----------
+        call : dict[str, Any]
+            Tool call.
+        function : dict[str, Any]
+            Function payload.
+        name : str
+            Tool name.
+
+        Returns
+        -------
+        dict[str, Any]
+            Tool result message.
+        """
         arguments, content = self._run_tool(function)
-        self._notify(function["name"], arguments, content)
+        self._notify(name, arguments, content)
+        return {"role": "tool", "tool_call_id": call["id"], "content": content}
+
+    def _blocked_result(self, call) -> dict[str, Any]:
+        """Return an error for non-edit tools after the nudge.
+
+        Parameters
+        ----------
+        call : dict[str, Any]
+            Tool call.
+
+        Returns
+        -------
+        dict[str, Any]
+            Tool result message.
+        """
+        name = call["function"]["name"]
+        content = _blocked_tool_message(name)
+        self._notify(name, {}, content)
         return {"role": "tool", "tool_call_id": call["id"], "content": content}
 
     def _run_tool(self, function: dict[str, Any]) -> tuple:
@@ -913,6 +1011,46 @@ def _turn_limit_message() -> dict[str, str]:
             "already gathered. Do not call tools."
         ),
     }
+
+
+def _blocked_tool_message(name: str) -> str:
+    """Return an error that forces an edit after the nudge.
+
+    Parameters
+    ----------
+    name : str
+        Requested tool name.
+
+    Returns
+    -------
+    str
+        JSON error message.
+    """
+    message = (
+        f"{name} is unavailable until you edit a file. "
+        "Use edit, write, or patch now."
+    )
+    return json.dumps({"error": message})
+
+
+def _edit_nudge_message() -> dict[str, str]:
+    """Build a user message that forces an edit after exploration.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    dict[str, str]
+        Nudge message.
+    """
+    content = (
+        "You have not modified any file yet. Stop exploring and call the "
+        "edit or write tool now. Make the smallest change that addresses "
+        "the request, then run one test."
+    )
+    return {"role": "user", "content": content}
 
 
 def _repair_tool_calls(message: dict[str, Any]) -> None:
@@ -1069,6 +1207,25 @@ def _chosen_draft(raw: str, drafts: list[str]) -> str:
     except (ValueError, TypeError, AttributeError):
         return drafts[0]
     return drafts[index] if 0 <= index < len(drafts) else drafts[0]
+
+
+def _repair_attempts() -> int:
+    """Return the bounded number of reviewer-test repair turns.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    int
+        Repair attempts, at least one.
+    """
+    raw = os.getenv("HARNESS_REPAIR_ATTEMPTS", "2").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
 
 
 def _answer_tests_enabled() -> bool:

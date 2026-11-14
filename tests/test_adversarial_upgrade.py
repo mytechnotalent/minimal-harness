@@ -794,6 +794,7 @@ def _answer_env(value: str) -> dict:
         "HARNESS_ANSWER_TESTS": value,
         "HARNESS_ANSWER_REVIEW": "0",
         "HARNESS_ADVERSARIAL_DRAFTS": "0",
+        "HARNESS_REPAIR_ATTEMPTS": "1",
     }
 
 

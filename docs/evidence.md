@@ -198,6 +198,35 @@ consistently faster and it is less accurate. The remaining gap is agent
 workflow quality and turn count, not tooling. This is an opt-in config, not
 a claimed default win.
 
+## Beam-free hardening campaign (5 tasks, 5 repeats)
+
+After adding `grep`, `glob`, `list`, `repo_map`, `patch`, fuzzy edits, a
+no-edit nudge that restricts tools to edit/write/patch, shell-path
+confinement, bounded repair turns, and a beam-free model profile, the
+independent corpus was rerun at 600 seconds per task.
+
+| Task | Pass | Runs | Mean seconds | Mean calls |
+| --- | --- | --- | --- | --- |
+| itsdangerous_signer | 0 | 5 | 26.8 | 12.8 |
+| iniconfig_parser | 0 | 5 | 30.9 | 12.8 |
+| packaging_utils | 0 | 5 | 21.5 | 12.8 |
+| itsdangerous_serializer | 0 | 5 | 21.0 | 12.8 |
+| packaging_markers | 0 | 5 | 12.4 | 12.8 |
+
+All 25 runs fail. Failure classes: 24 `tests_fail`, 1 `no_edit`, zero
+timeouts, zero provider errors. Twenty-four of 25 runs edited a file, so the
+nudge fixed the exploration failure; the remaining gap is incomplete
+implementation by `beam-free`, not tool access or latency.
+
+A five-run comparison at 24 turns also scored 0/5 and was slower (mean about
+50 seconds), so the 12-turn profile is not the limiting factor. A diagnostic
+24-turn run of itsdangerous_signer reached 15 of 17 hidden assertions, which
+shows the harness can produce most of the implementation but cannot close the
+last edge cases at this model.
+
+Do not claim a capability win from these runs. The harness improvements raise
+edit rate and reduce wasted exploration; the model is the ceiling.
+
 ## Config search engine
 
 `scripts/search_harness.py` evaluates a configuration grid on a manifest and

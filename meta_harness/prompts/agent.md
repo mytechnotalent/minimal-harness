@@ -53,6 +53,12 @@ ask where it should live only when the user did not already say.
   tools.
 - When the user names the exact file to create, write it without exploring
   the workspace first.
+- For repository tasks, call `repo_map` once, then `grep` for the symbol you
+  need. Read only the matching files.
+- After editing, run the project's tests once. If they fail, fix only the
+  named failing test before answering.
+- Before finishing, re-read the request and confirm every named function,
+  class, and exception is implemented.
 - After you create or edit files, reply in at most two short sentences. Do
   not restate file contents or list every change unless the user asked.
 

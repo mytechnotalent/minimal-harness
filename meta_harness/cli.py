@@ -1,6 +1,7 @@
 """Command-line entry point for Minimal Harness."""
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from .models import SearchConfig
 from .openrouter import OpenRouterClient
 from .openrouter import OpenRouterError
 from .pipeline import SearchPipeline
+from .profiles import effective_turns
+from .profiles import profile_for
 from .progress import ProgressTUI
 from .provider import ProviderCatalog
 from .session import Session
@@ -29,7 +32,7 @@ OPTION_SPECS = [
     (("--session",), {}),
     (("--model",), {}),
     (("--workspace",), {"default": "."}),
-    (("--max-turns",), {"type": int, "default": 24}),
+    (("--max-turns",), {"type": int, "default": None}),
     (("--iterations",), {"type": int, "default": 5}),
     (("--proposers",), {"type": int, "default": 2}),
     (("--target-score",), {"type": float, "default": 1.0}),
@@ -248,14 +251,53 @@ def _new_agent(args: Arguments) -> Agent:
     Agent
         Configured agent.
     """
-    return Agent(
-        args.workspace,
-        OpenRouterClient(args.model),
-        args.max_turns,
-        _session(args),
-        web_enabled=not args.no_web,
-        lean=args.lean,
-    )
+    client = _configure_client(OpenRouterClient(args.model))
+    return Agent(**_agent_options(args, client))
+
+
+def _agent_options(args: Arguments, client: OpenRouterClient) -> dict:
+    """Build agent options from parsed arguments and a model profile.
+
+    Parameters
+    ----------
+    args : Arguments
+        Parsed options.
+    client : OpenRouterClient
+        Configured model client.
+
+    Returns
+    -------
+    dict
+        Keyword arguments for ``Agent``.
+    """
+    profile = profile_for(client.model)
+    options = {"root": args.workspace, "client": client}
+    options["max_turns"] = effective_turns(client.model, args.max_turns)
+    options["session"] = _session(args)
+    options["web_enabled"] = not args.no_web and profile.web
+    options["lean"] = args.lean or profile.lean
+    return options
+
+
+def _configure_client(client: OpenRouterClient) -> OpenRouterClient:
+    """Apply per-model timeout and retry settings.
+
+    Parameters
+    ----------
+    client : OpenRouterClient
+        Client created for the selected model.
+
+    Returns
+    -------
+    OpenRouterClient
+        Configured client.
+    """
+    profile = profile_for(client.model)
+    if not os.getenv("HARNESS_MODEL_TIMEOUT"):
+        client.timeout = profile.timeout
+    if not os.getenv("OPENROUTER_MAX_RETRIES"):
+        client.max_retries = profile.retries
+    return client
 
 
 def _frontend(args: Arguments, agent: Agent) -> None:

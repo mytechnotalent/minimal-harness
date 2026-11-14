@@ -2,14 +2,34 @@
 
 import io
 import os
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 import urllib.error
 from unittest.mock import patch
 
 from meta_harness.openrouter import OpenRouterClient
 from meta_harness.openrouter import OpenRouterError
 from meta_harness.openrouter import _sanitize_messages
+
+
+def _http_error(code: int, body: bytes = b"") -> urllib.error.HTTPError:
+    """Build an HTTP error with an optional body.
+
+    Parameters
+    ----------
+    code : int
+        HTTP status code.
+    body : bytes
+        Response body.
+
+    Returns
+    -------
+    urllib.error.HTTPError
+        Error response.
+    """
+    return urllib.error.HTTPError("https://x", code, "x", {}, io.BytesIO(body))
 
 
 class OpenRouterTests(unittest.TestCase):
@@ -177,6 +197,61 @@ class OpenRouterTests(unittest.TestCase):
         ]
         clean = _sanitize_messages(messages)
         self.assertEqual([message["role"] for message in clean], ["user"])
+
+    def test_retryable_status_codes(self) -> None:
+        """Transient status codes retry while bad requests do not.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = OpenRouterClient()
+        for code in (408, 409, 425, 429, 500):
+            error = urllib.error.HTTPError(
+                "https://x", code, "x", {}, io.BytesIO()
+            )
+            self.assertTrue(client._retryable(error))
+        error = urllib.error.HTTPError("https://x", 400, "x", {}, io.BytesIO())
+        self.assertFalse(client._retryable(error))
+
+    def test_http_error_includes_body(self) -> None:
+        """Provider error details are preserved in the client error.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        error = _http_error(400, b'{"error":"tools empty"}')
+        message = str(OpenRouterClient()._request_error(error))
+        self.assertIn("tools empty", message)
+
+    def test_record_usage_writes_log(self) -> None:
+        """HARNESS_USAGE_LOG records usage as JSON lines.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = OpenRouterClient()
+        body = {"usage": {"prompt_tokens": 3, "completion_tokens": 1}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "usage.jsonl"
+            with patch.dict(os.environ, {"HARNESS_USAGE_LOG": str(path)}):
+                client._record_usage(body)
+            text = path.read_text()
+        self.assertIn('"prompt_tokens": 3', text)
 
     def test_model_timeout_is_configurable(self) -> None:
         """The model timeout can be raised from the environment.

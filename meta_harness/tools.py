@@ -1,8 +1,11 @@
 """Built-in tools for the Minimal Harness agent runtime."""
 
+from __future__ import annotations
+
 import json
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -14,6 +17,17 @@ from .evaluator import AppEvaluator
 from .provider import ProviderCatalog
 
 PROTECTED_DIRS = {"meta_harness", "gui", "tests", "docs", "benchmarks", ".git"}
+_SKIP_DIRS = {
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+}
+_MAX_FILE_BYTES = 1_000_000
 
 _WEB_TOOLS = (
     "web_search",
@@ -29,6 +43,27 @@ TOOL_SCHEMAS = {
         "old": {"type": "string"},
         "new": {"type": "string"},
     },
+    "patch": {
+        "path": {"type": "string"},
+        "edits": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "old": {"type": "string"},
+                    "new": {"type": "string"},
+                },
+            },
+        },
+    },
+    "list": {"path": {"type": "string"}},
+    "glob": {"pattern": {"type": "string"}, "limit": {"type": "integer"}},
+    "grep": {
+        "pattern": {"type": "string"},
+        "path": {"type": "string"},
+        "limit": {"type": "integer"},
+    },
+    "repo_map": {"limit": {"type": "integer"}},
     "bash": {"command": {"type": "string"}, "timeout": {"type": "integer"}},
     "web_search": {"query": {"type": "string"}, "limit": {"type": "integer"}},
     "browser_open": {"url": {"type": "string"}},
@@ -71,6 +106,11 @@ TOOL_DESCRIPTIONS = {
     ),
     "ask": ("Ask the user one question. Call with question and options."),
     "suggest": ("Record short next-step labels. Call with an options array."),
+    "patch": "Apply several old/new edits to one file in a single call.",
+    "list": "List one workspace directory with names, types, and sizes.",
+    "glob": "Find workspace files by a glob pattern such as **/*.py.",
+    "grep": "Search workspace file contents with a regular expression.",
+    "repo_map": "Return a compact sorted list of workspace files.",
 }
 
 
@@ -139,6 +179,557 @@ def _bound_output(text: str) -> str:
     return json.dumps({"truncated": True, "output": content})
 
 
+def _skip_path(root: Path, path: Path) -> bool:
+    """Return whether a path should be hidden from search tools.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+    path : pathlib.Path
+        Candidate path.
+
+    Returns
+    -------
+    bool
+        ``True`` when the path is outside the root or in a skipped folder.
+    """
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return True
+    return any(part in _SKIP_DIRS for part in relative.parts)
+
+
+def _iter_files(target: Path):
+    """Yield files under a directory, skipping build and cache folders.
+
+    Parameters
+    ----------
+    target : pathlib.Path
+        File or directory to walk.
+
+    Returns
+    -------
+    collections.abc.Iterator
+        File paths.
+    """
+    if target.is_file():
+        yield target
+        return
+    for path in target.rglob("*"):
+        if path.is_file() and not _skip_path(target, path):
+            yield path
+
+
+def _line_number(content: str, index: int) -> int:
+    """Return the one-based line number for a character index.
+
+    Parameters
+    ----------
+    content : str
+        File content.
+    index : int
+        Character offset.
+
+    Returns
+    -------
+    int
+        One-based line number.
+    """
+    return content.count("\n", 0, index) + 1
+
+
+def _read_text(path: Path) -> str | None:
+    """Read a text file, returning None for binary or oversized files.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        File to read.
+
+    Returns
+    -------
+    str or None
+        Decoded text, or ``None`` when unavailable.
+    """
+    try:
+        if path.stat().st_size > _MAX_FILE_BYTES:
+            return None
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _entry(child: Path) -> dict[str, Any]:
+    """Describe one directory entry.
+
+    Parameters
+    ----------
+    child : pathlib.Path
+        Directory entry.
+
+    Returns
+    -------
+    dict[str, Any]
+        Name, type, and size.
+    """
+    kind = "file" if child.is_file() else "dir"
+    size = child.stat().st_size if child.is_file() else 0
+    return {"name": child.name, "type": kind, "size": size}
+
+
+def _directory_entries(target: Path) -> list[dict[str, Any]]:
+    """Return sorted entries for a directory or file path.
+
+    Parameters
+    ----------
+    target : pathlib.Path
+        Directory or file.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Entry descriptions.
+    """
+    if not target.exists():
+        raise ToolError("path not found")
+    if target.is_file():
+        return [_entry(target)]
+    return _visible_entries(target)
+
+
+def _visible_entries(target: Path) -> list[dict[str, Any]]:
+    """Return sorted visible entries for a directory.
+
+    Parameters
+    ----------
+    target : pathlib.Path
+        Directory.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Entry descriptions.
+    """
+    return [
+        _entry(child)
+        for child in sorted(target.iterdir())
+        if not child.name.startswith(".") and child.name not in _SKIP_DIRS
+    ]
+
+
+def _glob_files(root: Path, pattern: str, limit: int) -> list[str]:
+    """Return workspace files matching a glob pattern.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+    pattern : str
+        Glob pattern.
+    limit : int
+        Maximum result count.
+
+    Returns
+    -------
+    list[str]
+        Relative file paths.
+    """
+    if pattern.startswith(("/", "..")):
+        raise ToolError("pattern must stay inside the workspace")
+    return _matched_files(root, pattern, limit)
+
+
+def _matched_files(root: Path, pattern: str, limit: int) -> list[str]:
+    """Return files matching a safe glob pattern.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+    pattern : str
+        Glob pattern.
+    limit : int
+        Maximum result count.
+
+    Returns
+    -------
+    list[str]
+        Relative file paths.
+    """
+    files = []
+    for path in sorted(root.glob(pattern)):
+        if path.is_file() and not _skip_path(root, path):
+            files.append(str(path.relative_to(root)))
+        if len(files) >= limit:
+            break
+    return files
+
+
+def _file_matches(path: Path, root: Path, regex, limit: int) -> list[dict]:
+    """Return matching lines from one file.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        File to search.
+    root : pathlib.Path
+        Workspace root.
+    regex : re.Pattern
+        Compiled pattern.
+    limit : int
+        Maximum matches.
+
+    Returns
+    -------
+    list[dict]
+        Path, line number, and text for each match.
+    """
+    text = _read_text(path)
+    if text is None:
+        return []
+    relative = str(path.relative_to(root))
+    return _line_records(text, relative, regex, limit)
+
+
+def _line_records(text: str, relative: str, regex, limit: int) -> list[dict]:
+    """Return matching line records for one file.
+
+    Parameters
+    ----------
+    text : str
+        File content.
+    relative : str
+        Relative file path.
+    regex : re.Pattern
+        Compiled pattern.
+    limit : int
+        Maximum records.
+
+    Returns
+    -------
+    list[dict]
+        Match records.
+    """
+    found = [
+        {"path": relative, "line": number, "text": line[:200]}
+        for number, line in enumerate(text.splitlines(), start=1)
+        if regex.search(line)
+    ]
+    return found[:limit]
+
+
+def _grep_path(target: Path, root: Path, regex, limit: int) -> list[dict]:
+    """Return matching lines from a file or directory.
+
+    Parameters
+    ----------
+    target : pathlib.Path
+        File or directory.
+    root : pathlib.Path
+        Workspace root.
+    regex : re.Pattern
+        Compiled pattern.
+    limit : int
+        Maximum matches.
+
+    Returns
+    -------
+    list[dict]
+        Match records.
+    """
+    files = [target] if target.is_file() else list(_iter_files(target))
+    return _collect_matches(files, root, regex, limit)
+
+
+def _collect_matches(files, root: Path, regex, limit: int) -> list[dict]:
+    """Collect matching lines from a list of files.
+
+    Parameters
+    ----------
+    files : list
+        Candidate files.
+    root : pathlib.Path
+        Workspace root.
+    regex : re.Pattern
+        Compiled pattern.
+    limit : int
+        Maximum matches.
+
+    Returns
+    -------
+    list[dict]
+        Match records.
+    """
+    matches = []
+    for path in files:
+        if _skip_path(root, path):
+            continue
+        matches.extend(_file_matches(path, root, regex, limit - len(matches)))
+        if len(matches) >= limit:
+            break
+    return matches
+
+
+def _repo_files(root: Path, limit: int) -> list[str]:
+    """Return a sorted relative file list for a repository map.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+    limit : int
+        Maximum file count.
+
+    Returns
+    -------
+    list[str]
+        Relative file paths.
+    """
+    files = []
+    for path in _iter_files(root):
+        if _skip_path(root, path):
+            continue
+        files.append(str(path.relative_to(root)))
+        if len(files) >= limit:
+            break
+    return sorted(files)
+
+
+def _duplicate_hint(content: str, old: str) -> str:
+    """Return an error that lists the first matching line.
+
+    Parameters
+    ----------
+    content : str
+        File content.
+    old : str
+        Repeated fragment.
+
+    Returns
+    -------
+    str
+        Error text.
+    """
+    line = _line_number(content, content.index(old))
+    return f"edit fragment is not unique; first match at line {line}"
+
+
+def _pattern_hint(content: str, matches: list) -> str:
+    """Return an error that lists duplicate fuzzy-match lines.
+
+    Parameters
+    ----------
+    content : str
+        File content.
+    matches : list
+        Regex match objects.
+
+    Returns
+    -------
+    str
+        Error text.
+    """
+    lines = [_line_number(content, match.start()) for match in matches[:5]]
+    numbers = ", ".join(str(line) for line in lines)
+    return f"edit fragment is not unique; matches at lines {numbers}"
+
+
+def _fuzzy_match(content: str, old: str) -> tuple[int, int]:
+    """Return the span of one whitespace-insensitive match.
+
+    Parameters
+    ----------
+    content : str
+        File content.
+    old : str
+        Fragment to find.
+
+    Returns
+    -------
+    tuple[int, int]
+        Start and end offsets.
+    """
+    pattern = r"\s+".join(re.escape(part) for part in old.split())
+    matches = list(re.finditer(pattern, content))
+    if len(matches) == 1:
+        return matches[0].span()
+    if matches:
+        raise ToolError(_pattern_hint(content, matches))
+    raise ToolError("edit fragment not found; read the file and retry")
+
+
+def _apply_edit(content: str, old: str, new: str) -> tuple[str, int]:
+    """Replace one fragment, allowing whitespace-insensitive matches.
+
+    Parameters
+    ----------
+    content : str
+        File content.
+    old : str
+        Existing fragment.
+    new : str
+        Replacement text.
+
+    Returns
+    -------
+    tuple[str, int]
+        Updated content and replacement count.
+    """
+    count = content.count(old)
+    if count == 1:
+        return content.replace(old, new), 1
+    if count > 1:
+        raise ToolError(_duplicate_hint(content, old))
+    span = _fuzzy_match(content, old)
+    return content[: span[0]] + new + content[span[1] :], 1
+
+
+def _apply_patches(content: str, edits: list[dict[str, str]]) -> str:
+    """Apply a list of old/new edits in order.
+
+    Parameters
+    ----------
+    content : str
+        File content.
+    edits : list[dict[str, str]]
+        Old/new fragments.
+
+    Returns
+    -------
+    str
+        Updated content.
+    """
+    if not edits:
+        raise ToolError("patch needs at least one edit")
+    updated = content
+    for edit in edits:
+        updated, _ = _apply_edit(updated, edit["old"], edit["new"])
+    return updated
+
+
+_TEST_MARKERS = (
+    "FAILED ",
+    "ERROR:",
+    "FAIL:",
+    "AssertionError",
+    "Ran ",
+    "FAILED (",
+)
+
+
+_TEST_PREFIXES = (
+    "FAILED ",
+    "FAILED (",
+    "ERROR:",
+    "FAIL:",
+    "E   ",
+    "AssertionError",
+)
+
+
+def _keep_test_line(line: str) -> bool:
+    """Return whether a line is useful test failure output.
+
+    Parameters
+    ----------
+    line : str
+        Output line.
+
+    Returns
+    -------
+    bool
+        ``True`` for summary and failure lines.
+    """
+    return line.startswith(_TEST_PREFIXES) or line.startswith("Ran ")
+
+
+def _compact_test_output(text: str) -> str:
+    """Keep failing test lines instead of a full test log.
+
+    Parameters
+    ----------
+    text : str
+        Command output.
+
+    Returns
+    -------
+    str
+        Bounded output.
+    """
+    if not any(marker in text for marker in _TEST_MARKERS):
+        return text[-12000:]
+    lines = [line for line in text.splitlines() if _keep_test_line(line)]
+    return "\n".join(lines[:60])[-4000:] or text[-4000:]
+
+
+_SAFE_PATHS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
+
+
+def _command_tokens(command: str) -> list[str]:
+    """Split a shell command into tokens for path checks.
+
+    Parameters
+    ----------
+    command : str
+        Shell command.
+
+    Returns
+    -------
+    list[str]
+        Command tokens.
+    """
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def _inside_workspace(token: str, root: Path) -> bool:
+    """Return whether a path token resolves inside the workspace.
+
+    Parameters
+    ----------
+    token : str
+        Path token.
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    bool
+        ``True`` when the path is inside the root.
+    """
+    try:
+        Path(token).resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _escapes_workspace(token: str, root: Path) -> bool:
+    """Return whether a token points outside the workspace.
+
+    Parameters
+    ----------
+    token : str
+        Command token.
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    bool
+        ``True`` when the token must be rejected.
+    """
+    if token.startswith(("~", "..")):
+        return True
+    if token.startswith("/"):
+        return not _inside_workspace(token, root) and token not in _SAFE_PATHS
+    return False
+
+
 class ToolError(RuntimeError):
     """Represent a rejected or failed tool operation."""
 
@@ -200,21 +791,23 @@ class ToolRegistry:
         ]
         return {name: getattr(self, name) for name in names}
 
-    def schema(self) -> list[dict[str, Any]]:
+    def schema(self, names=None) -> list[dict[str, Any]]:
         """Return OpenAI-compatible tool schemas.
 
         Parameters
         ----------
-        None
+        names : iterable or None
+            Optional tool names to advertise.
 
         Returns
         -------
         list[dict[str, Any]]
             Schemas advertised to the model.
         """
+        selected = self.tools if names is None else names
         return [
             self._schema(name)
-            for name in self.tools
+            for name in selected
             if name not in ("ask", "suggest") or self.questioner is not None
         ]
 
@@ -332,10 +925,105 @@ class ToolRegistry:
         """
         target = self._path(path)
         content = target.read_text()
-        if content.count(old) != 1:
-            raise ToolError("edit requires exactly one matching fragment")
-        target.write_text(content.replace(old, new))
-        return {"path": path, "replacements": 1}
+        updated, count = _apply_edit(content, old, new)
+        target.write_text(updated)
+        return {"path": path, "replacements": count}
+
+    def patch(self, path: str, edits: list[dict[str, str]]) -> dict[str, Any]:
+        """Apply several exact edits to one workspace file.
+
+        Parameters
+        ----------
+        path : str
+            Relative file path.
+        edits : list[dict[str, str]]
+            Old and new fragments.
+
+        Returns
+        -------
+        dict[str, Any]
+            Edited path and replacement count.
+        """
+        target = self._path(path)
+        updated = _apply_patches(target.read_text(), edits)
+        target.write_text(updated)
+        return {"path": path, "replacements": len(edits)}
+
+    def list(self, path: str = ".") -> dict[str, Any]:
+        """List one workspace directory.
+
+        Parameters
+        ----------
+        path : str
+            Relative directory path.
+
+        Returns
+        -------
+        dict[str, Any]
+            Entries with name, type, and size.
+        """
+        entries = _directory_entries(self._path(path))
+        return {"path": path, "entries": entries, "count": len(entries)}
+
+    def glob(self, pattern: str, limit: int = 100) -> dict[str, Any]:
+        """Find workspace files by glob pattern.
+
+        Parameters
+        ----------
+        pattern : str
+            Glob such as ``**/*.py``.
+        limit : int
+            Maximum result count.
+
+        Returns
+        -------
+        dict[str, Any]
+            Matching relative paths.
+        """
+        files = _glob_files(self.root, pattern, max(1, limit))
+        return {"pattern": pattern, "files": files, "count": len(files)}
+
+    def grep(
+        self, pattern: str, path: str = ".", limit: int = 50
+    ) -> dict[str, Any]:
+        """Search workspace file contents with a regular expression.
+
+        Parameters
+        ----------
+        pattern : str
+            Regular expression.
+        path : str
+            Relative file or directory.
+        limit : int
+            Maximum match count.
+
+        Returns
+        -------
+        dict[str, Any]
+            Path, line, and text for each match.
+        """
+        try:
+            regex = re.compile(pattern)
+        except re.error as exc:
+            raise ToolError(f"invalid pattern: {exc}") from exc
+        matches = _grep_path(self._path(path), self.root, regex, limit)
+        return {"pattern": pattern, "matches": matches, "count": len(matches)}
+
+    def repo_map(self, limit: int = 200) -> dict[str, Any]:
+        """Return a compact sorted list of workspace files.
+
+        Parameters
+        ----------
+        limit : int
+            Maximum file count.
+
+        Returns
+        -------
+        dict[str, Any]
+            Relative file paths.
+        """
+        files = _repo_files(self.root, max(1, limit))
+        return {"files": files, "count": len(files)}
 
     def bash(self, command: str, timeout: int = 30) -> dict[str, Any]:
         """Run a shell command in the workspace.
@@ -352,10 +1040,28 @@ class ToolRegistry:
         dict[str, Any]
             Exit code and bounded output.
         """
+        self._check_command(command)
         if self._is_install(command):
             self._require_install_ok()
         result = self._run_command(command, timeout)
         return self._command_result(result)
+
+    def _check_command(self, command: str) -> None:
+        """Reject shell commands that reach outside the workspace.
+
+        Parameters
+        ----------
+        command : str
+            Shell command.
+
+        Returns
+        -------
+        None
+            The command is allowed or ``ToolError`` is raised.
+        """
+        for token in _command_tokens(command):
+            if _escapes_workspace(token, self.root):
+                raise ToolError(f"command path escapes workspace: {token}")
 
     def _is_install(self, command: str) -> bool:
         """Detect package-install commands.
@@ -464,8 +1170,8 @@ class ToolRegistry:
         """
         return {
             "returncode": result.returncode,
-            "stdout": result.stdout[-12000:],
-            "stderr": result.stderr[-12000:],
+            "stdout": _compact_test_output(result.stdout),
+            "stderr": _compact_test_output(result.stderr),
         }
 
     def web_search(self, query: str, limit: int = 5) -> list[dict[str, str]]:
