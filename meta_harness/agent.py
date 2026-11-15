@@ -4,6 +4,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -12,9 +14,11 @@ from ._json_util import json_value
 from .openrouter import OpenRouterClient
 from .prompts import load as _load_prompt
 from .session import Session
+from .sandbox import TestSandbox
 from .task_evaluator import run_workspace_tests
 from .tools import ToolError
 from .tools import ToolRegistry
+from .tools import _compact_test_output
 
 _CONTEXT_CHARS = 60000
 _EDIT_TOOLS = ("edit", "write", "patch")
@@ -240,8 +244,76 @@ class Agent:
             return self._adversarial_run(prompt)
         self._begin_run(prompt)
         answer = self._loop()
+        answer = self._auto_verify(prompt, answer)
         answer = self._verified_answer(prompt, answer)
         return self._review_answer(prompt, answer)
+
+    def _auto_verify(self, prompt: str, answer: str) -> str:
+        """Run project tests and repair bounded failures.
+
+        Parameters
+        ----------
+        prompt : str
+            User task.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        str
+            Original or repaired answer.
+        """
+        if not _auto_verify_enabled():
+            return answer
+        passed, output = self._project_tests()
+        if passed:
+            return answer
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = _snapshot(Path(temporary), self.tools.root)
+            return self._verify_loop(answer, snapshot, output)
+
+    def _verify_loop(self, answer: str, snapshot: Path, output: str) -> str:
+        """Attempt bounded project-test repairs.
+
+        Parameters
+        ----------
+        answer : str
+            Original answer.
+        snapshot : pathlib.Path
+            Workspace snapshot.
+        output : str
+            Initial failing test output.
+
+        Returns
+        -------
+        str
+            Repaired answer when tests pass, otherwise the original.
+        """
+        for _ in range(_verify_attempts()):
+            self._append(_verify_message(output))
+            repaired = self._loop()
+            passed, output = self._project_tests()
+            if passed:
+                return repaired
+        _restore_workspace(self.tools.root, snapshot)
+        return answer
+
+    def _project_tests(self) -> tuple[bool, str]:
+        """Run the project's own tests.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        tuple[bool, str]
+            Whether tests passed, and combined output.
+        """
+        command = _test_command(self.tools.root)
+        if os.getenv("HARNESS_SANDBOX_TESTS", "0").strip() == "1":
+            return TestSandbox().run(self.tools.root, command)
+        return _run_local_tests(self.tools.root, command)
 
     def _verified_answer(self, prompt: str, answer: str) -> str:
         """Run reviewer tests and apply one repair turn.
@@ -1331,6 +1403,141 @@ def _clean_tests(tests) -> list[str]:
     if not isinstance(tests, list):
         return []
     return [item for item in tests if isinstance(item, str) and item.strip()]
+
+
+def _auto_verify_enabled() -> bool:
+    """Return whether project-test verification is enabled.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    bool
+        Whether ``HARNESS_AUTO_VERIFY`` enables verification.
+    """
+    value = os.getenv("HARNESS_AUTO_VERIFY", "0").strip().lower()
+    return value in ("1", "true", "yes", "on")
+
+
+def _verify_attempts() -> int:
+    """Return the bounded number of project-test repair turns.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    int
+        Repair attempts, at least one.
+    """
+    raw = os.getenv("HARNESS_VERIFY_ATTEMPTS", "2").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
+
+
+def _has_pytest(root: Path) -> bool:
+    """Return whether a workspace looks like a pytest project.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    bool
+        ``True`` when pytest-style tests are present.
+    """
+    if (root / "conftest.py").exists() or (root / "tests").is_dir():
+        return True
+    return any(root.glob("test_*.py"))
+
+
+def _test_command(root: Path) -> list[str]:
+    """Return the project's test command.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    list[str]
+        Container-neutral test command.
+    """
+    if _has_pytest(root):
+        return ["python", "-m", "pytest", "-q"]
+    return ["python", "-m", "unittest", "discover", "-q"]
+
+
+def _run_local_tests(root: Path, command: list[str]) -> tuple[bool, str]:
+    """Run project tests on the host.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+    command : list[str]
+        Container-neutral test command.
+
+    Returns
+    -------
+    tuple[bool, str]
+        Whether tests passed, and combined output.
+    """
+    result = _local_process(root, command)
+    output = f"{result.stdout}\n{result.stderr}".strip()
+    return result.returncode == 0, output
+
+
+def _local_process(root: Path, command: list[str]):
+    """Run a host test command.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+    command : list[str]
+        Container-neutral test command.
+
+    Returns
+    -------
+    subprocess.CompletedProcess[str]
+        Completed process.
+    """
+    return subprocess.run(
+        [sys.executable, *command[1:]],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def _verify_message(output: str) -> dict[str, str]:
+    """Build the message that requests a project-test repair.
+
+    Parameters
+    ----------
+    output : str
+        Failing test output.
+
+    Returns
+    -------
+    dict[str, str]
+        Repair message.
+    """
+    detail = _compact_test_output(output)
+    content = (
+        "The project tests fail. Fix only the failing tests, then finish.\n"
+    )
+    return {"role": "user", "content": content + detail}
 
 
 def _repair_message(output: str) -> dict[str, str]:

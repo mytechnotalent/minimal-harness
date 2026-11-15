@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from meta_harness.agent import Agent
 from meta_harness.agent import _repair_attempts
+from meta_harness.agent import _test_command
 from meta_harness.session import Session
 from meta_harness.tools import ToolError
 from meta_harness.tools import ToolRegistry
@@ -354,6 +355,46 @@ class ReadRangeTests(unittest.TestCase):
             _workspace_file(root, "a.txt", "one\ntwo\nthree\n")
             result = ToolRegistry(root).read("a.txt", offset=2, limit=1)
         self.assertEqual(result["content"], "two")
+
+
+class AutoVerifyTests(unittest.TestCase):
+    """Verify project-test auto-verification and repair."""
+
+    def test_test_command_detects_pytest(self) -> None:
+        """A tests directory selects pytest.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tests").mkdir()
+            self.assertEqual(
+                _test_command(root), ["python", "-m", "pytest", "-q"]
+            )
+
+    @patch("meta_harness.agent._restore_workspace")
+    @patch("meta_harness.agent._snapshot", return_value=Path("."))
+    def test_auto_verify_repairs_failure(self, _snapshot, _restore) -> None:
+        """A failing project test triggers one repair loop.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".", client=object(), max_turns=1)
+        result, loop = _auto_verify_result(agent)
+        self.assertEqual(result, "fixed")
+        loop.assert_called_once()
 
 
 class EditNudgeTests(unittest.TestCase):
@@ -1323,6 +1364,27 @@ def _two_edits() -> list[dict[str, str]]:
         {"old": "one = 1", "new": "one = 10"},
         {"old": "two = 2", "new": "two = 20"},
     ]
+
+
+def _auto_verify_result(agent):
+    """Run auto-verification with a failing-then-passing test double.
+
+    Parameters
+    ----------
+    agent : Agent
+        Agent under test.
+
+    Returns
+    -------
+    tuple
+        Verification result and the patched loop mock.
+    """
+    with patch.dict(os.environ, {"HARNESS_AUTO_VERIFY": "1"}):
+        with patch.object(
+            agent, "_project_tests", side_effect=[(False, "fail"), (True, "")]
+        ):
+            with patch.object(agent, "_loop", return_value="fixed") as loop:
+                return agent._auto_verify("p", "orig"), loop
 
 
 def _workspace_file(root: Path, relative: str, text: str) -> Path:

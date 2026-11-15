@@ -340,6 +340,28 @@ is agent workflow and task completion, not missing tools or turn budget.
 - Coding standards disabled: 1/5.
 - `deepseek-v4-pro`: 1/5, much slower.
 
+## Shared test sandbox and auto-verify experiment
+
+Added an opt-in project-test loop: after the agent finishes, run the
+workspace's own tests (pytest or unittest), and on failure apply bounded
+repair turns. Tests can run in a Docker sandbox (`minimal-harness-test`) with
+`--network none`, a writable workspace mount, and the same resource limits as
+the gate.
+
+One repeat on the five-task corpus with auto-verify and the Docker sandbox:
+
+| Task | Result | Seconds | Calls |
+| --- | --- | --- | --- |
+| itsdangerous_signer | pass | 416.9 | 64 |
+| iniconfig_parser | fail | 655.6 | 75 |
+| packaging_utils | fail | 438.2 | 49 |
+| itsdangerous_serializer | fail | 343.8 | 39 |
+| packaging_markers | fail | 521.9 | 68 |
+
+1/5 pass, much slower than the baseline. The visible project tests are
+incomplete and the repair loop thrashes on them. Auto-verify stays off by
+default; the sandbox and ranged reads remain available as opt-in tools.
+
 ## Config search engine
 
 `scripts/search_harness.py` evaluates a configuration grid on a manifest and
