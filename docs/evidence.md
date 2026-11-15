@@ -390,6 +390,41 @@ One repeat on the five-task corpus: 1/5 (itsdangerous_signer only), mean
 packaging_utils (6 calls) without implementing the requested behavior. The
 default prompt remains better. Repo mode stays opt-in and is not a fix.
 
+## Compaction and nudge fixes (5 tasks, 5 repeats)
+
+Pinned system + initial user + the latest user instruction during compaction,
+allowed read/grep/glob and test commands after the exploration nudge, and
+added a per-profile context budget. Full rerun with DeepSeek 4.1 Flash:
+
+| Task | Pass | Runs | Mean seconds | Mean calls |
+| --- | --- | --- | --- | --- |
+| itsdangerous_signer | 5 | 5 | 116.6 | 22.2 |
+| itsdangerous_serializer | 2 | 5 | 139.5 | 22.2 |
+| iniconfig_parser | 0 | 5 | 232.0 | 22.2 |
+| packaging_utils | 0 | 5 | 194.0 | 22.2 |
+| packaging_markers | 0 | 5 | 207.3 | 22.2 |
+
+Overall: **7/25 (28%)**, mean 177.9 seconds, 22.2 calls. Same aggregate as
+the baseline. Signer improved from 3/5 to 5/5; packaging_utils regressed from
+2/5 to 0/5; the others are unchanged. The earlier 3/5 first repeat was
+sampling variance, not a gain.
+
+## Corpus gate
+
+`scripts/corpus_gate.py` runs the harness and the fair Pi baseline, writes a
+JSON report, and exits nonzero unless the harness clears an absolute pass
+rate and a required gain.
+
+```bash
+python -m scripts.corpus_gate \
+  --manifest benchmarks/independent/manifest.json \
+  --repeats 5 --timeout 900 --min-pass 0.52
+```
+
+Fair Pi must be installed and configured with the OpenCode Go provider that
+sets `x-opencode-session`; the default command uses `--tools read,write,edit`
+so Pi cannot copy host packages or fetch upstream references.
+
 ## Config search engine
 
 `scripts/search_harness.py` evaluates a configuration grid on a manifest and
