@@ -277,6 +277,7 @@ def _agent_options(args: Arguments, client: OpenRouterClient) -> dict:
     options["session"] = _session(args)
     options["web_enabled"] = not args.no_web and profile.web
     options["lean"] = args.lean or profile.lean
+    options["repo"] = args.repo
     return options
 
 

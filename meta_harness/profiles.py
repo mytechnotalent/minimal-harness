@@ -14,17 +14,25 @@ class ModelProfile:
     retries: int = 2
     web: bool = True
     lean: bool = False
+    context_chars: int = 250_000
 
 
 DEFAULT_PROFILE = ModelProfile()
 
 PROFILES = {
-    "beam-free": ModelProfile(max_turns=12, timeout=180, retries=4, web=True),
+    "beam-free": ModelProfile(
+        max_turns=12, timeout=180, retries=4, web=True, context_chars=80_000
+    ),
     "deepseek-v4.1-flash": ModelProfile(
-        max_turns=24, timeout=240, retries=2, web=True
+        max_turns=24, timeout=240, retries=2, web=True, context_chars=250_000
     ),
     "qwen2.5-coder:7b": ModelProfile(
-        max_turns=16, timeout=240, retries=2, web=False, lean=True
+        max_turns=16,
+        timeout=240,
+        retries=2,
+        web=False,
+        lean=True,
+        context_chars=120_000,
     ),
 }
 

@@ -12,6 +12,7 @@ from typing import Any
 
 from ._json_util import json_value
 from .openrouter import OpenRouterClient
+from .profiles import profile_for
 from .prompts import load as _load_prompt
 from .session import Session
 from .sandbox import TestSandbox
@@ -20,9 +21,10 @@ from .tools import ToolError
 from .tools import ToolRegistry
 from .tools import _compact_test_output
 
-_CONTEXT_CHARS = 60000
+_CONTEXT_CHARS = 250000
 _EDIT_TOOLS = ("edit", "write", "patch")
-_CONTEXT_KEEP = 16
+_NUDGE_TOOLS = ("edit", "write", "patch", "read", "grep", "glob")
+_CONTEXT_KEEP = 24
 _CODING_WORDS = (
     "code",
     "function",
@@ -104,6 +106,22 @@ def _standards_mode() -> str:
     return "auto"
 
 
+def _repo_env() -> bool:
+    """Return whether repository mode is configured in environment.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    bool
+        ``True`` when repository mode is enabled.
+    """
+    value = os.getenv("HARNESS_REPO", "0").strip().lower()
+    return value in ("1", "true", "yes", "on")
+
+
 def _coding_task(prompt: str) -> bool:
     """Return whether a prompt likely needs coding standards.
 
@@ -165,7 +183,7 @@ class Agent:
         """
         self.observer = observer
         self.lean = lean
-        self.repo = repo
+        self.repo = repo or _repo_env()
         self.client = client or OpenRouterClient()
         self.tools = ToolRegistry(root, web_enabled=web_enabled)
         self.max_turns = max_turns
@@ -792,14 +810,29 @@ class Agent:
         None
             Older messages may be discarded.
         """
-        limit = _int_env("HARNESS_CONTEXT_CHARS", _CONTEXT_CHARS)
+        limit = self._context_limit()
         if _message_chars(self.messages) <= limit:
             return
         keep = _int_env("HARNESS_CONTEXT_KEEP", _CONTEXT_KEEP)
         self._compact_messages(keep)
 
+    def _context_limit(self) -> int:
+        """Return the effective context character limit.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        int
+            Character budget from environment or model profile.
+        """
+        default = _profile_context_chars(self.client)
+        return _int_env("HARNESS_CONTEXT_CHARS", default)
+
     def _compact_messages(self, keep: int) -> None:
-        """Retain the system prompt and the newest complete messages.
+        """Retain pinned messages and the newest complete turns.
 
         Parameters
         ----------
@@ -811,10 +844,11 @@ class Agent:
         None
             Older messages are discarded.
         """
-        if keep <= 0 or len(self.messages) <= keep:
+        head = _head_messages(self.messages, keep)
+        if keep <= 0 or len(self.messages) <= max(keep, len(head)):
             return
-        head = self.messages[:1]
-        tail = _complete_tail(self.messages[-keep:])
+        start = max(len(head), len(self.messages) - keep)
+        tail = _complete_tail(self.messages[start:])
         self._replace(head + tail)
 
     def _replace(self, messages: list[dict[str, Any]]) -> None:
@@ -909,7 +943,7 @@ class Agent:
         None
             A nudge is appended once.
         """
-        if self._mutated or self._nudged or turn < 3:
+        if self._mutated or self._nudged or turn < _nudge_turn():
             return
         self._nudged = True
         self._append(_edit_nudge_message())
@@ -927,9 +961,9 @@ class Agent:
         list[dict[str, Any]]
             Full tools, or edit tools after the nudge.
         """
-        if self._mutated or turn < 3:
+        if self._mutated or turn < _nudge_turn():
             return self.tools.schema()
-        return self.tools.schema(("edit", "write", "patch"))
+        return self.tools.schema(_NUDGE_TOOLS)
 
     def _inject_steering(self) -> None:
         """Append queued steering messages before a model call.
@@ -997,8 +1031,29 @@ class Agent:
         if name in _EDIT_TOOLS:
             self._mutated = True
         if self._nudged and not self._mutated:
-            return self._blocked_result(call)
+            if not self._nudge_allowed(function):
+                return self._blocked_result(call)
         return self._allowed_result(call, function, name)
+
+    def _nudge_allowed(self, function: dict[str, Any]) -> bool:
+        """Return whether a tool may run after the exploration nudge.
+
+        Parameters
+        ----------
+        function : dict[str, Any]
+            Tool-call function payload.
+
+        Returns
+        -------
+        bool
+            ``True`` for inspection, edit, or test commands.
+        """
+        name = function.get("name")
+        if name in _NUDGE_TOOLS:
+            return True
+        if name != "bash":
+            return False
+        return _is_test_command(function.get("arguments", ""))
 
     def _allowed_result(self, call, function, name) -> dict[str, Any]:
         """Execute one allowed tool call.
@@ -1119,9 +1174,24 @@ def _blocked_tool_message(name: str) -> str:
     """
     message = (
         f"{name} is unavailable until you edit a file. "
-        "Use edit, write, or patch now."
+        "Use edit, write, patch, or read now."
     )
     return json.dumps({"error": message})
+
+
+def _nudge_turn() -> int:
+    """Return the turn threshold for the exploration nudge.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    int
+        Turn threshold after which the nudge fires.
+    """
+    return _int_env("HARNESS_NUDGE_TURN", 3)
 
 
 def _edit_nudge_message() -> dict[str, str]:
@@ -1240,6 +1310,108 @@ def _complete_tail(tail: list[dict[str, Any]]) -> list[dict[str, Any]]:
     while index < len(tail) and tail[index].get("role") == "tool":
         index += 1
     return tail[index:]
+
+
+def _head_messages(
+    messages: list[dict[str, Any]], keep: int
+) -> list[dict[str, Any]]:
+    """Return pinned messages for context compaction.
+
+    Parameters
+    ----------
+    messages : list of dict[str, Any]
+        Conversation messages.
+    keep : int
+        Number of newest messages to retain.
+
+    Returns
+    -------
+    list of dict[str, Any]
+        Pinned system, initial user, and latest dropped user message.
+    """
+    head = _initial_head(messages)
+    latest = _latest_user_index(messages)
+    if latest is not None and latest < len(messages) - keep:
+        if latest >= len(head):
+            head.append(messages[latest])
+    return head
+
+
+def _initial_head(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the system message and initial user task.
+
+    Parameters
+    ----------
+    messages : list of dict[str, Any]
+        Conversation messages.
+
+    Returns
+    -------
+    list of dict[str, Any]
+        Pinned initial messages.
+    """
+    if len(messages) >= 2 and messages[1].get("role") == "user":
+        return messages[:2]
+    return messages[:1]
+
+
+def _latest_user_index(messages: list[dict[str, Any]]) -> int | None:
+    """Return the newest user message index.
+
+    Parameters
+    ----------
+    messages : list of dict[str, Any]
+        Conversation messages.
+
+    Returns
+    -------
+    int or None
+        Index of the newest user message.
+    """
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") == "user":
+            return index
+    return None
+
+
+def _is_test_command(arguments: str) -> bool:
+    """Return whether tool arguments request a test command.
+
+    Parameters
+    ----------
+    arguments : str
+        JSON tool arguments.
+
+    Returns
+    -------
+    bool
+        ``True`` for pytest, unittest, or compile commands.
+    """
+    try:
+        command = json.loads(arguments).get("command", "")
+    except (json.JSONDecodeError, TypeError):
+        return False
+    markers = ("pytest", "unittest", "test_", "compileall")
+    return any(marker in command for marker in markers)
+
+
+def _profile_context_chars(client: Any) -> int:
+    """Return the profile context character limit for a client.
+
+    Parameters
+    ----------
+    client : Any
+        Chat model client.
+
+    Returns
+    -------
+    int
+        Character limit from matching profile, or default.
+    """
+    model = getattr(client, "model", "")
+    if isinstance(model, str) and model:
+        return profile_for(model).context_chars
+    return _CONTEXT_CHARS
 
 
 def _copy_messages(messages: list[dict]) -> list[dict]:

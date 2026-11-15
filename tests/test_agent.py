@@ -5,10 +5,12 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from meta_harness.agent import Agent
 from meta_harness.agent import _repair_attempts
+from meta_harness.agent import _profile_context_chars
 from meta_harness.agent import _test_command
 from meta_harness.session import Session
 from meta_harness.tools import ToolError
@@ -357,6 +359,80 @@ class ReadRangeTests(unittest.TestCase):
         self.assertEqual(result["content"], "two")
 
 
+class ContextAndNudgeTests(unittest.TestCase):
+    """Verify compaction pinning, nudge permissions, and context limits."""
+
+    def test_compaction_pins_latest_user_instruction(self) -> None:
+        """A user correction survives compaction exactly once.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".", client=object())
+        agent.messages = _compaction_messages()
+        agent._compact_messages(2)
+        contents = [item.get("content") for item in agent.messages]
+        self.assertIn("task", contents)
+        self.assertEqual(contents.count("steering"), 1)
+
+    def test_nudge_allows_read_and_test_bash(self) -> None:
+        """Inspection and test commands survive the nudge.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".", client=object())
+        agent._nudged = True
+        read = {"name": "read", "arguments": '{"path": "x.py"}'}
+        test = {"name": "bash", "arguments": '{"command": "pytest -q"}'}
+        shell = {"name": "bash", "arguments": '{"command": "ls -la"}'}
+        self.assertTrue(agent._nudge_allowed(read))
+        self.assertTrue(agent._nudge_allowed(test))
+        self.assertFalse(agent._nudge_allowed(shell))
+
+    def test_profile_context_chars(self) -> None:
+        """Profiles provide the default context budget.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        deepseek = SimpleNamespace(model="deepseek-v4.1-flash")
+        beam = SimpleNamespace(model="beam-free")
+        self.assertEqual(_profile_context_chars(deepseek), 250000)
+        self.assertEqual(_profile_context_chars(beam), 80000)
+
+    def test_context_limit_env_override(self) -> None:
+        """An explicit context budget overrides the profile.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = SimpleNamespace(model="deepseek-v4.1-flash")
+        agent = Agent(root=".", client=client)
+        with patch.dict(os.environ, {"HARNESS_CONTEXT_CHARS": "1234"}):
+            self.assertEqual(agent._context_limit(), 1234)
+
+
 class AutoVerifyTests(unittest.TestCase):
     """Verify project-test auto-verification and repair."""
 
@@ -401,7 +477,7 @@ class EditNudgeTests(unittest.TestCase):
     """Verify exploration is cut off with an edit nudge."""
 
     def test_nudge_restricts_tools(self) -> None:
-        """After three quiet turns only edit tools are advertised.
+        """After three quiet turns edit and inspection tools are advertised.
 
         Parameters
         ----------
@@ -414,7 +490,26 @@ class EditNudgeTests(unittest.TestCase):
         agent = Agent(root=".", client=object())
         agent._maybe_nudge(3)
         names = {item["function"]["name"] for item in agent._tool_schemas(3)}
-        self.assertEqual(names, {"edit", "write", "patch"})
+        self.assertEqual(
+            names, {"edit", "write", "patch", "read", "grep", "glob"}
+        )
+
+    def test_nudge_allows_read_tools(self) -> None:
+        """Read tools remain available after the nudge to formulate edits.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            resolved = Path(directory).resolve()
+            Path(resolved, "x").write_text("hello", encoding="utf-8")
+            result = _read_nudged_result(resolved)
+            self.assertIn("hello", result["content"])
 
     def test_nudge_blocks_non_edit_tools(self) -> None:
         """Non-edit tools fail until a file is modified.
@@ -830,6 +925,42 @@ class CodingStandardsTests(unittest.TestCase):
         system = client.messages[0]["content"]
         self.assertIn("Mandatory coding standards", system)
 
+    def test_repo_mode_uses_repo_prompt(self) -> None:
+        """Repo mode uses repo prompt and suppresses coding standards.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = RecordingClient()
+        agent = Agent(root=".", client=client, repo=True)
+        agent.run("Fix bug in parsing markers.")
+        system = client.messages[0]["content"]
+        self.assertIn("existing repository", system)
+        self.assertNotIn("Mandatory coding standards", system)
+
+    def test_repo_env_activates_repo_mode(self) -> None:
+        """Environment variable enables repo prompt.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = RecordingClient()
+        with patch.dict(os.environ, {"HARNESS_REPO": "1"}):
+            agent = Agent(root=".", client=client)
+            agent.run("Fix bug in markers.")
+            system = client.messages[0]["content"]
+        self.assertIn("existing repository", system)
+
 
 class ContextCompactionTests(unittest.TestCase):
     """Verify long conversations are compacted before model calls."""
@@ -851,7 +982,7 @@ class ContextCompactionTests(unittest.TestCase):
         self._assert_compacted(agent)
 
     def _assert_compacted(self, agent) -> None:
-        """Verify orphan tool messages are dropped.
+        """Verify orphan tool messages are dropped and user prompt pinned.
 
         Parameters
         ----------
@@ -864,8 +995,9 @@ class ContextCompactionTests(unittest.TestCase):
             Assertions document the result.
         """
         roles = [item["role"] for item in agent.messages]
-        self.assertEqual(roles, ["system", "assistant"])
+        self.assertEqual(roles, ["system", "user", "assistant"])
         self.assertEqual(agent.messages[0]["content"], "sys")
+        self.assertEqual(agent.messages[1]["content"], "old")
 
     def test_auto_compaction_respects_budget(self) -> None:
         """A low character budget triggers compaction.
@@ -882,8 +1014,9 @@ class ContextCompactionTests(unittest.TestCase):
         agent.messages = _budget_messages()
         with patch.dict(os.environ, _low_budget()):
             agent._maybe_compact()
-        self.assertEqual(len(agent.messages), 2)
+        self.assertEqual(len(agent.messages), 3)
         self.assertEqual(agent.messages[0]["role"], "system")
+        self.assertEqual(agent.messages[1]["role"], "user")
 
     def test_compaction_skips_short_conversations(self) -> None:
         """A conversation under budget is left untouched.
@@ -902,8 +1035,24 @@ class ContextCompactionTests(unittest.TestCase):
             agent._maybe_compact()
         self.assertEqual(agent.messages, before)
 
+    def test_profile_context_limit_respected(self) -> None:
+        """Client model profile determines default context limit.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = SimpleNamespace(model="beam-free")
+        agent = Agent(".", client=client)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(agent._context_limit(), 80_000)
+
     def test_trim_context_keeps_system(self) -> None:
-        """Trimming keeps the system prompt and newest messages.
+        """Trimming keeps system prompt, user prompt, and newest messages.
 
         Parameters
         ----------
@@ -917,7 +1066,7 @@ class ContextCompactionTests(unittest.TestCase):
         agent.messages = _trim_messages()
         agent.trim_context(1)
         roles = [item["role"] for item in agent.messages]
-        self.assertEqual(roles, ["system", "assistant"])
+        self.assertEqual(roles, ["system", "user", "assistant"])
 
 
 class AgentLimitTests(unittest.TestCase):
@@ -1364,6 +1513,33 @@ def _search_results(root: Path) -> tuple:
     return registry.glob("**/*.py"), registry.repo_map()
 
 
+_COMPACTION_MESSAGES = [
+    {"role": "system", "content": "sys"},
+    {"role": "user", "content": "task"},
+    {"role": "assistant", "content": "a"},
+    {"role": "tool", "content": "t"},
+    {"role": "user", "content": "steering"},
+    {"role": "assistant", "content": "b"},
+    {"role": "assistant", "content": "c"},
+    {"role": "assistant", "content": "d"},
+]
+
+
+def _compaction_messages() -> list[dict]:
+    """Return a conversation with a mid-run user correction.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    list[dict]
+        Conversation messages.
+    """
+    return [dict(item) for item in _COMPACTION_MESSAGES]
+
+
 def _two_edits() -> list[dict[str, str]]:
     """Return two simple edits for patch tests.
 
@@ -1521,6 +1697,28 @@ def _trim_messages() -> list[dict]:
         {"role": "user", "content": "old"},
         {"role": "assistant", "content": "new"},
     ]
+
+
+def _read_nudged_result(root: Path) -> dict:
+    """Execute a read call on a nudged agent.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    dict
+        Tool execution result.
+    """
+    agent = Agent(root=root, client=object())
+    agent._nudged = True
+    call = {
+        "id": "1",
+        "function": {"name": "read", "arguments": '{"path": "x"}'},
+    }
+    return agent._tool_result(call)
 
 
 def _broken_call() -> dict:
