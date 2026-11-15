@@ -779,6 +779,22 @@ class CodingStandardsTests(unittest.TestCase):
         self.assertIn("embedded C standard", system)
         self.assertIn("RP2350 RISC-V", system)
 
+    def test_repo_prompt_skips_standards(self) -> None:
+        """Repo mode uses the existing-project prompt without standards.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".", repo=True)
+        system = agent.messages[0]["content"]
+        self.assertIn("existing repository", system)
+        self.assertNotIn("Mandatory coding standards", system)
+
     def test_standards_strip_for_non_coding_prompt(self) -> None:
         """Auto mode removes standards from a plain question.
 

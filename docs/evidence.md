@@ -380,6 +380,16 @@ Mean time: harness 328 seconds, Pi 395 seconds. The stronger model does not
 close the gap; the harness gets slower without matching Pi's completion rate.
 This reinforces that the limiting factor is agent workflow, not model tier.
 
+## Repo-mode experiment
+
+Added an opt-in `--repo` mode that replaces the ask/project-folder/coding
+standards prompt with an existing-repository prompt and no standards.
+
+One repeat on the five-task corpus: 1/5 (itsdangerous_signer only), mean
+117 seconds. It stopped early on iniconfig_parser (8 calls) and
+packaging_utils (6 calls) without implementing the requested behavior. The
+default prompt remains better. Repo mode stays opt-in and is not a fix.
+
 ## Config search engine
 
 `scripts/search_harness.py` evaluates a configuration grid on a manifest and

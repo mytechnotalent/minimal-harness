@@ -44,6 +44,7 @@ OPTION_SPECS = [
     (("--flake-runs",), {"type": int, "default": 2}),
     (("--no-web",), {"action": "store_true"}),
     (("--lean",), {"action": "store_true"}),
+    (("--repo",), {"action": "store_true"}),
     (("--task-manifest",), {"default": None}),
     (("--gate-command",), {"default": None}),
     (("--final-gate-command",), {"default": None}),

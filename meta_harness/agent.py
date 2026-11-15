@@ -133,6 +133,7 @@ class Agent:
         observer=None,
         web_enabled: bool = True,
         lean: bool = False,
+        repo: bool = False,
     ) -> None:
         """Initialize an agent session.
 
@@ -154,6 +155,8 @@ class Agent:
 
         lean : bool
             Use the short repo-editing prompt.
+        repo : bool
+            Use the existing-repository prompt.
 
         Returns
         -------
@@ -162,11 +165,27 @@ class Agent:
         """
         self.observer = observer
         self.lean = lean
+        self.repo = repo
         self.client = client or OpenRouterClient()
         self.tools = ToolRegistry(root, web_enabled=web_enabled)
         self.max_turns = max_turns
         self.session = session
-        self.messages: list[dict[str, Any]] = self._initial_messages(session)
+        self._init_state(session)
+
+    def _init_state(self, session: Session | None) -> None:
+        """Initialize messages and per-run task state.
+
+        Parameters
+        ----------
+        session : Session or None
+            Optional persisted session.
+
+        Returns
+        -------
+        None
+            Messages and run state are initialized.
+        """
+        self.messages = self._initial_messages(session)
         self._init_task_state()
 
     def _init_task_state(self) -> None:
@@ -224,7 +243,7 @@ class Agent:
         if messages and messages[0].get("role") == "system":
             return messages
         return [
-            {"role": "system", "content": _system_prompt(self.lean)}
+            {"role": "system", "content": _system_prompt(self.lean, self.repo)}
         ] + messages
 
     def run(self, prompt: str) -> str:
@@ -530,7 +549,7 @@ class Agent:
         None
             The system message may be shortened in place.
         """
-        if self.lean:
+        if self.lean or self.repo:
             return
         self._trim_standards(prompt)
 
@@ -1146,8 +1165,30 @@ def _repair_tool_calls(message: dict[str, Any]) -> None:
             function["arguments"] = "{}"
 
 
-def _system_prompt(lean: bool = False) -> str:
+def _system_prompt(lean: bool = False, repo: bool = False) -> str:
     """Build the combined interactive system prompt.
+
+    Parameters
+    ----------
+    lean : bool
+        Use the short repo-editing prompt.
+    repo : bool
+        Use the existing-repository prompt.
+
+    Returns
+    -------
+    str
+        Agent prompt, optionally followed by coding standards.
+    """
+    if repo:
+        return _load_prompt("repo")
+    if lean:
+        return _load_prompt("lean")
+    return _full_prompt()
+
+
+def _full_prompt() -> str:
+    """Build the default prompt with coding standards.
 
     Parameters
     ----------
@@ -1156,10 +1197,8 @@ def _system_prompt(lean: bool = False) -> str:
     Returns
     -------
     str
-        Agent prompt followed by the coding standards.
+        Agent prompt followed by coding standards.
     """
-    if lean:
-        return _load_prompt("lean")
     return _load_prompt("agent") + "\n\n" + _load_prompt("coding_standards")
 
 
