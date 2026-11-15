@@ -36,7 +36,11 @@ _WEB_TOOLS = (
     "browser_assert",
 )
 TOOL_SCHEMAS = {
-    "read": {"path": {"type": "string"}},
+    "read": {
+        "path": {"type": "string"},
+        "offset": {"type": "integer"},
+        "limit": {"type": "integer"},
+    },
     "write": {"path": {"type": "string"}, "content": {"type": "string"}},
     "edit": {
         "path": {"type": "string"},
@@ -238,6 +242,63 @@ def _line_number(content: str, index: int) -> int:
         One-based line number.
     """
     return content.count("\n", 0, index) + 1
+
+
+def _read_slice(
+    path: str, content: str, offset: int, limit: int
+) -> dict[str, object]:
+    """Return a full file or a one-based line range.
+
+    Parameters
+    ----------
+    path : str
+        Relative file path.
+    content : str
+        Full file content.
+    offset : int
+        One-based first line.
+    limit : int
+        Maximum lines, or zero for the rest of the file.
+
+    Returns
+    -------
+    dict[str, object]
+        Path and selected content.
+    """
+    if offset <= 1 and limit <= 0:
+        return {"path": path, "content": content}
+    return _line_slice(path, content, offset, limit)
+
+
+def _line_slice(
+    path: str, content: str, offset: int, limit: int
+) -> dict[str, object]:
+    """Return a one-based line range from file content.
+
+    Parameters
+    ----------
+    path : str
+        Relative file path.
+    content : str
+        Full file content.
+    offset : int
+        One-based first line.
+    limit : int
+        Maximum lines, or zero for the rest of the file.
+
+    Returns
+    -------
+    dict[str, object]
+        Path and selected content.
+    """
+    lines = content.splitlines()
+    start = max(0, offset - 1)
+    end = len(lines) if limit <= 0 else start + limit
+    return {
+        "path": path,
+        "offset": offset,
+        "content": "\n".join(lines[start:end]),
+    }
 
 
 def _read_text(path: Path) -> str | None:
@@ -872,21 +933,27 @@ class ToolRegistry:
             raise ToolError(f"Tool {name} failed: {exc}") from exc
         return _bound_output(json.dumps(result, default=str))
 
-    def read(self, path: str) -> dict[str, str]:
-        """Read a workspace file.
+    def read(
+        self, path: str, offset: int = 1, limit: int = 0
+    ) -> dict[str, object]:
+        """Read a workspace file or a line range.
 
         Parameters
         ----------
         path : str
             Relative file path.
+        offset : int
+            One-based first line.
+        limit : int
+            Maximum lines, or zero for the rest of the file.
 
         Returns
         -------
-        dict[str, str]
+        dict[str, object]
             Path and file content.
         """
-        target = self._path(path)
-        return {"path": path, "content": target.read_text()}
+        content = self._path(path).read_text()
+        return _read_slice(path, content, offset, limit)
 
     def write(self, path: str, content: str) -> dict[str, Any]:
         """Write a workspace file.

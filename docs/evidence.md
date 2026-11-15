@@ -330,6 +330,16 @@ Configuration experiments that did not close the gap:
 Conclusion: the harness has no fair win over Pi on this corpus yet. The gap
 is agent workflow and task completion, not missing tools or turn budget.
 
+## Experiments that did not beat the fair baseline
+
+- Reading the project's existing tests first plus ranged reads: 0/10 on
+  packaging_utils and itsdangerous_serializer, so the prompt change was
+  reverted; ranged reads remain available as a tool.
+- 40 turns: 2/5, slower.
+- Lean prompt: 1/5.
+- Coding standards disabled: 1/5.
+- `deepseek-v4-pro`: 1/5, much slower.
+
 ## Config search engine
 
 `scripts/search_harness.py` evaluates a configuration grid on a manifest and

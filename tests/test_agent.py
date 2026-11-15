@@ -335,6 +335,27 @@ class PythonEditSafetyTests(unittest.TestCase):
             self.assertEqual(path.read_text(), "x = 1\n")
 
 
+class ReadRangeTests(unittest.TestCase):
+    """Verify ranged reads reduce context for large files."""
+
+    def test_read_line_range(self) -> None:
+        """Offset and limit return only the requested lines.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _workspace_file(root, "a.txt", "one\ntwo\nthree\n")
+            result = ToolRegistry(root).read("a.txt", offset=2, limit=1)
+        self.assertEqual(result["content"], "two")
+
+
 class EditNudgeTests(unittest.TestCase):
     """Verify exploration is cut off with an edit nudge."""
 
