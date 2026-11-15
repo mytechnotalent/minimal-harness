@@ -264,9 +264,16 @@ task at a 900-second timeout.
 | packaging_markers | 0/5 | 5/5 |
 | **Overall** | **7/25 (28%)** | **25/25 (100%)** |
 
-Mean wall time: harness 161.5 seconds, Pi 204.7 seconds. The harness is about
-27% faster but passes 3.6x fewer tasks. At this model, Pi is clearly the
-stronger agent; the harness has no capability win on this corpus.
+Mean wall time: harness 161.5 seconds, Pi 204.7 seconds. This Pi result is
+**not a valid capability baseline**. Its trajectory shows `find /`, reading
+the installed `iniconfig` package, and `curl`-ing the upstream source and
+tests from GitHub before editing. Pi copied the reference implementation.
+
+A fair rerun with Pi's bash/shell tool disabled (`--tools read,write,edit`)
+and no network use scored 2/5 on the first repeat, the same as the harness's
+first repeat. Both agents fail iniconfig_parser and packaging_markers, and
+they pass different tasks. A rigorous comparison still requires a shared
+filesystem/network sandbox for both agents.
 
 Failure review showed two harness-specific causes worth fixing: the model
 sometimes asked for clarification although the CLI advertises no `ask` tool,
@@ -294,6 +301,34 @@ Reproduce Pi with the same model through a custom provider in
   }
 }
 ```
+
+## Fair Pi baseline (no shell)
+
+Pi was rerun with bash disabled (`--tools read,write,edit`) and a no-network
+instruction, so it could not search the host or fetch upstream references.
+
+| Task | Pi | Harness (flash) |
+| --- | --- | --- |
+| itsdangerous_signer | 3/5 | 3/5 |
+| iniconfig_parser | 0/5 | 0/5 |
+| packaging_utils | 4/5 | 2/5 |
+| itsdangerous_serializer | 4/5 | 2/5 |
+| packaging_markers | 1/5 | 0/5 |
+| **Overall** | **12/25 (48%)** | **7/25 (28%)** |
+
+Mean time: Pi 221.4 seconds, harness 161.5 seconds. The harness remains
+faster, but Pi is ahead on capability. Pi's earlier 25/25 result is invalid:
+its trace downloaded upstream source and tests and copied the reference.
+
+Configuration experiments that did not close the gap:
+
+- Harness at 40 turns: 2/5, slower.
+- Lean prompt: 1/5.
+- Coding standards disabled: 1/5.
+- `deepseek-v4-pro`: 1/5, much slower.
+
+Conclusion: the harness has no fair win over Pi on this corpus yet. The gap
+is agent workflow and task completion, not missing tools or turn budget.
 
 ## Config search engine
 
