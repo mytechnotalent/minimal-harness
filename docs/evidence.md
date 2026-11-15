@@ -362,6 +362,24 @@ One repeat on the five-task corpus with auto-verify and the Docker sandbox:
 incomplete and the repair loop thrashes on them. Auto-verify stays off by
 default; the sandbox and ranged reads remain available as opt-in tools.
 
+## Same-model comparison on DeepSeek V4 Pro
+
+Both agents were rerun with `deepseek-v4-pro`; Pi used read/write/edit with
+no shell or network access.
+
+| Task | Harness | Pi |
+| --- | --- | --- |
+| itsdangerous_signer | 1/1 | 1/1 |
+| iniconfig_parser | 0/1 | 0/1 |
+| packaging_utils | 0/1 | 1/1 |
+| itsdangerous_serializer | 0/1 | 1/1 |
+| packaging_markers | 0/1 | 0/1 |
+| **Overall** | **1/5 (20%)** | **3/5 (60%)** |
+
+Mean time: harness 328 seconds, Pi 395 seconds. The stronger model does not
+close the gap; the harness gets slower without matching Pi's completion rate.
+This reinforces that the limiting factor is agent workflow, not model tier.
+
 ## Config search engine
 
 `scripts/search_harness.py` evaluates a configuration grid on a manifest and
