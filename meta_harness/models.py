@@ -29,6 +29,7 @@ class SearchConfig:
     gate_threshold: float = 1.0
     plateau_rounds: int = 3
     plateau_epsilon: float = 0.0
+    max_cost: float = 0.0
     docker_image: str = "python:3.12-slim"
     use_docker: bool = True
     use_web_search: bool = True

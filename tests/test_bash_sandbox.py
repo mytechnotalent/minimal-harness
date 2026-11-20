@@ -104,7 +104,7 @@ class LinuxSandboxTests(unittest.TestCase):
             argv = _linux_argv()
         self.assertEqual(Path(argv[0]).name, "bwrap")
         self.assertIn("--unshare-net", argv)
-        self.assertIn("--ro-bind", argv)
+        self.assertIn("--ro-bind-try", argv)
         self.assertEqual(argv[-3:], ["/bin/sh", "-c", "ls"])
 
     def test_network_flag_removes_isolation(self) -> None:

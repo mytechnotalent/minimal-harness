@@ -20,10 +20,43 @@ _LINUX_FLAGS = (
     "ALL",
 )
 
+_LINUX_SYSTEM = (
+    "--ro-bind-try",
+    "/usr",
+    "/usr",
+    "--ro-bind-try",
+    "/bin",
+    "/bin",
+    "--ro-bind-try",
+    "/sbin",
+    "/sbin",
+    "--ro-bind-try",
+    "/lib",
+    "/lib",
+    "--ro-bind-try",
+    "/lib64",
+    "/lib64",
+    "--ro-bind-try",
+    "/lib32",
+    "/lib32",
+    "--ro-bind-try",
+    "/etc",
+    "/etc",
+    "--ro-bind-try",
+    "/opt",
+    "/opt",
+    "--ro-bind-try",
+    "/nix",
+    "/nix",
+    "--ro-bind-try",
+    "/snap",
+    "/snap",
+    "--ro-bind-try",
+    "/run",
+    "/run",
+)
+
 _LINUX_BINDS = (
-    "--ro-bind",
-    "/",
-    "/",
     "--tmpfs",
     "/tmp",
     "--dev",
@@ -144,7 +177,8 @@ def _linux_binds(root: Path) -> list[str]:
         Bubblewrap mount flags.
     """
     text = str(root)
-    return [part.format(root=text) for part in _LINUX_BINDS]
+    workspace = [part.format(root=text) for part in _LINUX_BINDS]
+    return [*_LINUX_SYSTEM, *workspace]
 
 
 def _macos_argv(root: Path, command: str) -> list[str]:
