@@ -303,6 +303,62 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(result.stopped_on_target)
         self.assertTrue(result.stop_reason.startswith("iteration budget"))
 
+    def test_stops_on_plateau(self) -> None:
+        """The loop stops after the plateau window without improvement.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The proposer stops early and reports the plateau.
+        """
+        calls = {"count": 0}
+        result = self._run_plateau(calls)
+        self.assertEqual(calls["count"], 3)
+        self.assertTrue(result.stop_reason.startswith("no improvement"))
+
+    def _run_plateau(self, calls: dict[str, int]):
+        """Run a six-iteration search with a two-round plateau.
+
+        Parameters
+        ----------
+        calls : dict[str, int]
+            Mutable proposer call counter.
+
+        Returns
+        -------
+        SearchResult
+            Completed plateau search.
+        """
+        config = self._plateau_config()
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = SearchPipeline(
+                config, client=self.FakeClient(), workspace=Path(directory)
+            )
+            return pipeline.run("seed", partial(cycle_proposer, calls=calls))
+
+    def _plateau_config(self) -> SearchConfig:
+        """Build a configuration that never reaches its target.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        SearchConfig
+            Six-iteration plateau configuration.
+        """
+        return _search_config(
+            iterations=6,
+            proposers_per_iteration=1,
+            target_score=2.0,
+            plateau_rounds=2,
+        )
+
     def _run_cycle(self, directory: str, calls: dict[str, int]):
         """Run a three-iteration local search.
 

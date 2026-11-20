@@ -56,7 +56,10 @@ Known gaps:
 - Sample sizes are too small for confidence intervals.
 - Pi failures were mostly 600-second timeouts.
 - No frontier model and no established harness comparison.
-- Answer-mode tools run on the host; no rootless sandbox by default.
+- Answer-mode bash uses bubblewrap or sandbox-exec; no rootless container
+  boundary, and host reads are still visible to the sandbox.
+- Reviewer calibration tooling exists, but no labeled calibration campaign has
+  been run.
 - Single default provider, no packaging or extension ecosystem.
 
 ## Workstreams

@@ -68,8 +68,25 @@ class SearchPipeline:
         self.gate = DockerGate(config.docker_image)
         self.web_search = web_search or WebSearchClient()
         self.observer, self.should_stop = observer, should_stop
+        self._reset_state()
+
+    def _reset_state(self) -> None:
+        """Initialize per-run search state.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Counters and stop flags are reset.
+        """
         self._current_iteration = 0
         self._cancelled = False
+        self._best_score = -1.0
+        self._stale_rounds = 0
+        self._stopped_on_plateau = False
 
     def run(self, seed: str, proposer: Proposer | None = None) -> SearchResult:
         """Cycle candidates until target or budget exhaustion.
@@ -86,7 +103,9 @@ class SearchPipeline:
         SearchResult
             Search history, winner, and stop reason.
         """
+        self._reset_state()
         self._emit("run_started", seed=seed, iterations=self.config.iterations)
+        self.workspace.mkdir(parents=True, exist_ok=True)
         history, winner = self._search(seed, proposer)
         reached = self._target_reached(winner)
         result = self._result(history, winner, reached)
@@ -162,13 +181,104 @@ class SearchPipeline:
             History and best candidate.
         """
         history, winner = [], None
-        self.workspace.mkdir(parents=True, exist_ok=True)
         for iteration in _rounds(self.config.iterations, self._should_stop):
-            self._current_iteration = iteration
-            history, winner = self._iteration(seed, history, winner, proposer)
-            if self._after_iteration(iteration, winner):
+            history, winner = self._step(
+                iteration, seed, history, winner, proposer
+            )
+            if self._stop_now(iteration, winner):
                 break
         return history, winner
+
+    def _step(
+        self,
+        iteration: int,
+        seed: str,
+        history: list[Candidate],
+        winner: Candidate | None,
+        proposer: Proposer | None,
+    ) -> tuple[list[Candidate], Candidate | None]:
+        """Run one iteration and track progress toward a plateau.
+
+        Parameters
+        ----------
+        iteration : int
+            Current iteration number.
+        seed : str
+            Initial task description.
+        history : list[Candidate]
+            Prior records.
+        winner : Candidate or None
+            Current best candidate.
+        proposer : Proposer or None
+            Optional offline proposer.
+
+        Returns
+        -------
+        tuple[list[Candidate], Candidate or None]
+            Updated history and winner.
+        """
+        self._current_iteration = iteration
+        history, winner = self._iteration(seed, history, winner, proposer)
+        self._track_plateau(winner)
+        return history, winner
+
+    def _stop_now(self, iteration: int, winner: Candidate | None) -> bool:
+        """Return whether the next iteration should be skipped.
+
+        Parameters
+        ----------
+        iteration : int
+            Current iteration number.
+        winner : Candidate or None
+            Best candidate so far.
+
+        Returns
+        -------
+        bool
+            ``True`` when the target or plateau stops the search.
+        """
+        if self._after_iteration(iteration, winner):
+            return True
+        if iteration + 1 >= self.config.iterations:
+            return False
+        return self._plateau_stop()
+
+    def _track_plateau(self, winner: Candidate | None) -> None:
+        """Update the best score and stale iteration count.
+
+        Parameters
+        ----------
+        winner : Candidate or None
+            Best candidate so far.
+
+        Returns
+        -------
+        None
+            Plateau tracking is updated.
+        """
+        score = winner.score if winner and winner.score is not None else 0.0
+        if score > self._best_score + self.config.plateau_epsilon:
+            self._best_score, self._stale_rounds = score, 0
+        else:
+            self._stale_rounds += 1
+
+    def _plateau_stop(self) -> bool:
+        """Return whether the search has stopped improving.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        bool
+            ``True`` when the plateau window is exhausted.
+        """
+        rounds = self.config.plateau_rounds
+        if rounds <= 0 or self._stale_rounds < rounds:
+            return False
+        self._stopped_on_plateau = True
+        return True
 
     def _after_iteration(
         self, iteration: int, winner: Candidate | None
@@ -1606,6 +1716,8 @@ class SearchPipeline:
         """
         if reached:
             return "target score reached"
+        if self._stopped_on_plateau:
+            return "no improvement for the plateau window"
         suffix = (
             " (Docker gate disabled)" if not self.config.use_docker else ""
         )

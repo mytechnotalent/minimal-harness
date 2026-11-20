@@ -37,6 +37,25 @@ def voice_enabled() -> bool:
     Returns
     -------
     bool
-        ``True`` only in cyber mode.
+        ``True`` when voice controls should be built.
     """
+    if _env_flag("HARNESS_VOICE_UI"):
+        return True
     return ui_mode() in (CYBER, HAL)
+
+
+def _env_flag(name: str) -> bool:
+    """Return whether an environment flag is truthy.
+
+    Parameters
+    ----------
+    name : str
+        Variable name.
+
+    Returns
+    -------
+    bool
+        ``True`` for ``1``, ``true``, ``yes``, or ``on``.
+    """
+    value = os.getenv(name, "").strip().lower()
+    return value in ("1", "true", "yes", "on")

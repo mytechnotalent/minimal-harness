@@ -532,8 +532,23 @@ class HalWindow(QMainWindow):
         self._settings = settings
         self._pending: QuestionBridge | None = None
         self._busy = False
-        self._voice = _voice_engine()
+        self._init_voice()
         self._start_components()
+
+    def _init_voice(self) -> None:
+        """Create the voice engine and transcription guard.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Voice state is ready.
+        """
+        self._hearing = False
+        self._voice = _voice_engine()
 
     def _start_components(self) -> None:
         """Build the agent, worker thread, and window layout.
@@ -642,7 +657,7 @@ class HalWindow(QMainWindow):
         None
             Recording starts when possible.
         """
-        if self._voice is None or self._busy:
+        if self._voice is None or self._busy or self._hearing:
             return
         if not self._begin_recording():
             return
@@ -683,6 +698,9 @@ class HalWindow(QMainWindow):
         """
         if self._voice is None or not self._voice.recording:
             return
+        if self._hearing:
+            return
+        self._hearing = True
         self._set_state("thinking")
         threading.Thread(target=self._hear, daemon=True).start()
 
@@ -703,6 +721,8 @@ class HalWindow(QMainWindow):
         except Exception as exc:
             _log_error(f"transcription: {exc}")
             text = ""
+        finally:
+            self._hearing = False
         self.heard.emit(text)
 
     def _on_heard(self, text: str) -> None:

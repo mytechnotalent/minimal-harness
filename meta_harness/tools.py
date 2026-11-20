@@ -13,6 +13,8 @@ from typing import Callable
 
 from .web_search import WebSearchClient
 from .browser import BrowserClient
+from .bash_sandbox import SandboxUnavailable
+from .bash_sandbox import sandbox_argv
 from .evaluator import AppEvaluator
 from .provider import ProviderCatalog
 
@@ -728,6 +730,23 @@ def _compact_test_output(text: str) -> str:
 _SAFE_PATHS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
 
 
+def _timed_out(timeout: int) -> subprocess.CompletedProcess[str]:
+    """Build a timeout result for a shell command.
+
+    Parameters
+    ----------
+    timeout : int
+        Timeout seconds.
+
+    Returns
+    -------
+    subprocess.CompletedProcess[str]
+        Result with exit code 124 and a timeout message.
+    """
+    message = f"command timed out after {timeout} seconds"
+    return subprocess.CompletedProcess([], 124, "", message)
+
+
 def _command_tokens(command: str) -> list[str]:
     """Split a shell command into tokens for path checks.
 
@@ -1137,7 +1156,10 @@ class ToolRegistry:
         self._check_command(command)
         if self._is_install(command):
             self._require_install_ok()
-        result = self._run_command(command, timeout)
+        try:
+            result = self._run_command(command, timeout)
+        except SandboxUnavailable as exc:
+            raise ToolError(str(exc)) from exc
         return self._command_result(result)
 
     def _check_command(self, command: str) -> None:
@@ -1236,16 +1258,34 @@ class ToolRegistry:
         Returns
         -------
         subprocess.CompletedProcess[str]
+            Process result, including timeout exits.
+        """
+        try:
+            return self._invoke(command, timeout)
+        except subprocess.TimeoutExpired:
+            return _timed_out(timeout)
+
+    def _invoke(
+        self, command: str, timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        """Invoke the command on the host or inside the OS sandbox.
+
+        Parameters
+        ----------
+        command : str
+            Shell command.
+        timeout : int
+            Timeout seconds.
+
+        Returns
+        -------
+        subprocess.CompletedProcess[str]
             Process result.
         """
-        return subprocess.run(
-            command,
-            cwd=self.root,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        argv = sandbox_argv(self.root, command)
+        options = {"cwd": self.root, "capture_output": True}
+        options.update(text=True, timeout=timeout, shell=argv is None)
+        return subprocess.run(command if argv is None else argv, **options)
 
     def _command_result(
         self, result: subprocess.CompletedProcess[str]

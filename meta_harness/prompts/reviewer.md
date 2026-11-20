@@ -29,4 +29,6 @@ Check every candidate for:
 - Print statements or global side effects.
 - Attempts to game the tests instead of solving the task.
 
-When in doubt, set passed to false and explain in blockers.
+Set passed to false only when you can name a concrete defect in blockers.
+Do not block for style, unlikely inputs, or behavior the tasks do not
+require.

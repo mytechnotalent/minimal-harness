@@ -297,6 +297,7 @@ class Transcriber:
         self.local_only = _local_only(self.token)
         self.cache_dir = os.getenv("HARNESS_WHISPER_CACHE")
         self._model: Any = None
+        self._lock = threading.Lock()
 
     def transcribe(self, audio: Any) -> str:
         """Transcribe one mono float32 sample array.
@@ -311,10 +312,13 @@ class Transcriber:
         str
             Recognized text, or an empty string.
         """
-        segments, _ = self._load().transcribe(
-            audio, language="en", vad_filter=True
-        )
-        return " ".join(segment.text.strip() for segment in segments).strip()
+        with self._lock:
+            segments, _ = self._load().transcribe(
+                audio, language="en", vad_filter=True
+            )
+            return " ".join(
+                segment.text.strip() for segment in segments
+            ).strip()
 
     def _load(self) -> Any:
         """Load and cache the faster-whisper model.
