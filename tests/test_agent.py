@@ -1231,6 +1231,166 @@ class ReviewPolicyTests(unittest.TestCase):
         self.assertEqual(_review_agent(review).run("compute load"), "fixed")
 
 
+def _ledger_review(stated: float) -> str:
+    """Build a ledger response with one computation.
+
+    Parameters
+    ----------
+    stated : float
+        Number claimed by the answer.
+
+    Returns
+    -------
+    str
+        JSON ledger.
+    """
+    computation = {
+        "label": "day 1 protein",
+        "expression": "12 + 22 + 13.5",
+        "stated": stated,
+    }
+    return json.dumps({"computations": [computation], "constraints": []})
+
+
+class LedgerReviewTests(unittest.TestCase):
+    """Verify ledger extraction and review context."""
+
+    def test_ledger_mismatch_is_reported(self) -> None:
+        """A wrong stated total becomes a deterministic issue.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The recomputed value is named.
+        """
+        client = ReviewClient(_ledger_review(75))
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_LEDGER": "on"}):
+            ledger = agent._verify_ledger("meal plan", "draft")
+        self.assertIn("recomputed 47.5", ledger["issues"][0])
+
+    def test_ledger_is_skipped_for_news(self) -> None:
+        """Auto mode does not spend a call on a news request.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            No ledger and no model call.
+        """
+        client = ReviewClient("{}")
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_LEDGER": "auto"}):
+            self.assertIsNone(agent._verify_ledger("find news", "draft"))
+        self.assertEqual(client.complete_calls, 0)
+
+    def test_review_context_includes_verification(self) -> None:
+        """Ledger findings are passed to the reviewer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The verification field is present.
+        """
+        agent = Agent(root=".", client=object())
+        context = json.loads(
+            agent._review_context("q", "a", {"issues": ["x"]})
+        )
+        self.assertEqual(context["verification"]["issues"], ["x"])
+
+
+def _violation_review() -> str:
+    """Build an invariant verdict with one violation.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        JSON verdict.
+    """
+    violation = {
+        "invariant": "A UNIQUE constraint blocks both commits",
+        "claim": "Both inserts can commit",
+        "verdict": "violated",
+        "detail": "the answer says both can commit",
+    }
+    return json.dumps({"applies": True, "violations": [violation]})
+
+
+class InvariantReviewTests(unittest.TestCase):
+    """Verify technical invariant review wiring."""
+
+    def test_violation_is_reported(self) -> None:
+        """A violated invariant becomes a formatted issue.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The violation text is returned.
+        """
+        client = ReviewClient(_violation_review())
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_INVARIANTS": "auto"}):
+            result = agent._invariant_review(
+                "postgres unique constraint", "draft"
+            )
+        self.assertIn("UNIQUE", result["violations"][0])
+
+    def test_news_skips_invariants(self) -> None:
+        """A news request does not spend an invariant call.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            No result and no model call.
+        """
+        client = ReviewClient(_violation_review())
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_INVARIANTS": "auto"}):
+            self.assertIsNone(agent._invariant_review("find news", "draft"))
+        self.assertEqual(client.complete_calls, 0)
+
+    def test_review_context_includes_invariants(self) -> None:
+        """Invariant findings are passed to the reviewer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The invariants field is present.
+        """
+        agent = Agent(root=".", client=object())
+        context = json.loads(
+            agent._review_context("q", "a", None, {"violations": ["x"]})
+        )
+        self.assertEqual(context["invariants"]["violations"], ["x"])
+
+
 class CodingStandardsTests(unittest.TestCase):
     """Verify the agent receives the mandatory language standards."""
 

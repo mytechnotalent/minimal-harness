@@ -73,7 +73,13 @@ scanning for `proposer` and `reviewer` in the system string.
 to ask one question at a time (via the `ask` tool) instead of assuming. The
 `ask` tool is only advertised when an interactive questioner is wired up.
 Every final Q&A answer is reviewed by `answer_reviewer.md`; disable it with
-`HARNESS_ANSWER_REVIEW=0`. `HARNESS_ADVERSARIAL_DRAFTS=N` generates N drafts
+`HARNESS_ANSWER_REVIEW=0`. `HARNESS_ANSWER_LEDGER=auto` runs `verify_ledger.md`
+for numeric or constraint-heavy answers, recomputes the stated totals in
+Python, and passes mismatches to the reviewer as authoritative.
+`HARNESS_ANSWER_INVARIANTS=auto` runs `technical_reviewer.md` with a curated
+checklist from `meta_harness/invariants.py` for database, retry, security, and
+operations claims.
+`HARNESS_ADVERSARIAL_DRAFTS=N` generates N drafts
 and picks one with `adversarial.md`. `reviewer.md` also emits executable
 `unittest` sources that Gate 1 runs; keep them standard-library only and
 deterministic. `HARNESS_ANSWER_TESTS=1` enables test-time verification with

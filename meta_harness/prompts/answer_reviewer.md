@@ -37,8 +37,14 @@ Mode rules:
 
 The context contains the question, the answer, `tool_evidence` (recent tool
 results), and, when the agent changed files, `artifacts` (their final
-contents, including files created through bash). Use `artifacts` when judging
-plans, calculations, code, and any work the answer describes.
+contents, including files created through bash). It may also contain
+`verification`, a deterministic ledger with recomputed totals and a list of
+mismatches. The recomputed values in `verification` are authoritative. Correct
+every listed mismatch in the revised answer. Do not argue with the recomputed
+numbers. Use `artifacts` when judging plans, calculations, code, and any work
+the answer describes. The context may also contain `invariants`, a curated
+technical checklist. Treat any `violated` verdict there as a high `incorrect`
+issue and correct the claim.
 
 Check for:
 - Claims that are not supported by the tool evidence.

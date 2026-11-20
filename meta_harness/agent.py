@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from ._json_util import json_value
+from .invariants import relevant_invariants
+from .ledger import ledger_issues
+from .ledger import needs_ledger
 from .openrouter import OpenRouterClient
 from .profiles import profile_for
 from .prompts import load as _load_prompt
@@ -308,7 +311,7 @@ class Agent:
         answer = self._loop()
         answer = self._auto_verify(prompt, answer)
         answer = self._verified_answer(prompt, answer)
-        return self._review_answer(prompt, answer)
+        return self._review_final(prompt, answer)
 
     def _auto_verify(self, prompt: str, answer: str) -> str:
         """Run project tests and repair bounded failures.
@@ -514,7 +517,7 @@ class Agent:
         best = self._pick_draft(prompt, drafts)
         self.messages = _copy_messages(base)
         self._append({"role": "assistant", "content": best})
-        return self._review_answer(prompt, best)
+        return self._review_final(prompt, best)
 
     def _drafts(self, base: list[dict]) -> list[str]:
         """Run independent draft loops without touching the session.
@@ -617,7 +620,35 @@ class Agent:
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0]["content"] = _load_prompt("agent")
 
-    def _review_answer(self, prompt: str, answer: str) -> str:
+    def _review_final(self, prompt: str, answer: str) -> str:
+        """Run the ledger check and the answer review.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        str
+            Reviewed answer.
+        """
+        if not self._review_enabled(answer):
+            self._record_review("skipped", "disabled")
+            return answer
+        verification = self._verify_ledger(prompt, answer)
+        invariants = self._invariant_review(prompt, answer)
+        return self._review_answer(prompt, answer, verification, invariants)
+
+    def _review_answer(
+        self,
+        prompt: str,
+        answer: str,
+        verification: dict | None = None,
+        invariants: dict | None = None,
+    ) -> str:
         """Adversarially review and possibly revise a final answer.
 
         Parameters
@@ -626,6 +657,10 @@ class Agent:
             User question.
         answer : str
             Draft final answer.
+        verification : dict or None
+            Deterministic ledger findings.
+        invariants : dict or None
+            Technical invariant findings.
 
         Returns
         -------
@@ -635,10 +670,254 @@ class Agent:
         if not self._review_enabled(answer):
             self._record_review("skipped", "disabled")
             return answer
-        review = self._answer_review(prompt, answer)
+        review = self._answer_review(prompt, answer, verification, invariants)
         if not review:
             return answer
         return self._apply_review(answer, review)
+
+    def _ledger_enabled(self, prompt: str, answer: str) -> bool:
+        """Return whether the ledger check should run.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        bool
+            ``True`` when configured and the task needs numeric checks.
+        """
+        mode = _ledger_mode()
+        if not hasattr(self.client, "complete"):
+            return False
+        if mode == "auto":
+            return needs_ledger(prompt, answer)
+        return mode == "on"
+
+    def _verify_ledger(self, prompt: str, answer: str) -> dict | None:
+        """Extract and check a numeric ledger for one answer.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        dict or None
+            Ledger with deterministic issues, or ``None`` when skipped.
+        """
+        if not self._ledger_enabled(prompt, answer):
+            return None
+        ledger = self._ledger_data(prompt, answer)
+        if ledger is None:
+            return None
+        issues = ledger_issues(ledger)
+        self._record_ledger(issues)
+        return {**ledger, "issues": issues}
+
+    def _ledger_data(self, prompt: str, answer: str) -> dict | None:
+        """Request and decode the ledger for one answer.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        dict or None
+            Decoded ledger, or ``None`` when unavailable.
+        """
+        raw = self._ledger_raw(prompt, answer)
+        if not raw:
+            return None
+        value = _ledger_value(raw)
+        if value is None:
+            self._record_review("ledger", "invalid")
+            return None
+        return _applicable_ledger(value, self._record_review)
+
+    def _ledger_raw(self, prompt: str, answer: str) -> str:
+        """Request the raw ledger response.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        str
+            Raw ledger response, or an empty string on failure.
+        """
+        context = json.dumps({"question": prompt, "answer": answer})
+        try:
+            return self._review_with_timeout(
+                _load_prompt("verify_ledger"), context
+            )
+        except Exception as exc:
+            self._record_review("ledger", "error", detail=str(exc))
+            return ""
+
+    def _record_ledger(self, issues: list[str]) -> None:
+        """Record one ledger decision.
+
+        Parameters
+        ----------
+        issues : list of str
+            Deterministic issues.
+
+        Returns
+        -------
+        None
+            The event is stored and optionally logged.
+        """
+        reason = "mismatch" if issues else "ok"
+        self._record_review("ledger", reason, issues=issues)
+
+    def _invariant_enabled(self) -> bool:
+        """Return whether invariant checks are configured.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        bool
+            ``True`` when the client supports completion and the mode is on.
+        """
+        mode = _invariant_mode()
+        if mode == "off" or not hasattr(self.client, "complete"):
+            return False
+        return mode in ("auto", "on")
+
+    def _invariant_review(self, prompt: str, answer: str) -> dict | None:
+        """Check the answer against matching technical invariants.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        dict or None
+            Matching rules and violations, or ``None`` when skipped.
+        """
+        rules = relevant_invariants(prompt, answer)
+        if not rules or not self._invariant_enabled():
+            return None
+        return self._invariant_findings(prompt, answer, rules)
+
+    def _invariant_findings(
+        self, prompt: str, answer: str, rules: list[str]
+    ) -> dict | None:
+        """Return the invariant findings for one answer.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+        rules : list of str
+            Selected invariants.
+
+        Returns
+        -------
+        dict or None
+            Matching rules and violations, or ``None`` when unavailable.
+        """
+        data = self._invariant_data(prompt, answer, rules)
+        if data is None:
+            return None
+        violations = _violations(data)
+        self._record_invariant(violations)
+        return {"rules": rules, "violations": violations}
+
+    def _invariant_data(
+        self, prompt: str, answer: str, rules: list[str]
+    ) -> dict | None:
+        """Request and decode the invariant verdict.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+        rules : list of str
+            Selected invariants.
+
+        Returns
+        -------
+        dict or None
+            Decoded verdict, or ``None`` when unavailable.
+        """
+        raw = self._invariant_raw(prompt, answer, rules)
+        if not raw:
+            return None
+        value = _invariant_value(raw)
+        if value is None:
+            self._record_review("invariant", "invalid")
+        return value
+
+    def _invariant_raw(
+        self, prompt: str, answer: str, rules: list[str]
+    ) -> str:
+        """Request the raw invariant verdict.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+        rules : list of str
+            Selected invariants.
+
+        Returns
+        -------
+        str
+            Raw verdict, or an empty string on failure.
+        """
+        context = _invariant_context(prompt, answer, rules)
+        try:
+            return self._review_with_timeout(
+                _load_prompt("technical_reviewer"), context
+            )
+        except Exception as exc:
+            self._record_review("invariant", "error", detail=str(exc))
+            return ""
+
+    def _record_invariant(self, violations: list[str]) -> None:
+        """Record one invariant decision.
+
+        Parameters
+        ----------
+        violations : list of str
+            Confirmed violations.
+
+        Returns
+        -------
+        None
+            The event is stored and optionally logged.
+        """
+        reason = "violation" if violations else "ok"
+        self._record_review("invariant", reason, issues=violations)
 
     def _apply_review(self, answer: str, review: dict) -> str:
         """Apply an engaged review verdict.
@@ -707,7 +986,7 @@ class Agent:
         Parameters
         ----------
         event : str
-            ``engaged`` or ``skipped``.
+            Short event label, such as ``engaged`` or ``ledger``.
         reason : str
             Short outcome label.
         **extra : Any
@@ -766,7 +1045,13 @@ class Agent:
             return True
         return len(answer.strip()) >= 400
 
-    def _answer_review(self, prompt: str, answer: str) -> dict:
+    def _answer_review(
+        self,
+        prompt: str,
+        answer: str,
+        verification: dict | None = None,
+        invariants: dict | None = None,
+    ) -> dict:
         """Request one structured answer review.
 
         Parameters
@@ -775,6 +1060,10 @@ class Agent:
             User question.
         answer : str
             Draft final answer.
+        verification : dict or None
+            Deterministic ledger findings.
+        invariants : dict or None
+            Technical invariant findings.
 
         Returns
         -------
@@ -782,7 +1071,7 @@ class Agent:
             Decoded review, or an empty dict on failure.
         """
         try:
-            raw = self._review_raw(prompt, answer)
+            raw = self._review_raw(prompt, answer, verification, invariants)
         except Exception as exc:
             self._record_review("skipped", "error", detail=str(exc))
             return {}
@@ -810,7 +1099,13 @@ class Agent:
         self._record_review("skipped", "invalid_response")
         return {}
 
-    def _review_raw(self, prompt: str, answer: str) -> str:
+    def _review_raw(
+        self,
+        prompt: str,
+        answer: str,
+        verification: dict | None = None,
+        invariants: dict | None = None,
+    ) -> str:
         """Request the raw reviewer response.
 
         Parameters
@@ -821,6 +1116,12 @@ class Agent:
         answer : str
             Draft final answer.
 
+        verification : dict or None
+            Deterministic ledger findings.
+
+        invariants : dict or None
+            Technical invariant findings.
+
         Returns
         -------
         str
@@ -828,7 +1129,7 @@ class Agent:
         """
         return self._review_with_timeout(
             _load_prompt("answer_reviewer"),
-            self._review_context(prompt, answer),
+            self._review_context(prompt, answer, verification, invariants),
         )
 
     def _review_with_timeout(self, system: str, user: str) -> str:
@@ -892,7 +1193,13 @@ class Agent:
         """
         return float(os.getenv("HARNESS_REVIEW_TIMEOUT", "30"))
 
-    def _review_context(self, prompt: str, answer: str) -> str:
+    def _review_context(
+        self,
+        prompt: str,
+        answer: str,
+        verification: dict | None = None,
+        invariants: dict | None = None,
+    ) -> str:
         """Build the reviewer payload from the answer and tool evidence.
 
         Parameters
@@ -901,16 +1208,28 @@ class Agent:
             User question.
         answer : str
             Draft final answer.
+        verification : dict or None
+            Deterministic ledger findings.
+        invariants : dict or None
+            Technical invariant findings.
 
         Returns
         -------
         str
             JSON review context.
         """
-        payload = self._review_payload(prompt, answer)
+        payload = self._review_payload(
+            prompt, answer, verification, invariants
+        )
         return json.dumps(payload)
 
-    def _review_payload(self, prompt: str, answer: str) -> dict[str, Any]:
+    def _review_payload(
+        self,
+        prompt: str,
+        answer: str,
+        verification: dict | None = None,
+        invariants: dict | None = None,
+    ) -> dict[str, Any]:
         """Build the reviewer context as a mapping.
 
         Parameters
@@ -919,13 +1238,21 @@ class Agent:
             User question.
         answer : str
             Draft final answer.
+        verification : dict or None
+            Deterministic ledger findings.
+        invariants : dict or None
+            Technical invariant findings.
 
         Returns
         -------
         dict[str, Any]
-            Question, answer, tool evidence, and changed artifacts.
+            Question, answer, evidence, artifacts, and checks.
         """
         payload = _base_payload(prompt, answer, self.messages)
+        if verification:
+            payload["verification"] = verification
+        if invariants:
+            payload["invariants"] = invariants
         return _with_artifacts(
             payload, self.messages, self.tools.root, self._workspace_before
         )
@@ -1874,6 +2201,167 @@ def _review_call(
         saved.append(client.complete(system, user))
     except Exception as exc:
         saved.append(exc)
+
+
+def _ledger_mode() -> str:
+    """Return the configured ledger mode.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        ``off``, ``auto``, or ``on``.
+    """
+    value = os.getenv("HARNESS_ANSWER_LEDGER", "auto").strip().lower()
+    if value in ("0", "false", "no", "off"):
+        return "off"
+    if value in ("", "auto"):
+        return "auto"
+    return "on"
+
+
+def _ledger_value(raw: str) -> dict | None:
+    """Decode a ledger response into a mapping.
+
+    Parameters
+    ----------
+    raw : str
+        Raw model response.
+
+    Returns
+    -------
+    dict or None
+        Decoded ledger, or ``None`` when invalid.
+    """
+    try:
+        value = json_value(raw)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _applicable_ledger(value: dict, record) -> dict | None:
+    """Return the ledger only when the extractor marked it applicable.
+
+    Parameters
+    ----------
+    value : dict
+        Decoded ledger.
+    record : collections.abc.Callable
+        Event recorder.
+
+    Returns
+    -------
+    dict or None
+        Ledger, or ``None`` when it does not apply.
+    """
+    if value.get("applies") is False:
+        record("ledger", "not_applicable")
+        return None
+    return value
+
+
+def _invariant_mode() -> str:
+    """Return the configured invariant mode.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        ``off``, ``auto``, or ``on``.
+    """
+    value = os.getenv("HARNESS_ANSWER_INVARIANTS", "auto").strip().lower()
+    if value in ("0", "false", "no", "off"):
+        return "off"
+    if value in ("", "auto"):
+        return "auto"
+    return "on"
+
+
+def _invariant_value(raw: str) -> dict | None:
+    """Decode an invariant response into a mapping.
+
+    Parameters
+    ----------
+    raw : str
+        Raw model response.
+
+    Returns
+    -------
+    dict or None
+        Decoded verdict, or ``None`` when invalid.
+    """
+    try:
+        value = json_value(raw)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _invariant_context(prompt: str, answer: str, rules: list[str]) -> str:
+    """Build the invariant checker payload.
+
+    Parameters
+    ----------
+    prompt : str
+        User question.
+    answer : str
+        Draft answer.
+    rules : list of str
+        Selected invariants.
+
+    Returns
+    -------
+    str
+        JSON payload.
+    """
+    return json.dumps(
+        {"question": prompt, "answer": answer, "invariants": rules}
+    )
+
+
+def _violations(data: dict) -> list[str]:
+    """Return formatted violated-invariant findings.
+
+    Parameters
+    ----------
+    data : dict
+        Decoded invariant verdict.
+
+    Returns
+    -------
+    list of str
+        Violation messages.
+    """
+    issues = []
+    for item in data.get("violations") or []:
+        if isinstance(item, dict) and item.get("verdict") == "violated":
+            issues.append(_violation_text(item))
+    return issues
+
+
+def _violation_text(item: dict) -> str:
+    """Format one violated invariant.
+
+    Parameters
+    ----------
+    item : dict
+        Violation entry.
+
+    Returns
+    -------
+    str
+        Human-readable violation.
+    """
+    rule = str(item.get("invariant") or "invariant")
+    detail = str(item.get("detail") or item.get("claim") or "")
+    return f"{rule}: {detail}".strip(": ")
 
 
 def _review_mode(review: dict) -> str:

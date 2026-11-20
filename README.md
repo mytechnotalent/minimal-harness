@@ -209,6 +209,18 @@ severity. Delivery blocks only on a high or medium `incorrect` or
 issues are caveats, and a caveat-only rewrite is applied only when it does not
 shorten the answer. This keeps a news roundup from being reduced to confirmed
 items while still catching bad math and fabricated sources.
+Before the review, numeric and constraint-heavy answers can pass through a
+deterministic ledger check. The harness extracts each stated total as an
+arithmetic expression, recomputes it in Python, and sends any mismatches to
+the reviewer as authoritative. `HARNESS_ANSWER_LEDGER` accepts `auto`
+(default; only numeric or constraint-heavy tasks), `1` (always), or `0`
+(never). This is the check that catches a meal plan whose daily totals do not
+add up.
+Technical answers can also pass a curated invariant checklist. Keywords select
+rules for databases, retries, security, and operations. The model marks each
+relevant claim violated, supported, or unclear, and violations go to the
+reviewer as authoritative. `HARNESS_ANSWER_INVARIANTS` accepts `auto`
+(default), `1`, or `0`.
 `HARNESS_ANSWER_REVIEW` accepts `1` (always review), `0` (never), or `auto`
 (review only tool-backed answers and answers of 400+ characters).
 `HARNESS_REVIEW_TIMEOUT` bounds one review call in seconds (default `30`).

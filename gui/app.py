@@ -46,6 +46,7 @@ from meta_harness.agent import Agent
 from meta_harness.app_mode import ui_mode
 from meta_harness.app_mode import voice_enabled
 from meta_harness.env import load_env
+from meta_harness.markdown_text import readable_markdown
 from meta_harness.session import Session
 from meta_harness.voice import VoiceEngine
 from meta_harness.voice import missing_dependencies
@@ -1177,7 +1178,7 @@ class ChatPanel(QWidget):
             Position after the inserted content.
         """
         doc = QTextDocument()
-        doc.setMarkdown(text)
+        doc.setMarkdown(readable_markdown(text))
         cursor.insertFragment(QTextDocumentFragment(doc))
         return cursor.position()
 
