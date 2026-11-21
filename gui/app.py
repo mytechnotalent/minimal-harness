@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import math
 import os
 import plistlib
 import shutil
@@ -17,6 +18,8 @@ from PySide6.QtCore import QThread
 from PySide6.QtCore import QTimer
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QColor
+from PySide6.QtGui import QPainter
+from PySide6.QtGui import QPen
 from PySide6.QtGui import QPixmap
 from PySide6.QtGui import QTextBlockFormat
 from PySide6.QtGui import QTextCursor
@@ -60,9 +63,25 @@ from .store import SessionRecord
 from .store import SessionStore
 from .context import snapshot
 from .settings import Settings
+from .style import apply_palette
 from .worker import AgentWorker
 from .worker import QuestionBridge
 from .workspace import workspace_root
+
+_BUBBLES = {
+    ("cyber", False, False): AGENT_BUBBLE,
+    ("cyber", True, False): USER_BUBBLE,
+    ("cyber", False, True): TOOL_BUBBLE,
+    ("cyber", True, True): TOOL_BUBBLE,
+    ("dark", False, False): "#1A2A33",
+    ("dark", True, False): "#1E3A4A",
+    ("dark", False, True): "#22303A",
+    ("dark", True, True): "#22303A",
+    ("light", False, False): "#D6E0E6",
+    ("light", True, False): "#D2DBD6",
+    ("light", False, True): "#EFEFEF",
+    ("light", True, True): "#EFEFEF",
+}
 
 
 class Bridge(QObject):
@@ -206,6 +225,157 @@ class PromptInput(QPlainTextEdit):
         return min(self.max_height, height)
 
 
+class PulseDot(QWidget):
+    """Blue dot that pulses while the agent is thinking."""
+
+    COLOR = QColor("#6FDBFF")
+    OUTLINE = QColor("#0B3A52")
+
+    def __init__(self, parent=None) -> None:
+        """Create the idle pulsing dot.
+
+        Parameters
+        ----------
+        parent : QWidget or None
+            Optional parent widget.
+
+        Returns
+        -------
+        None
+            The dot starts hidden at a fixed size.
+        """
+        super().__init__(parent)
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(40)
+        self._timer.timeout.connect(self._advance)
+        self.setFixedSize(20, 20)
+        self.hide()
+
+    def start(self) -> None:
+        """Show the dot and begin pulsing.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The dot animates until stopped.
+        """
+        self._phase = 0.0
+        self.show()
+        self._timer.start()
+
+    def stop(self) -> None:
+        """Stop pulsing and hide the dot.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The dot is hidden.
+        """
+        self._timer.stop()
+        self.hide()
+
+    def _advance(self) -> None:
+        """Step the pulse phase forward.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The widget repaints at the new phase.
+        """
+        self._phase = (self._phase + 0.013) % 1.0
+        self.update()
+
+    def _radius(self) -> float:
+        """Compute the current dot radius.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        float
+            Radius in pixels between two and seven.
+        """
+        wave = 0.5 + 0.5 * math.sin(self._phase * 2 * math.pi)
+        return 2.0 + 5.0 * wave
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        """Paint the dot with a soft halo.
+
+        Parameters
+        ----------
+        event : QPaintEvent
+            Paint event supplied by Qt.
+
+        Returns
+        -------
+        None
+            The dot is drawn on the widget.
+        """
+        radius = self._radius()
+        center = self.rect().center()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        self._paint_halo(painter, center, radius)
+        self._paint_core(painter, center, radius)
+
+    def _paint_halo(self, painter, center, radius) -> None:
+        """Paint the translucent outer glow.
+
+        Parameters
+        ----------
+        painter : QPainter
+            Active painter for the widget.
+        center : QPoint
+            Center of the dot.
+        radius : float
+            Radius of the solid core.
+
+        Returns
+        -------
+        None
+            The halo is drawn behind the core.
+        """
+        painter.setBrush(QColor(111, 219, 255, 90))
+        painter.drawEllipse(center, int(radius + 3), int(radius + 3))
+
+    def _paint_core(self, painter, center, radius) -> None:
+        """Paint the solid blue core.
+
+        Parameters
+        ----------
+        painter : QPainter
+            Active painter for the widget.
+        center : QPoint
+            Center of the dot.
+        radius : float
+            Radius of the solid core.
+
+        Returns
+        -------
+        None
+            The core is drawn over the halo.
+        """
+        painter.setBrush(self.COLOR)
+        painter.setPen(QPen(self.OUTLINE, 2))
+        painter.drawEllipse(center, int(radius), int(radius))
+
+
 class ChatPanel(QWidget):
     """One agent chat panel with header, log, and input."""
 
@@ -222,6 +392,7 @@ class ChatPanel(QWidget):
         settings=None,
         voice_on: bool = False,
         theme: str = "classic",
+        dark: bool = False,
     ) -> None:
         """Build the panel and start its background worker.
 
@@ -243,6 +414,8 @@ class ChatPanel(QWidget):
             Whether to build voice controls.
         theme : str
             Active theme name (``classic`` or ``cyber``).
+        dark : bool
+            Whether the dark palette is active.
 
         Returns
         -------
@@ -254,17 +427,19 @@ class ChatPanel(QWidget):
         self._context = context
         self._show_tools = show_tools
         self._settings = settings
-        self._configure_state(voice_on)
+        self._configure_state(voice_on, dark)
         self._theme = theme
         self._start_worker(agent, title, show_notes_toggle)
 
-    def _configure_state(self, voice_on: bool) -> None:
+    def _configure_state(self, voice_on: bool, dark: bool) -> None:
         """Initialize per-panel mutable state.
 
         Parameters
         ----------
         voice_on : bool
             Whether to build voice controls.
+        dark : bool
+            Whether the dark palette is active.
 
         Returns
         -------
@@ -272,6 +447,7 @@ class ChatPanel(QWidget):
             State fields are initialized.
         """
         self._voice_on = voice_on
+        self._dark = dark
         self._notes_included = False
         self._outgoing: list[str] = []
         self._queued = 0
@@ -342,8 +518,26 @@ class ChatPanel(QWidget):
         """
         self._status = QLabel("", self)
         self._status.setObjectName("statusLabel")
-        self._tick = 0
-        self._layout.addWidget(self._status)
+        self._dot = PulseDot(self)
+        self._layout.addLayout(self._status_row())
+
+    def _status_row(self) -> QHBoxLayout:
+        """Build the thinking dot and status label row.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        QHBoxLayout
+            Row containing the pulse dot and status text.
+        """
+        row = QHBoxLayout()
+        row.addWidget(self._dot)
+        row.addWidget(self._status)
+        row.addStretch(1)
+        return row
 
     def _build_composer(self, show_notes_toggle: bool) -> None:
         """Build the log, input row, and question card.
@@ -1101,6 +1295,38 @@ class ChatPanel(QWidget):
         for message in session.messages:
             self._render_message(message)
 
+    def set_dark(self, dark: bool) -> None:
+        """Switch the panel between light and dark bubbles.
+
+        Parameters
+        ----------
+        dark : bool
+            Whether the dark palette is active.
+
+        Returns
+        -------
+        None
+            The transcript is redrawn with the new bubble colors.
+        """
+        self._dark = dark
+        self._reload_log()
+
+    def _reload_log(self) -> None:
+        """Redraw stored messages with the current theme.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The log is cleared and repopulated.
+        """
+        self._log.clear()
+        for message in self._agent.session.messages:
+            self._render_message(message)
+
     def _render_message(self, message: dict) -> None:
         """Render one stored session message as a bubble.
 
@@ -1315,13 +1541,24 @@ class ChatPanel(QWidget):
         str
             Hex color string.
         """
-        if self._theme != "cyber":
-            if tool:
-                return "#EFEFEF"
-            return "#D2DBD6" if user else "#D6E0E6"
-        if tool:
-            return TOOL_BUBBLE
-        return USER_BUBBLE if user else AGENT_BUBBLE
+        theme = self._bubble_theme()
+        return _BUBBLES[(theme, bool(user), bool(tool))]
+
+    def _bubble_theme(self) -> str:
+        """Return the bubble palette name for the active theme.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        str
+            One of ``cyber``, ``dark``, or ``light``.
+        """
+        if self._theme == "cyber":
+            return "cyber"
+        return "dark" if self._dark else "light"
 
     def _bubble_margin(self) -> int:
         """Compute the inward bubble offset.
@@ -1355,7 +1592,7 @@ class ChatPanel(QWidget):
         self._append_log("you", display)
 
     def on_started(self) -> None:
-        """Begin the moving thinking indicator.
+        """Begin the pulsing thinking indicator.
 
         Parameters
         ----------
@@ -1364,14 +1601,13 @@ class ChatPanel(QWidget):
         Returns
         -------
         None
-            The status animates while the worker runs.
+            The dot pulses while the worker runs.
         """
-        self._tick = 0
         self._status.setText("thinking")
-        self._timer.start()
+        self._dot.start()
 
     def _animate(self) -> None:
-        """Advance the thinking indicator dots.
+        """Refresh the queue size beside the thinking label.
 
         Parameters
         ----------
@@ -1380,10 +1616,9 @@ class ChatPanel(QWidget):
         Returns
         -------
         None
-            The status label cycles through dot counts and queue size.
+            The status label reflects the queued prompt count.
         """
-        self._tick = (self._tick + 1) % 4
-        text = "thinking" + "." * self._tick
+        text = "thinking"
         if self._queued:
             text += f"  ({self._queued} queued)"
         self._status.setText(text)
@@ -1398,9 +1633,10 @@ class ChatPanel(QWidget):
         Returns
         -------
         None
-            The status label empties.
+            The dot stops and the status label empties.
         """
         self._timer.stop()
+        self._dot.stop()
         self._status.setText("")
 
     def on_answered(self, answer: str) -> None:
@@ -1608,6 +1844,7 @@ class MainWindow(QMainWindow):
             "settings": self._settings,
             "voice_on": self._voice_on,
             "theme": self._theme,
+            "dark": bool(self._settings.get("dark_mode")),
         }
 
     def _make_command_panel(self):
@@ -2243,14 +2480,14 @@ class MainWindow(QMainWindow):
         None
             Checkboxes are added.
         """
-        self._show_commands = _toggle_box(
-            self, "Show commands", "show_commands", self._on_show_commands
+        specs = (
+            ("Show commands", "show_commands", self._on_show_commands),
+            ("Show tool activity", "show_tools", self._on_show_tools),
+            ("Dark mode", "dark_mode", self._on_dark_mode),
         )
-        bar.addWidget(self._show_commands)
-        self._show_tools = _toggle_box(
-            self, "Show tool activity", "show_tools", self._on_show_tools
-        )
-        bar.addWidget(self._show_tools)
+        for label, key, slot in specs:
+            box = _toggle_box(self, label, key, slot)
+            bar.addWidget(box)
 
     def _ideas_button(self) -> QPushButton:
         """Create the ideas toggle button.
@@ -2353,6 +2590,24 @@ class MainWindow(QMainWindow):
         self._settings.set("show_tools", checked)
         self._command_panel._show_tools = checked
         self._ideas_panel._show_tools = checked
+
+    def _on_dark_mode(self, checked: bool) -> None:
+        """Persist and apply the dark mode toggle.
+
+        Parameters
+        ----------
+        checked : bool
+            New checkbox state.
+
+        Returns
+        -------
+        None
+            The palette and panel bubbles update.
+        """
+        self._settings.set("dark_mode", checked)
+        apply_palette(QApplication.instance(), checked)
+        self._command_panel.set_dark(checked)
+        self._ideas_panel.set_dark(checked)
 
     def toggle_ideas(self) -> None:
         """Toggle the ideas panel visibility.
@@ -2677,7 +2932,7 @@ def _main_window(store: SessionStore, root: Path, settings):
 
 
 def _apply_theme(app: QApplication) -> None:
-    """Apply the classic or cyber stylesheet.
+    """Apply the classic, dark, or cyber stylesheet.
 
     Parameters
     ----------
@@ -2690,10 +2945,11 @@ def _apply_theme(app: QApplication) -> None:
         The selected stylesheet is applied.
     """
     if ui_mode() in ("cyber", "hal"):
-        from .cyber_style import apply_palette
-    else:
-        from .style import apply_palette
-    apply_palette(app)
+        from .cyber_style import apply_palette as apply_cyber
+
+        apply_cyber(app)
+        return
+    apply_palette(app, bool(Settings().get("dark_mode")))
 
 
 if __name__ == "__main__":
