@@ -7,10 +7,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
 from ._json_util import json_value
+from .invariants import relevant_invariants
+from .ledger import ledger_issues
+from .ledger import needs_ledger
 from .openrouter import OpenRouterClient
 from .profiles import profile_for
 from .prompts import load as _load_prompt
@@ -47,6 +51,26 @@ _CODING_WORDS = (
     "sql",
     "build",
 )
+_ARTIFACT_CHARS = 6000
+_ARTIFACT_FILES = 6
+_REVIEW_MODES = ("verifiable", "survey", "advisory")
+_MUTATING_TOOLS = _EDIT_TOOLS + ("bash",)
+_SKIP_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "venv",
+    "node_modules",
+    "runs",
+    "build",
+    "dist",
+}
 
 
 def _int_env(name: str, default: int) -> int:
@@ -222,6 +246,8 @@ class Agent:
         self.follow_up: list[str] = []
         self._mutated = False
         self._nudged = False
+        self._workspace_before: dict[str, tuple[int, int]] | None = None
+        self.review_events: list[dict[str, Any]] = []
 
     def _begin_run(self, prompt: str) -> None:
         """Reset run state and append the user turn.
@@ -237,6 +263,8 @@ class Agent:
             The conversation is updated.
         """
         self._mutated = False
+        self._workspace_before = None
+        self.review_events = []
         self._append({"role": "user", "content": prompt})
         self._trim_system(prompt)
 
@@ -283,7 +311,7 @@ class Agent:
         answer = self._loop()
         answer = self._auto_verify(prompt, answer)
         answer = self._verified_answer(prompt, answer)
-        return self._review_answer(prompt, answer)
+        return self._review_final(prompt, answer)
 
     def _auto_verify(self, prompt: str, answer: str) -> str:
         """Run project tests and repair bounded failures.
@@ -489,7 +517,7 @@ class Agent:
         best = self._pick_draft(prompt, drafts)
         self.messages = _copy_messages(base)
         self._append({"role": "assistant", "content": best})
-        return self._review_answer(prompt, best)
+        return self._review_final(prompt, best)
 
     def _drafts(self, base: list[dict]) -> list[str]:
         """Run independent draft loops without touching the session.
@@ -592,7 +620,35 @@ class Agent:
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0]["content"] = _load_prompt("agent")
 
-    def _review_answer(self, prompt: str, answer: str) -> str:
+    def _review_final(self, prompt: str, answer: str) -> str:
+        """Run the ledger check and the answer review.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        str
+            Reviewed answer.
+        """
+        if not self._review_enabled(answer):
+            self._record_review("skipped", "disabled")
+            return answer
+        verification = self._verify_ledger(prompt, answer)
+        invariants = self._invariant_review(prompt, answer)
+        return self._review_answer(prompt, answer, verification, invariants)
+
+    def _review_answer(
+        self,
+        prompt: str,
+        answer: str,
+        verification: dict | None = None,
+        invariants: dict | None = None,
+    ) -> str:
         """Adversarially review and possibly revise a final answer.
 
         Parameters
@@ -601,19 +657,354 @@ class Agent:
             User question.
         answer : str
             Draft final answer.
+        verification : dict or None
+            Deterministic ledger findings.
+        invariants : dict or None
+            Technical invariant findings.
 
         Returns
         -------
         str
             Approved answer or a revised answer.
         """
-        if self._mutated or not self._review_enabled(answer):
+        if not self._review_enabled(answer):
+            self._record_review("skipped", "disabled")
             return answer
-        review = self._answer_review(prompt, answer)
+        review = self._answer_review(prompt, answer, verification, invariants)
+        if not review:
+            return answer
+        return self._apply_review(answer, review)
+
+    def _ledger_enabled(self, prompt: str, answer: str) -> bool:
+        """Return whether the ledger check should run.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        bool
+            ``True`` when configured and the task needs numeric checks.
+        """
+        mode = _ledger_mode()
+        if not hasattr(self.client, "complete"):
+            return False
+        if mode == "auto":
+            return needs_ledger(prompt, answer)
+        return mode == "on"
+
+    def _verify_ledger(self, prompt: str, answer: str) -> dict | None:
+        """Extract and check a numeric ledger for one answer.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        dict or None
+            Ledger with deterministic issues, or ``None`` when skipped.
+        """
+        if not self._ledger_enabled(prompt, answer):
+            return None
+        ledger = self._ledger_data(prompt, answer)
+        if ledger is None:
+            return None
+        issues = ledger_issues(ledger)
+        self._record_ledger(issues)
+        return {**ledger, "issues": issues}
+
+    def _ledger_data(self, prompt: str, answer: str) -> dict | None:
+        """Request and decode the ledger for one answer.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        dict or None
+            Decoded ledger, or ``None`` when unavailable.
+        """
+        raw = self._ledger_raw(prompt, answer)
+        if not raw:
+            return None
+        value = _ledger_value(raw)
+        if value is None:
+            self._record_review("ledger", "invalid")
+            return None
+        return _applicable_ledger(value, self._record_review)
+
+    def _ledger_raw(self, prompt: str, answer: str) -> str:
+        """Request the raw ledger response.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        str
+            Raw ledger response, or an empty string on failure.
+        """
+        context = json.dumps({"question": prompt, "answer": answer})
+        try:
+            return self._review_with_timeout(
+                _load_prompt("verify_ledger"), context
+            )
+        except Exception as exc:
+            self._record_review("ledger", "error", detail=str(exc))
+            return ""
+
+    def _record_ledger(self, issues: list[str]) -> None:
+        """Record one ledger decision.
+
+        Parameters
+        ----------
+        issues : list of str
+            Deterministic issues.
+
+        Returns
+        -------
+        None
+            The event is stored and optionally logged.
+        """
+        reason = "mismatch" if issues else "ok"
+        self._record_review("ledger", reason, issues=issues)
+
+    def _invariant_enabled(self) -> bool:
+        """Return whether invariant checks are configured.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        bool
+            ``True`` when the client supports completion and the mode is on.
+        """
+        mode = _invariant_mode()
+        if mode == "off" or not hasattr(self.client, "complete"):
+            return False
+        return mode in ("auto", "on")
+
+    def _invariant_review(self, prompt: str, answer: str) -> dict | None:
+        """Check the answer against matching technical invariants.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        dict or None
+            Matching rules and violations, or ``None`` when skipped.
+        """
+        rules = relevant_invariants(prompt, answer)
+        if not rules or not self._invariant_enabled():
+            return None
+        return self._invariant_findings(prompt, answer, rules)
+
+    def _invariant_findings(
+        self, prompt: str, answer: str, rules: list[str]
+    ) -> dict | None:
+        """Return the invariant findings for one answer.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+        rules : list of str
+            Selected invariants.
+
+        Returns
+        -------
+        dict or None
+            Matching rules and violations, or ``None`` when unavailable.
+        """
+        data = self._invariant_data(prompt, answer, rules)
+        if data is None:
+            return None
+        violations = _violations(data)
+        self._record_invariant(violations)
+        return {"rules": rules, "violations": violations}
+
+    def _invariant_data(
+        self, prompt: str, answer: str, rules: list[str]
+    ) -> dict | None:
+        """Request and decode the invariant verdict.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+        rules : list of str
+            Selected invariants.
+
+        Returns
+        -------
+        dict or None
+            Decoded verdict, or ``None`` when unavailable.
+        """
+        raw = self._invariant_raw(prompt, answer, rules)
+        if not raw:
+            return None
+        value = _invariant_value(raw)
+        if value is None:
+            self._record_review("invariant", "invalid")
+        return value
+
+    def _invariant_raw(
+        self, prompt: str, answer: str, rules: list[str]
+    ) -> str:
+        """Request the raw invariant verdict.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+        rules : list of str
+            Selected invariants.
+
+        Returns
+        -------
+        str
+            Raw verdict, or an empty string on failure.
+        """
+        context = _invariant_context(prompt, answer, rules)
+        try:
+            return self._review_with_timeout(
+                _load_prompt("technical_reviewer"), context
+            )
+        except Exception as exc:
+            self._record_review("invariant", "error", detail=str(exc))
+            return ""
+
+    def _record_invariant(self, violations: list[str]) -> None:
+        """Record one invariant decision.
+
+        Parameters
+        ----------
+        violations : list of str
+            Confirmed violations.
+
+        Returns
+        -------
+        None
+            The event is stored and optionally logged.
+        """
+        reason = "violation" if violations else "ok"
+        self._record_review("invariant", reason, issues=violations)
+
+    def _apply_review(self, answer: str, review: dict) -> str:
+        """Apply an engaged review verdict.
+
+        Parameters
+        ----------
+        answer : str
+            Draft answer.
+        review : dict
+            Decoded reviewer response.
+
+        Returns
+        -------
+        str
+            Approved, caveated, or revised answer.
+        """
+        mode = _review_mode(review)
+        blocking = _blocking_review(review, mode)
         revised = review.get("revised_answer")
-        if self._rejected(review) and isinstance(revised, str):
-            return revised.strip() or answer
+        if _allow_revision(mode, answer, revised, blocking):
+            return self._revised_review(revised, mode)
+        return self._kept_review(answer, mode, blocking)
+
+    def _revised_review(self, revised: str, mode: str) -> str:
+        """Record and return a reviewer replacement.
+
+        Parameters
+        ----------
+        revised : str
+            Replacement answer.
+        mode : str
+            Review mode.
+
+        Returns
+        -------
+        str
+            Replacement answer text.
+        """
+        self._record_review("engaged", "revised", mode=mode)
+        return str(revised).strip()
+
+    def _kept_review(self, answer: str, mode: str, blocking: bool) -> str:
+        """Record and return the original answer.
+
+        Parameters
+        ----------
+        answer : str
+            Draft answer.
+        mode : str
+            Review mode.
+        blocking : bool
+            Whether a concrete defect was found.
+
+        Returns
+        -------
+        str
+            Original answer text.
+        """
+        reason = "rejected" if blocking else "approved"
+        self._record_review("engaged", reason, mode=mode)
         return answer
+
+    def _record_review(self, event: str, reason: str, **extra: Any) -> None:
+        """Record one review engagement event.
+
+        Parameters
+        ----------
+        event : str
+            Short event label, such as ``engaged`` or ``ledger``.
+        reason : str
+            Short outcome label.
+        **extra : Any
+            Additional event fields.
+
+        Returns
+        -------
+        None
+            The event is stored and optionally logged.
+        """
+        record = {
+            "event": event,
+            "reason": reason,
+            "mutated": self._mutated,
+            **extra,
+        }
+        self.review_events.append(record)
+        _append_review_log(record)
 
     def _review_enabled(self, answer: str = "") -> bool:
         """Return whether answer review is enabled.
@@ -654,7 +1045,13 @@ class Agent:
             return True
         return len(answer.strip()) >= 400
 
-    def _answer_review(self, prompt: str, answer: str) -> dict:
+    def _answer_review(
+        self,
+        prompt: str,
+        answer: str,
+        verification: dict | None = None,
+        invariants: dict | None = None,
+    ) -> dict:
         """Request one structured answer review.
 
         Parameters
@@ -663,6 +1060,10 @@ class Agent:
             User question.
         answer : str
             Draft final answer.
+        verification : dict or None
+            Deterministic ledger findings.
+        invariants : dict or None
+            Technical invariant findings.
 
         Returns
         -------
@@ -670,13 +1071,41 @@ class Agent:
             Decoded review, or an empty dict on failure.
         """
         try:
-            raw = self._review_raw(prompt, answer)
-            value = json_value(raw)
-        except Exception:
+            raw = self._review_raw(prompt, answer, verification, invariants)
+        except Exception as exc:
+            self._record_review("skipped", "error", detail=str(exc))
             return {}
-        return value if isinstance(value, dict) else {}
+        return self._decoded_review(raw)
 
-    def _review_raw(self, prompt: str, answer: str) -> str:
+    def _decoded_review(self, raw: str) -> dict:
+        """Decode a reviewer response into a verdict.
+
+        Parameters
+        ----------
+        raw : str
+            Raw reviewer response text.
+
+        Returns
+        -------
+        dict
+            Decoded verdict, or an empty dict when invalid.
+        """
+        try:
+            value = json_value(raw)
+        except ValueError:
+            value = None
+        if isinstance(value, dict):
+            return value
+        self._record_review("skipped", "invalid_response")
+        return {}
+
+    def _review_raw(
+        self,
+        prompt: str,
+        answer: str,
+        verification: dict | None = None,
+        invariants: dict | None = None,
+    ) -> str:
         """Request the raw reviewer response.
 
         Parameters
@@ -687,32 +1116,90 @@ class Agent:
         answer : str
             Draft final answer.
 
+        verification : dict or None
+            Deterministic ledger findings.
+
+        invariants : dict or None
+            Technical invariant findings.
+
         Returns
         -------
         str
             Raw reviewer response text.
         """
-        return self.client.complete(
+        return self._review_with_timeout(
             _load_prompt("answer_reviewer"),
-            self._review_context(prompt, answer),
+            self._review_context(prompt, answer, verification, invariants),
         )
 
-    def _rejected(self, review: dict) -> bool:
-        """Return whether a review rejects the answer.
+    def _review_with_timeout(self, system: str, user: str) -> str:
+        """Run one review call with a bounded wait.
 
         Parameters
         ----------
-        review : dict
-            Decoded review.
+        system : str
+            Review instruction.
+        user : str
+            Review payload.
 
         Returns
         -------
-        bool
-            ``True`` when approval is explicitly false.
+        str
+            Reviewer response text.
         """
-        return review.get("approved") is False
+        saved: list[Any] = []
+        worker = self._review_worker(system, user, saved)
+        worker.start()
+        worker.join(self._review_timeout())
+        if not saved:
+            raise TimeoutError("answer review timed out")
+        return _review_response(saved[0])
 
-    def _review_context(self, prompt: str, answer: str) -> str:
+    def _review_worker(
+        self, system: str, user: str, saved: list[Any]
+    ) -> threading.Thread:
+        """Build the reviewer worker thread.
+
+        Parameters
+        ----------
+        system : str
+            Review instruction.
+        user : str
+            Review payload.
+        saved : list of Any
+            Collector for the response or exception.
+
+        Returns
+        -------
+        threading.Thread
+            Daemon worker ready to start.
+        """
+        return threading.Thread(
+            target=lambda: _review_call(self.client, system, user, saved),
+            daemon=True,
+        )
+
+    def _review_timeout(self) -> float:
+        """Return the review call timeout in seconds.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        float
+            Configured timeout.
+        """
+        return float(os.getenv("HARNESS_REVIEW_TIMEOUT", "30"))
+
+    def _review_context(
+        self,
+        prompt: str,
+        answer: str,
+        verification: dict | None = None,
+        invariants: dict | None = None,
+    ) -> str:
         """Build the reviewer payload from the answer and tool evidence.
 
         Parameters
@@ -721,19 +1208,53 @@ class Agent:
             User question.
         answer : str
             Draft final answer.
+        verification : dict or None
+            Deterministic ledger findings.
+        invariants : dict or None
+            Technical invariant findings.
 
         Returns
         -------
         str
             JSON review context.
         """
-        evidence = _tool_evidence(self.messages)
-        return json.dumps(
-            {
-                "question": prompt,
-                "answer": answer,
-                "tool_evidence": evidence,
-            }
+        payload = self._review_payload(
+            prompt, answer, verification, invariants
+        )
+        return json.dumps(payload)
+
+    def _review_payload(
+        self,
+        prompt: str,
+        answer: str,
+        verification: dict | None = None,
+        invariants: dict | None = None,
+    ) -> dict[str, Any]:
+        """Build the reviewer context as a mapping.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft final answer.
+        verification : dict or None
+            Deterministic ledger findings.
+        invariants : dict or None
+            Technical invariant findings.
+
+        Returns
+        -------
+        dict[str, Any]
+            Question, answer, evidence, artifacts, and checks.
+        """
+        payload = _base_payload(prompt, answer, self.messages)
+        if verification:
+            payload["verification"] = verification
+        if invariants:
+            payload["invariants"] = invariants
+        return _with_artifacts(
+            payload, self.messages, self.tools.root, self._workspace_before
         )
 
     def steer(self, prompt: str) -> None:
@@ -1028,12 +1549,29 @@ class Agent:
         """
         function = call["function"]
         name = function.get("name")
-        if name in _EDIT_TOOLS:
-            self._mutated = True
+        self._prepare_tool(name)
         if self._nudged and not self._mutated:
             if not self._nudge_allowed(function):
                 return self._blocked_result(call)
         return self._allowed_result(call, function, name)
+
+    def _prepare_tool(self, name: str) -> None:
+        """Mark mutation and capture the workspace before a tool runs.
+
+        Parameters
+        ----------
+        name : str
+            Tool name.
+
+        Returns
+        -------
+        None
+            Mutation state and the pre-run baseline are updated.
+        """
+        if name in _EDIT_TOOLS:
+            self._mutated = True
+        if name in _MUTATING_TOOLS and self._workspace_before is None:
+            self._workspace_before = _workspace_state(self.tools.root)
 
     def _nudge_allowed(self, function: dict[str, Any]) -> bool:
         """Return whether a tool may run after the exploration nudge.
@@ -1291,6 +1829,666 @@ def _tool_evidence(messages: list[dict[str, Any]]) -> list[str]:
         if message.get("role") == "tool"
     ]
     return evidence[-8:]
+
+
+def _base_payload(
+    prompt: str, answer: str, messages: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Build the reviewer payload without workspace artifacts.
+
+    Parameters
+    ----------
+    prompt : str
+        User question.
+    answer : str
+        Draft final answer.
+    messages : list of dict[str, Any]
+        Conversation messages.
+
+    Returns
+    -------
+    dict[str, Any]
+        Question, answer, and tool evidence.
+    """
+    return {
+        "question": prompt,
+        "answer": answer,
+        "tool_evidence": _tool_evidence(messages),
+    }
+
+
+def _workspace_state(root: Path) -> dict[str, tuple[int, int]]:
+    """Record size and modification time for workspace files.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    dict[str, tuple[int, int]]
+        Relative path to modification time and size.
+    """
+    state: dict[str, tuple[int, int]] = {}
+    for path in _scan_workspace_files(root):
+        stamp = _file_stamp(path)
+        if stamp is not None:
+            state[str(path.relative_to(root))] = stamp
+    return state
+
+
+def _scan_workspace_files(root: Path) -> list[Path]:
+    """List workspace files, skipping dependency and cache folders.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    list of pathlib.Path
+        Regular files under the workspace.
+    """
+    files: list[Path] = []
+    for current, dirs, names in os.walk(root):
+        dirs[:] = [name for name in dirs if name not in _SKIP_DIRS]
+        for name in names:
+            path = Path(current, name)
+            if not path.is_symlink():
+                files.append(path)
+    return files
+
+
+def _file_stamp(path: Path) -> tuple[int, int] | None:
+    """Return a change stamp for one file.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        File to inspect.
+
+    Returns
+    -------
+    tuple[int, int] or None
+        Modification time and size, or ``None`` when missing.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _diff_paths(
+    before: dict[str, tuple[int, int]],
+    after: dict[str, tuple[int, int]],
+) -> list[str]:
+    """Return paths that are new or changed between two states.
+
+    Parameters
+    ----------
+    before : dict[str, tuple[int, int]]
+        Earlier workspace state.
+    after : dict[str, tuple[int, int]]
+        Later workspace state.
+
+    Returns
+    -------
+    list of str
+        New or modified relative paths.
+    """
+    paths: list[str] = []
+    for path, stamp in after.items():
+        if before.get(path) != stamp:
+            paths.append(path)
+    return paths
+
+
+def _unique(paths: list[str]) -> list[str]:
+    """Return paths in first-seen order without duplicates.
+
+    Parameters
+    ----------
+    paths : list of str
+        Candidate paths.
+
+    Returns
+    -------
+    list of str
+        Unique non-empty paths.
+    """
+    unique: list[str] = []
+    for path in paths:
+        if path and path not in unique:
+            unique.append(path)
+    return unique
+
+
+def _with_artifacts(
+    payload: dict[str, Any],
+    messages: list[dict[str, Any]],
+    root: Path,
+    before: dict[str, tuple[int, int]] | None,
+) -> dict[str, Any]:
+    """Attach changed file contents to a reviewer payload.
+
+    Parameters
+    ----------
+    payload : dict[str, Any]
+        Base reviewer payload.
+    messages : list of dict[str, Any]
+        Conversation messages.
+    root : pathlib.Path
+        Workspace root.
+    before : dict[str, tuple[int, int]] or None
+        Pre-run workspace state.
+
+    Returns
+    -------
+    dict[str, Any]
+        Payload with an ``artifacts`` field when files changed.
+    """
+    artifacts = _artifact_evidence(messages, root, before)
+    if artifacts:
+        payload["artifacts"] = artifacts
+    return payload
+
+
+def _artifact_evidence(
+    messages: list[dict[str, Any]],
+    root: Path,
+    before: dict[str, tuple[int, int]] | None,
+) -> list[dict[str, str]]:
+    """Collect final contents of files changed by the agent.
+
+    Parameters
+    ----------
+    messages : list of dict[str, Any]
+        Conversation messages.
+    root : pathlib.Path
+        Workspace root.
+    before : dict[str, tuple[int, int]] or None
+        Pre-run workspace state.
+
+    Returns
+    -------
+    list of dict[str, str]
+        Bounded path and content pairs for recent mutations.
+    """
+    changed: list[str] = []
+    if before is not None:
+        changed = _diff_paths(before, _workspace_state(root))
+    paths = _unique(changed + _changed_paths(messages))
+    return _read_artifacts(paths, root)
+
+
+def _changed_paths(messages: list[dict[str, Any]]) -> list[str]:
+    """Return unique file paths touched by edit tools.
+
+    Parameters
+    ----------
+    messages : list of dict[str, Any]
+        Conversation messages.
+
+    Returns
+    -------
+    list of str
+        Paths in first-seen order.
+    """
+    paths: list[str] = []
+    for message in messages:
+        for call in message.get("tool_calls") or []:
+            path = _call_path(call)
+            if path and path not in paths:
+                paths.append(path)
+    return paths
+
+
+def _call_path(call: dict[str, Any]) -> str:
+    """Return the path argument of one mutating tool call.
+
+    Parameters
+    ----------
+    call : dict[str, Any]
+        Tool call entry.
+
+    Returns
+    -------
+    str
+        Workspace path, or an empty string when absent.
+    """
+    function = call.get("function", {})
+    if function.get("name") not in _EDIT_TOOLS:
+        return ""
+    try:
+        arguments = json.loads(function.get("arguments", "{}"))
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    return str(arguments.get("path", ""))
+
+
+def _read_artifacts(paths: list[str], root: Path) -> list[dict[str, str]]:
+    """Read the newest changed files for reviewer context.
+
+    Parameters
+    ----------
+    paths : list of str
+        Changed workspace paths.
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    list of dict[str, str]
+        Readable path and content pairs.
+    """
+    artifacts: list[dict[str, str]] = []
+    for raw in paths[-_ARTIFACT_FILES:]:
+        artifact = _read_artifact(raw, root)
+        if artifact is not None:
+            artifacts.append(artifact)
+    return artifacts
+
+
+def _read_artifact(raw: str, root: Path) -> dict[str, str] | None:
+    """Read one changed file if it is safe and text.
+
+    Parameters
+    ----------
+    raw : str
+        Workspace path.
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    dict[str, str] or None
+        Path and bounded content, or ``None`` when unreadable.
+    """
+    try:
+        target = _confined_path(raw, root)
+        content = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    return {"path": raw, "content": _bounded_artifact(content)}
+
+
+def _bounded_artifact(content: str) -> str:
+    """Bound one artifact so the review context stays small.
+
+    Parameters
+    ----------
+    content : str
+        Full file contents.
+
+    Returns
+    -------
+    str
+        Contents truncated at the artifact limit.
+    """
+    if len(content) <= _ARTIFACT_CHARS:
+        return content
+    return content[:_ARTIFACT_CHARS] + "\n...[truncated]"
+
+
+def _confined_path(raw: str, root: Path) -> Path:
+    """Resolve a path and reject escapes from the workspace.
+
+    Parameters
+    ----------
+    raw : str
+        Workspace path.
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    pathlib.Path
+        Confined absolute path.
+    """
+    target = (root / raw).resolve()
+    if target != root and root not in target.parents:
+        raise ValueError("artifact escapes workspace")
+    return target
+
+
+def _append_review_log(record: dict[str, Any]) -> None:
+    """Append one review event when HARNESS_REVIEW_LOG is set.
+
+    Parameters
+    ----------
+    record : dict[str, Any]
+        Review event fields.
+
+    Returns
+    -------
+    None
+        The event is appended to the log path when configured.
+    """
+    path = os.getenv("HARNESS_REVIEW_LOG")
+    if not path:
+        return
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, default=str) + "\n")
+
+
+def _review_call(
+    client: Any, system: str, user: str, saved: list[Any]
+) -> None:
+    """Run one review call, recording its response or error.
+
+    Parameters
+    ----------
+    client : Any
+        Client exposing ``complete``.
+    system : str
+        Review instruction.
+    user : str
+        Review payload.
+    saved : list of Any
+        Collector for the response or exception.
+
+    Returns
+    -------
+    None
+        The collector receives exactly one value.
+    """
+    try:
+        saved.append(client.complete(system, user))
+    except Exception as exc:
+        saved.append(exc)
+
+
+def _ledger_mode() -> str:
+    """Return the configured ledger mode.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        ``off``, ``auto``, or ``on``.
+    """
+    value = os.getenv("HARNESS_ANSWER_LEDGER", "auto").strip().lower()
+    if value in ("0", "false", "no", "off"):
+        return "off"
+    if value in ("", "auto"):
+        return "auto"
+    return "on"
+
+
+def _ledger_value(raw: str) -> dict | None:
+    """Decode a ledger response into a mapping.
+
+    Parameters
+    ----------
+    raw : str
+        Raw model response.
+
+    Returns
+    -------
+    dict or None
+        Decoded ledger, or ``None`` when invalid.
+    """
+    try:
+        value = json_value(raw)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _applicable_ledger(value: dict, record) -> dict | None:
+    """Return the ledger only when the extractor marked it applicable.
+
+    Parameters
+    ----------
+    value : dict
+        Decoded ledger.
+    record : collections.abc.Callable
+        Event recorder.
+
+    Returns
+    -------
+    dict or None
+        Ledger, or ``None`` when it does not apply.
+    """
+    if value.get("applies") is False:
+        record("ledger", "not_applicable")
+        return None
+    return value
+
+
+def _invariant_mode() -> str:
+    """Return the configured invariant mode.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        ``off``, ``auto``, or ``on``.
+    """
+    value = os.getenv("HARNESS_ANSWER_INVARIANTS", "auto").strip().lower()
+    if value in ("0", "false", "no", "off"):
+        return "off"
+    if value in ("", "auto"):
+        return "auto"
+    return "on"
+
+
+def _invariant_value(raw: str) -> dict | None:
+    """Decode an invariant response into a mapping.
+
+    Parameters
+    ----------
+    raw : str
+        Raw model response.
+
+    Returns
+    -------
+    dict or None
+        Decoded verdict, or ``None`` when invalid.
+    """
+    try:
+        value = json_value(raw)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _invariant_context(prompt: str, answer: str, rules: list[str]) -> str:
+    """Build the invariant checker payload.
+
+    Parameters
+    ----------
+    prompt : str
+        User question.
+    answer : str
+        Draft answer.
+    rules : list of str
+        Selected invariants.
+
+    Returns
+    -------
+    str
+        JSON payload.
+    """
+    return json.dumps(
+        {"question": prompt, "answer": answer, "invariants": rules}
+    )
+
+
+def _violations(data: dict) -> list[str]:
+    """Return formatted violated-invariant findings.
+
+    Parameters
+    ----------
+    data : dict
+        Decoded invariant verdict.
+
+    Returns
+    -------
+    list of str
+        Violation messages.
+    """
+    issues = []
+    for item in data.get("violations") or []:
+        if isinstance(item, dict) and item.get("verdict") == "violated":
+            issues.append(_violation_text(item))
+    return issues
+
+
+def _violation_text(item: dict) -> str:
+    """Format one violated invariant.
+
+    Parameters
+    ----------
+    item : dict
+        Violation entry.
+
+    Returns
+    -------
+    str
+        Human-readable violation.
+    """
+    rule = str(item.get("invariant") or "invariant")
+    detail = str(item.get("detail") or item.get("claim") or "")
+    return f"{rule}: {detail}".strip(": ")
+
+
+def _review_mode(review: dict) -> str:
+    """Return the reviewer mode or ``legacy``.
+
+    Parameters
+    ----------
+    review : dict
+        Decoded reviewer verdict.
+
+    Returns
+    -------
+    str
+        One of the review modes, or ``legacy`` when absent.
+    """
+    mode = str(review.get("mode", "")).strip().lower()
+    if mode in _REVIEW_MODES:
+        return mode
+    return "legacy"
+
+
+def _blocking_review(review: dict, mode: str) -> bool:
+    """Return whether a review found a concrete blocking defect.
+
+    Parameters
+    ----------
+    review : dict
+        Decoded reviewer verdict.
+    mode : str
+        Review mode.
+
+    Returns
+    -------
+    bool
+        ``True`` when a blocking issue is present.
+    """
+    if mode == "legacy":
+        return review.get("approved") is False
+    issues = review.get("issues") or []
+    return any(_blocking_issue(issue, mode) for issue in issues)
+
+
+def _blocking_issue(issue: Any, mode: str) -> bool:
+    """Return whether one issue blocks delivery.
+
+    Parameters
+    ----------
+    issue : Any
+        Decoded issue entry.
+    mode : str
+        Review mode.
+
+    Returns
+    -------
+    bool
+        ``True`` for a high or medium defect that the mode blocks on.
+    """
+    if not isinstance(issue, dict):
+        return False
+    if issue.get("severity") not in ("high", "medium"):
+        return False
+    kind = issue.get("kind")
+    if mode == "advisory":
+        return kind == "incorrect"
+    return kind in ("incorrect", "unsupported")
+
+
+def _allow_revision(
+    mode: str, answer: str, revised: Any, blocking: bool
+) -> bool:
+    """Return whether a reviewer replacement should be applied.
+
+    Parameters
+    ----------
+    mode : str
+        Review mode.
+    answer : str
+        Original draft answer.
+    revised : Any
+        Reviewer replacement, if any.
+    blocking : bool
+        Whether a concrete defect was found.
+
+    Returns
+    -------
+    bool
+        ``True`` when the replacement should replace the answer.
+    """
+    if not isinstance(revised, str) or not revised.strip():
+        return False
+    if mode == "legacy" or blocking:
+        return True
+    return len(revised.strip()) >= _revision_floor(answer)
+
+
+def _revision_floor(answer: str) -> float:
+    """Return the smallest caveat-only replacement length.
+
+    Parameters
+    ----------
+    answer : str
+        Original draft answer.
+
+    Returns
+    -------
+    float
+        Ninety percent of the stripped original length.
+    """
+    return 0.9 * len(answer.strip())
+
+
+def _review_response(value: Any) -> str:
+    """Return a review response or re-raise a worker error.
+
+    Parameters
+    ----------
+    value : Any
+        Collected response or exception.
+
+    Returns
+    -------
+    str
+        Reviewer response text.
+    """
+    if isinstance(value, Exception):
+        raise value
+    return str(value)
 
 
 def _complete_tail(tail: list[dict[str, Any]]) -> list[dict[str, Any]]:

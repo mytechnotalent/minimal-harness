@@ -1,6 +1,7 @@
 """Orchestrate proposal, review, testing, adjudication, and cycling."""
 
 import json
+import os
 import time
 from dataclasses import replace
 from datetime import datetime
@@ -68,8 +69,26 @@ class SearchPipeline:
         self.gate = DockerGate(config.docker_image)
         self.web_search = web_search or WebSearchClient()
         self.observer, self.should_stop = observer, should_stop
+        self._reset_state()
+
+    def _reset_state(self) -> None:
+        """Initialize per-run search state.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Counters and stop flags are reset.
+        """
         self._current_iteration = 0
         self._cancelled = False
+        self._best_score = -1.0
+        self._stale_rounds = 0
+        self._stopped_on_plateau = False
+        self._stopped_on_cost = False
 
     def run(self, seed: str, proposer: Proposer | None = None) -> SearchResult:
         """Cycle candidates until target or budget exhaustion.
@@ -86,7 +105,9 @@ class SearchPipeline:
         SearchResult
             Search history, winner, and stop reason.
         """
+        self._reset_state()
         self._emit("run_started", seed=seed, iterations=self.config.iterations)
+        self.workspace.mkdir(parents=True, exist_ok=True)
         history, winner = self._search(seed, proposer)
         reached = self._target_reached(winner)
         result = self._result(history, winner, reached)
@@ -162,13 +183,127 @@ class SearchPipeline:
             History and best candidate.
         """
         history, winner = [], None
-        self.workspace.mkdir(parents=True, exist_ok=True)
         for iteration in _rounds(self.config.iterations, self._should_stop):
-            self._current_iteration = iteration
-            history, winner = self._iteration(seed, history, winner, proposer)
-            if self._after_iteration(iteration, winner):
+            history, winner = self._step(
+                iteration, seed, history, winner, proposer
+            )
+            if self._stop_now(iteration, winner):
                 break
         return history, winner
+
+    def _step(
+        self,
+        iteration: int,
+        seed: str,
+        history: list[Candidate],
+        winner: Candidate | None,
+        proposer: Proposer | None,
+    ) -> tuple[list[Candidate], Candidate | None]:
+        """Run one iteration and track progress toward a plateau.
+
+        Parameters
+        ----------
+        iteration : int
+            Current iteration number.
+        seed : str
+            Initial task description.
+        history : list[Candidate]
+            Prior records.
+        winner : Candidate or None
+            Current best candidate.
+        proposer : Proposer or None
+            Optional offline proposer.
+
+        Returns
+        -------
+        tuple[list[Candidate], Candidate or None]
+            Updated history and winner.
+        """
+        self._current_iteration = iteration
+        history, winner = self._iteration(seed, history, winner, proposer)
+        self._track_plateau(winner)
+        return history, winner
+
+    def _stop_now(self, iteration: int, winner: Candidate | None) -> bool:
+        """Return whether the next iteration should be skipped.
+
+        Parameters
+        ----------
+        iteration : int
+            Current iteration number.
+        winner : Candidate or None
+            Best candidate so far.
+
+        Returns
+        -------
+        bool
+            ``True`` when the target or plateau stops the search.
+        """
+        if self._after_iteration(iteration, winner):
+            return True
+        if self._cost_stop():
+            return True
+        if iteration + 1 >= self.config.iterations:
+            return False
+        return self._plateau_stop()
+
+    def _cost_stop(self) -> bool:
+        """Return whether the configured cost budget is exhausted.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        bool
+            ``True`` when the client cost reaches the limit.
+        """
+        limit = self.config.max_cost
+        if limit <= 0:
+            return False
+        cost = float(getattr(self.client, "cost", 0.0) or 0.0)
+        if cost < limit:
+            return False
+        self._stopped_on_cost = True
+        return True
+
+    def _track_plateau(self, winner: Candidate | None) -> None:
+        """Update the best score and stale iteration count.
+
+        Parameters
+        ----------
+        winner : Candidate or None
+            Best candidate so far.
+
+        Returns
+        -------
+        None
+            Plateau tracking is updated.
+        """
+        score = winner.score if winner and winner.score is not None else 0.0
+        if score > self._best_score + self.config.plateau_epsilon:
+            self._best_score, self._stale_rounds = score, 0
+        else:
+            self._stale_rounds += 1
+
+    def _plateau_stop(self) -> bool:
+        """Return whether the search has stopped improving.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        bool
+            ``True`` when the plateau window is exhausted.
+        """
+        rounds = self.config.plateau_rounds
+        if rounds <= 0 or self._stale_rounds < rounds:
+            return False
+        self._stopped_on_plateau = True
+        return True
 
     def _after_iteration(
         self, iteration: int, winner: Candidate | None
@@ -662,9 +797,50 @@ class SearchPipeline:
         result = self._review_test_result(candidate, result)
         result["elapsed"] = round(time.monotonic() - started, 3)
         self._emit_gate("gate1", candidate, result)
-        return self._with_test(
-            candidate, result, self._score(candidate, result), gate1=result
-        )
+        self._shadow_label(candidate, iteration)
+        return self._gate1_candidate(candidate, result)
+
+    def _gate1_candidate(
+        self, candidate: Candidate, result: dict
+    ) -> Candidate:
+        """Attach the first-gate result and score to a candidate.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate with review data.
+        result : dict
+            First-gate result.
+
+        Returns
+        -------
+        Candidate
+            Candidate carrying the first-gate data.
+        """
+        score = self._score(candidate, result)
+        return self._with_test(candidate, result, score, gate1=result)
+
+    def _shadow_label(self, candidate: Candidate, iteration: int) -> None:
+        """Score a review-blocked candidate for calibration only.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate with review data.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        None
+            A label is appended when review is blocked and labels are on.
+        """
+        if not os.getenv("HARNESS_REVIEW_LABELS"):
+            return
+        if candidate.review.get("passed", False):
+            return
+        result = self._final_gate(candidate, iteration)
+        self._record_label(candidate, result, iteration)
 
     def _review_test_result(self, candidate: Candidate, result: dict) -> dict:
         """Attach reviewer-generated test results to a gate result.
@@ -1104,10 +1280,36 @@ class SearchPipeline:
         """
         result = self._gate_two_result(candidate, iteration, incumbent)
         self._emit_gate("gate2", candidate, result)
+        self._record_label(candidate, result, iteration)
         merged = {**candidate.dynamic_test, **result}
         return self._with_test(
             candidate, merged, candidate.score, gate2=result
         )
+
+    def _record_label(
+        self, candidate: Candidate, result: dict, iteration: int
+    ) -> None:
+        """Append one reviewer calibration label when configured.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate with review data.
+        result : dict
+            Gate 2 result.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        None
+            The label is appended to ``HARNESS_REVIEW_LABELS``.
+        """
+        path = os.getenv("HARNESS_REVIEW_LABELS")
+        if not path:
+            return
+        record = _label_record(candidate, result, iteration)
+        _append_json_line(Path(path), record)
 
     def _gate_two_result(
         self,
@@ -1606,10 +1808,11 @@ class SearchPipeline:
         """
         if reached:
             return "target score reached"
-        suffix = (
-            " (Docker gate disabled)" if not self.config.use_docker else ""
-        )
-        return f"iteration budget exhausted{suffix}"
+        if self._stopped_on_cost:
+            return "cost budget exhausted"
+        if self._stopped_on_plateau:
+            return "no improvement for the plateau window"
+        return _budget_reason(self.config.use_docker)
 
     def _emit(self, event: str, **fields: object) -> None:
         """Send one progress event to the observer when present.
@@ -2086,6 +2289,71 @@ def _with_review_tests(code: str, result: dict, sources: list[str]) -> dict:
     result["review_tests_output"] = output[-1000:]
     result["passed"] = bool(result.get("passed")) and passed
     return result
+
+
+def _budget_reason(use_docker: bool) -> str:
+    """Return the iteration-budget stop reason.
+
+    Parameters
+    ----------
+    use_docker : bool
+        Whether Docker gating was enabled.
+
+    Returns
+    -------
+    str
+        Human-readable stop reason.
+    """
+    suffix = "" if use_docker else " (Docker gate disabled)"
+    return f"iteration budget exhausted{suffix}"
+
+
+def _label_record(candidate: Candidate, result: dict, iteration: int) -> dict:
+    """Build one reviewer calibration record.
+
+    Parameters
+    ----------
+    candidate : Candidate
+        Candidate with review data.
+    result : dict
+        Gate 2 result.
+    iteration : int
+        Current iteration number.
+
+    Returns
+    -------
+    dict
+        Candidate id, review verdict, and gate 2 outcome.
+    """
+    return {
+        "iteration": iteration,
+        "candidate_id": candidate.candidate_id,
+        "review": bool(candidate.review.get("passed")),
+        "truth": bool(result.get("final_passed")),
+    }
+
+
+def _append_json_line(path: Path, record: dict) -> None:
+    """Append one JSON record to a log file.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Destination JSONL path.
+    record : dict
+        Record to append.
+
+    Returns
+    -------
+    None
+        The record is appended when the file is writable.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, default=str) + "\n")
+    except OSError:
+        return
 
 
 def _gate_disagreement(candidate: Candidate, result: dict) -> bool:

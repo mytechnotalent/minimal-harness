@@ -73,7 +73,13 @@ scanning for `proposer` and `reviewer` in the system string.
 to ask one question at a time (via the `ask` tool) instead of assuming. The
 `ask` tool is only advertised when an interactive questioner is wired up.
 Every final Q&A answer is reviewed by `answer_reviewer.md`; disable it with
-`HARNESS_ANSWER_REVIEW=0`. `HARNESS_ADVERSARIAL_DRAFTS=N` generates N drafts
+`HARNESS_ANSWER_REVIEW=0`. `HARNESS_ANSWER_LEDGER=auto` runs `verify_ledger.md`
+for numeric or constraint-heavy answers, recomputes the stated totals in
+Python, and passes mismatches to the reviewer as authoritative.
+`HARNESS_ANSWER_INVARIANTS=auto` runs `technical_reviewer.md` with a curated
+checklist from `meta_harness/invariants.py` for database, retry, security, and
+operations claims.
+`HARNESS_ADVERSARIAL_DRAFTS=N` generates N drafts
 and picks one with `adversarial.md`. `reviewer.md` also emits executable
 `unittest` sources that Gate 1 runs; keep them standard-library only and
 deterministic. `HARNESS_ANSWER_TESTS=1` enables test-time verification with
@@ -92,10 +98,20 @@ Gates fail closed. A run must provide `--task-manifest`, `--gate-command`,
 `--final-task-manifest`, or `--final-gate-command`; otherwise no candidate can
 win. `--gate-threshold` defaults to `1.0`, so a manifest gate rejects any
 candidate that misses a task. The container runs with `--network none`, one
-CPU, 512 MiB, read-only rootfs, read-only mount, and `--rm`; production use
-should add rootless mode, dropped capabilities, seccomp/AppArmor, PID limits,
-and an external isolation boundary. On macOS, Colima is supported; its default
-home-directory share requires the workspace to live under the home directory.
+CPU, 512 MiB, read-only rootfs, read-only mount, `--cap-drop=ALL`,
+`--pids-limit=128`, `--security-opt=no-new-privileges`, and `--rm`; production
+use should add rootless mode, seccomp/AppArmor, and an external isolation
+boundary. On macOS, Colima is supported; its default home-directory share
+requires the workspace to live under the home directory.
+
+## Bash sandbox
+
+Answer-mode `bash` runs under bubblewrap on Linux or sandbox-exec on macOS.
+Network is off and writes are confined to the workspace. The sandbox fails
+closed when no backend is found; `HARNESS_BASH_SANDBOX=host` is an explicit,
+unsafe opt-out and `HARNESS_BASH_NETWORK=1` re-enables network access. The
+sandbox lives in `meta_harness/bash_sandbox.py` and is unit tested without
+requiring the host tools.
 
 ## PR checklist
 

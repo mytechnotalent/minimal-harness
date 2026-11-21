@@ -4,6 +4,7 @@ from pathlib import Path
 from threading import Thread
 from typing import Any
 import importlib
+import os
 
 
 class BrowserError(RuntimeError):
@@ -117,10 +118,45 @@ class BrowserClient:
             Worker completion is awaited.
         """
         worker = Thread(
-            target=self._worker, args=(mode, url, path, result, errors)
+            target=self._worker,
+            args=(mode, url, path, result, errors),
+            daemon=True,
         )
+        self._await(worker)
+
+    def _await(self, worker: Thread) -> None:
+        """Run a worker and fail when it outlives the timeout.
+
+        Parameters
+        ----------
+        worker : threading.Thread
+            Worker thread to run.
+
+        Returns
+        -------
+        None
+            The worker completes or an error is raised.
+        """
         worker.start()
-        worker.join()
+        worker.join(self._timeout())
+        if worker.is_alive():
+            raise BrowserError(
+                f"Browser operation timed out after {self._timeout()} seconds."
+            )
+
+    def _timeout(self) -> float:
+        """Return the browser worker timeout in seconds.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        float
+            Configured timeout.
+        """
+        return float(os.getenv("HARNESS_BROWSER_TIMEOUT", "45"))
 
     def _thread_result(
         self, result: dict[str, str], errors: list[Exception]

@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -721,6 +722,192 @@ class RecordingClient:
         return {"choices": [{"message": message}]}
 
 
+class SlowReviewClient:
+    """Block the review call until released."""
+
+    def __init__(self) -> None:
+        """Create the release gate.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The release event is created.
+        """
+        self.release = threading.Event()
+
+    def chat(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Return a draft final answer.
+
+        Parameters
+        ----------
+        messages : list of dict
+            Conversation messages.
+        tools : list of dict
+            Advertised tools.
+
+        Returns
+        -------
+        dict
+            A model response holding a draft answer.
+        """
+        message = {"role": "assistant", "content": "draft answer"}
+        return {"choices": [{"message": message}]}
+
+    def complete(
+        self, system: str, user: str, temperature: float = 0.2
+    ) -> str:
+        """Block until the test releases the reviewer.
+
+        Parameters
+        ----------
+        system : str
+            Review instruction.
+        user : str
+            Review payload.
+        temperature : float
+            Sampling temperature.
+
+        Returns
+        -------
+        str
+            Approved review JSON.
+        """
+        self.release.wait()
+        return '{"approved": true}'
+
+
+class FailingReviewClient:
+    """Return a draft answer and fail every review call."""
+
+    def chat(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Return a draft final answer.
+
+        Parameters
+        ----------
+        messages : list[dict]
+            Conversation messages.
+        tools : list[dict]
+            Advertised tool schemas.
+
+        Returns
+        -------
+        dict
+            Response containing the draft.
+        """
+        message = {"role": "assistant", "content": "draft answer"}
+        return {"choices": [{"message": message}]}
+
+    def complete(
+        self, system: str, user: str, temperature: float = 0.2
+    ) -> str:
+        """Raise to simulate an unavailable reviewer.
+
+        Parameters
+        ----------
+        system : str
+            Review instruction.
+        user : str
+            Review payload.
+        temperature : float
+            Sampling temperature.
+
+        Returns
+        -------
+        str
+            Never returned.
+        """
+        raise RuntimeError("review unavailable")
+
+
+def _write_call(path: str, content: str) -> dict:
+    """Build an assistant message that writes a workspace file.
+
+    Parameters
+    ----------
+    path : str
+        Workspace path.
+    content : str
+        File contents.
+
+    Returns
+    -------
+    dict
+        Assistant message with one write tool call.
+    """
+    function = {
+        "name": "write",
+        "arguments": json.dumps({"path": path, "content": content}),
+    }
+    call = {"id": "1", "function": function}
+    return {"role": "assistant", "content": "", "tool_calls": [call]}
+
+
+def _reviewed_context(agent: Agent) -> dict:
+    """Return decoded reviewer context for a fixed question.
+
+    Parameters
+    ----------
+    agent : Agent
+        Agent holding the conversation.
+
+    Returns
+    -------
+    dict
+        Parsed reviewer payload.
+    """
+    raw = agent._review_context("question", "draft answer")
+    return json.loads(raw)
+
+
+def _review_agent(review: dict) -> Agent:
+    """Build an agent that answers with one reviewer verdict.
+
+    Parameters
+    ----------
+    review : dict
+        Reviewer verdict.
+
+    Returns
+    -------
+    Agent
+        Agent with a scripted reviewer.
+    """
+    client = ReviewClient(json.dumps(review))
+    return Agent(root=".", client=client, max_turns=1)
+
+
+def _review_verdict(mode: str, kind: str, severity: str, revised: str) -> dict:
+    """Build a reviewer verdict with one issue.
+
+    Parameters
+    ----------
+    mode : str
+        Review mode.
+    kind : str
+        Issue kind.
+    severity : str
+        Issue severity.
+    revised : str
+        Replacement answer.
+
+    Returns
+    -------
+    dict
+        Reviewer verdict.
+    """
+    issue = {"kind": kind, "severity": severity, "detail": "x"}
+    return {
+        "mode": mode,
+        "approved": False,
+        "issues": [issue],
+        "revised_answer": revised,
+    }
+
+
 class AnswerReviewTests(unittest.TestCase):
     """Verify adversarial review of final answers."""
 
@@ -818,6 +1005,390 @@ class AnswerReviewTests(unittest.TestCase):
         with patch.dict(os.environ, {"HARNESS_ANSWER_REVIEW": "auto"}):
             agent.run("question")
         self.assertEqual(client.complete_calls, 1)
+
+    def test_slow_review_returns_draft(self) -> None:
+        """A hung reviewer cannot block delivery of the draft answer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The draft is returned before the reviewer finishes.
+        """
+        client = SlowReviewClient()
+        agent = Agent(root=".", client=client, max_turns=1)
+        try:
+            with patch.dict(os.environ, {"HARNESS_REVIEW_TIMEOUT": "0.05"}):
+                self.assertEqual(agent.run("question"), "draft answer")
+        finally:
+            client.release.set()
+
+
+class ReviewEngagementTests(unittest.TestCase):
+    """Verify review engagement, artifacts, and logging."""
+
+    def test_review_runs_after_file_edit(self) -> None:
+        """An edited workspace no longer skips the answer review.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The reviewer is called once.
+        """
+        client = ReviewClient('{"approved": true}')
+        agent = Agent(root=".", client=client, max_turns=1)
+        agent._mutated = True
+        agent._review_answer("question", "draft answer")
+        self.assertEqual(client.complete_calls, 1)
+
+    def test_review_context_includes_artifact(self) -> None:
+        """The reviewer receives final contents of edited files.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The written file appears under artifacts.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "plan.md").write_text("load = 42 kN")
+            agent = Agent(root=directory, client=object())
+            agent.messages.append(_write_call("plan.md", "load = 42 kN"))
+            context = _reviewed_context(agent)
+        artifact = context["artifacts"][0]
+        self.assertEqual(artifact["content"], "load = 42 kN")
+
+    def test_bash_created_file_appears_as_artifact(self) -> None:
+        """A file made by bash is found through the workspace diff.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The new file appears under artifacts.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Agent(root=directory, client=object())
+            agent._begin_run("question")
+            agent._prepare_tool("bash")
+            Path(directory, "plan.md").write_text("load = 42 kN")
+            context = _reviewed_context(agent)
+        artifact = context["artifacts"][0]
+        self.assertEqual(artifact["path"], "plan.md")
+
+    def test_disabled_review_is_logged(self) -> None:
+        """A disabled review records why it was skipped.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The event reason is ``disabled``.
+        """
+        client = ReviewClient('{"approved": true}')
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_REVIEW": "0"}):
+            agent.run("question")
+        self.assertEqual(agent.review_events[0]["reason"], "disabled")
+
+    def test_review_error_is_logged(self) -> None:
+        """A reviewer failure is recorded and the draft is returned.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The event reason is ``error``.
+        """
+        agent = Agent(root=".", client=FailingReviewClient(), max_turns=1)
+        self.assertEqual(agent.run("question"), "draft answer")
+        self.assertEqual(agent.review_events[0]["reason"], "error")
+
+    def test_review_log_writes_jsonl(self) -> None:
+        """Configured review logging appends one JSON line.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The log records the engaged event.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "review.jsonl")
+            env = {"HARNESS_REVIEW_LOG": str(path)}
+            with patch.dict(os.environ, env):
+                self._run_review()
+            lines = path.read_text().splitlines()
+        self.assertEqual(json.loads(lines[0])["event"], "engaged")
+
+    def _run_review(self) -> None:
+        """Run one reviewed answer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The agent run completes.
+        """
+        client = ReviewClient('{"approved": true}')
+        agent = Agent(root=".", client=client, max_turns=1)
+        agent.run("question")
+
+
+class ReviewPolicyTests(unittest.TestCase):
+    """Verify mode-aware reviewer decisions."""
+
+    def test_survey_unverifiable_keeps_answer(self) -> None:
+        """An unconfirmed survey item does not strip the answer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The original draft is returned.
+        """
+        review = _review_verdict("survey", "unverifiable", "high", "short")
+        self.assertEqual(
+            _review_agent(review).run("find news"), "draft answer"
+        )
+
+    def test_survey_incorrect_applies_revision(self) -> None:
+        """A fabricated survey item allows a shorter correction.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The revised answer is returned.
+        """
+        review = _review_verdict("survey", "incorrect", "high", "fixed")
+        self.assertEqual(_review_agent(review).run("find news"), "fixed")
+
+    def test_caveat_revision_must_not_shorten(self) -> None:
+        """A caveat-only revision is applied when it keeps coverage.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The longer caveated answer is returned.
+        """
+        review = _review_verdict(
+            "advisory", "missing_caveat", "low", "draft answer plus caveat"
+        )
+        self.assertEqual(
+            _review_agent(review).run("advice"),
+            "draft answer plus caveat",
+        )
+
+    def test_verifiable_incorrect_blocks(self) -> None:
+        """A concrete math error replaces the answer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The corrected answer is returned.
+        """
+        review = _review_verdict("verifiable", "incorrect", "high", "fixed")
+        self.assertEqual(_review_agent(review).run("compute load"), "fixed")
+
+
+def _ledger_review(stated: float) -> str:
+    """Build a ledger response with one computation.
+
+    Parameters
+    ----------
+    stated : float
+        Number claimed by the answer.
+
+    Returns
+    -------
+    str
+        JSON ledger.
+    """
+    computation = {
+        "label": "day 1 protein",
+        "expression": "12 + 22 + 13.5",
+        "stated": stated,
+    }
+    return json.dumps({"computations": [computation], "constraints": []})
+
+
+class LedgerReviewTests(unittest.TestCase):
+    """Verify ledger extraction and review context."""
+
+    def test_ledger_mismatch_is_reported(self) -> None:
+        """A wrong stated total becomes a deterministic issue.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The recomputed value is named.
+        """
+        client = ReviewClient(_ledger_review(75))
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_LEDGER": "on"}):
+            ledger = agent._verify_ledger("meal plan", "draft")
+        self.assertIn("recomputed 47.5", ledger["issues"][0])
+
+    def test_ledger_is_skipped_for_news(self) -> None:
+        """Auto mode does not spend a call on a news request.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            No ledger and no model call.
+        """
+        client = ReviewClient("{}")
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_LEDGER": "auto"}):
+            self.assertIsNone(agent._verify_ledger("find news", "draft"))
+        self.assertEqual(client.complete_calls, 0)
+
+    def test_review_context_includes_verification(self) -> None:
+        """Ledger findings are passed to the reviewer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The verification field is present.
+        """
+        agent = Agent(root=".", client=object())
+        context = json.loads(
+            agent._review_context("q", "a", {"issues": ["x"]})
+        )
+        self.assertEqual(context["verification"]["issues"], ["x"])
+
+
+def _violation_review() -> str:
+    """Build an invariant verdict with one violation.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        JSON verdict.
+    """
+    violation = {
+        "invariant": "A UNIQUE constraint blocks both commits",
+        "claim": "Both inserts can commit",
+        "verdict": "violated",
+        "detail": "the answer says both can commit",
+    }
+    return json.dumps({"applies": True, "violations": [violation]})
+
+
+class InvariantReviewTests(unittest.TestCase):
+    """Verify technical invariant review wiring."""
+
+    def test_violation_is_reported(self) -> None:
+        """A violated invariant becomes a formatted issue.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The violation text is returned.
+        """
+        client = ReviewClient(_violation_review())
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_INVARIANTS": "auto"}):
+            result = agent._invariant_review(
+                "postgres unique constraint", "draft"
+            )
+        self.assertIn("UNIQUE", result["violations"][0])
+
+    def test_news_skips_invariants(self) -> None:
+        """A news request does not spend an invariant call.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            No result and no model call.
+        """
+        client = ReviewClient(_violation_review())
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_INVARIANTS": "auto"}):
+            self.assertIsNone(agent._invariant_review("find news", "draft"))
+        self.assertEqual(client.complete_calls, 0)
+
+    def test_review_context_includes_invariants(self) -> None:
+        """Invariant findings are passed to the reviewer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The invariants field is present.
+        """
+        agent = Agent(root=".", client=object())
+        context = json.loads(
+            agent._review_context("q", "a", None, {"violations": ["x"]})
+        )
+        self.assertEqual(context["invariants"]["violations"], ["x"])
 
 
 class CodingStandardsTests(unittest.TestCase):

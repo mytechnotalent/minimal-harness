@@ -46,6 +46,7 @@ from meta_harness.agent import Agent
 from meta_harness.app_mode import ui_mode
 from meta_harness.app_mode import voice_enabled
 from meta_harness.env import load_env
+from meta_harness.markdown_text import readable_markdown
 from meta_harness.session import Session
 from meta_harness.voice import VoiceEngine
 from meta_harness.voice import missing_dependencies
@@ -274,6 +275,7 @@ class ChatPanel(QWidget):
         self._notes_included = False
         self._outgoing: list[str] = []
         self._queued = 0
+        self._hearing = False
         self._voice_missing = missing_dependencies() if voice_on else []
         self._voice = _make_voice(self._voice_missing)
 
@@ -862,6 +864,8 @@ class ChatPanel(QWidget):
         if self._voice is None:
             self._voice_status.setText("voice unavailable")
             return
+        if self._hearing:
+            return
         if self._begin_capture():
             return
         self._voice_status.setText("listening...")
@@ -900,6 +904,9 @@ class ChatPanel(QWidget):
         """
         if self._voice is None or not self._voice.recording:
             return
+        if self._hearing:
+            return
+        self._hearing = True
         self._voice_status.setText("transcribing...")
         threading.Thread(target=self._hear, daemon=True).start()
 
@@ -919,6 +926,8 @@ class ChatPanel(QWidget):
             text = self._voice.stop_recording()
         except Exception:
             text = ""
+        finally:
+            self._hearing = False
         self.heard.emit(text)
 
     def _on_heard(self, text: str) -> None:
@@ -1169,7 +1178,7 @@ class ChatPanel(QWidget):
             Position after the inserted content.
         """
         doc = QTextDocument()
-        doc.setMarkdown(text)
+        doc.setMarkdown(readable_markdown(text))
         cursor.insertFragment(QTextDocumentFragment(doc))
         return cursor.position()
 

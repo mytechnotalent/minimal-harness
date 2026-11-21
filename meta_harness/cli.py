@@ -37,6 +37,8 @@ OPTION_SPECS = [
     (("--proposers",), {"type": int, "default": 2}),
     (("--target-score",), {"type": float, "default": 1.0}),
     (("--gate-threshold",), {"type": float, "default": 1.0}),
+    (("--plateau-rounds",), {"type": int, "default": 3}),
+    (("--max-cost",), {"type": float, "default": 0.0}),
     (("--no-docker",), {"action": "store_true"}),
     (("--local-gate",), {"action": "store_true"}),
     (("--baseline",), {"action": "store_true"}),
@@ -541,6 +543,8 @@ def _core_fields(args: Arguments) -> dict:
         "proposers_per_iteration": args.proposers,
         "target_score": args.target_score,
         "gate_threshold": args.gate_threshold,
+        "plateau_rounds": args.plateau_rounds,
+        "max_cost": args.max_cost,
     }
 
 

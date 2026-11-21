@@ -1,12 +1,14 @@
 """Offline tests for adversarial search control flow."""
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
+from unittest.mock import patch
 
 from meta_harness._json_util import json_text
 from meta_harness.models import Candidate
@@ -105,6 +107,27 @@ def counting_reference(
     """
     calls["count"] += 1
     return reference_solution_proposer(seed, history)
+
+
+class _ShadowPipeline(SearchPipeline):
+    """Run a passing final gate for shadow label tests."""
+
+    def _final_gate(self, candidate, iteration):
+        """Return a passing final-gate result.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate under test.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        dict
+            Passing final-gate result.
+        """
+        return {"final_passed": True}
 
 
 class _StagedProposer:
@@ -302,6 +325,160 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(calls["count"], 3)
         self.assertFalse(result.stopped_on_target)
         self.assertTrue(result.stop_reason.startswith("iteration budget"))
+
+    def test_stops_on_plateau(self) -> None:
+        """The loop stops after the plateau window without improvement.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The proposer stops early and reports the plateau.
+        """
+        calls = {"count": 0}
+        result = self._run_search(self._plateau_config(), calls)
+        self.assertEqual(calls["count"], 3)
+        self.assertTrue(result.stop_reason.startswith("no improvement"))
+
+    def test_stops_on_cost_budget(self) -> None:
+        """The loop stops when the client cost reaches the limit.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The proposer stops after one iteration.
+        """
+        calls = {"count": 0}
+        client = self.FakeClient()
+        client.cost = 1.0
+        result = self._run_search(self._cost_config(), calls, client)
+        self.assertEqual(calls["count"], 1)
+        self.assertTrue(result.stop_reason.startswith("cost budget"))
+
+    def test_review_labels_are_written(self) -> None:
+        """A final gate appends one calibration label.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The label file holds the review verdict and truth.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "labels.jsonl")
+            calls = {"count": 0}
+            with patch.dict(os.environ, {"HARNESS_REVIEW_LABELS": str(path)}):
+                self._run_search(self._label_config(), calls)
+            lines = path.read_text().splitlines()
+        self.assertTrue(json.loads(lines[0])["review"])
+
+    def test_shadow_label_scores_blocked_candidate(self) -> None:
+        """A blocked candidate is still scored for calibration.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The label records a false review and a true gate-2 outcome.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "labels.jsonl")
+            pipeline = _ShadowPipeline(_search_config(), self.FakeClient())
+            candidate = Candidate("c1", "test", "x", review={"passed": False})
+            with patch.dict(os.environ, {"HARNESS_REVIEW_LABELS": str(path)}):
+                pipeline._shadow_label(candidate, 0)
+            record = json.loads(path.read_text().splitlines()[0])
+        self.assertEqual((record["review"], record["truth"]), (False, True))
+
+    def _label_config(self) -> SearchConfig:
+        """Build a one-iteration configuration for label output.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        SearchConfig
+            One-iteration search configuration.
+        """
+        return _search_config(iterations=1, proposers_per_iteration=1)
+
+    def _run_search(self, config, calls, client=None):
+        """Run one search with a temporary workspace.
+
+        Parameters
+        ----------
+        config : SearchConfig
+            Search configuration.
+        calls : dict[str, int]
+            Mutable proposer call counter.
+        client : object or None
+            Optional chat client override.
+
+        Returns
+        -------
+        SearchResult
+            Completed search.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = SearchPipeline(
+                config,
+                client=client or self.FakeClient(),
+                workspace=Path(directory),
+            )
+            return pipeline.run("seed", partial(cycle_proposer, calls=calls))
+
+    def _plateau_config(self) -> SearchConfig:
+        """Build a configuration that never reaches its target.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        SearchConfig
+            Six-iteration plateau configuration.
+        """
+        return _search_config(
+            iterations=6,
+            proposers_per_iteration=1,
+            target_score=2.0,
+            plateau_rounds=2,
+        )
+
+    def _cost_config(self) -> SearchConfig:
+        """Build a configuration with a small cost budget.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        SearchConfig
+            Five-iteration cost-limited configuration.
+        """
+        return _search_config(
+            iterations=5,
+            proposers_per_iteration=1,
+            target_score=2.0,
+            max_cost=0.5,
+        )
 
     def _run_cycle(self, directory: str, calls: dict[str, int]):
         """Run a three-iteration local search.

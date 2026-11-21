@@ -175,7 +175,16 @@ The default runtime now includes a bounded Pi-like tool loop. OpenRouter can req
 - `suggest`: record short optional next-step buttons shown after an answer.
 
 File paths are confined to the workspace root, and shell commands may not
-reference paths outside it. This loop supports real website generation, local commands, web retrieval, browser inspection, screenshots, JSONL sessions, steering, follow-ups, context compaction, and a full-screen curses TUI.
+reference paths outside it. Shell commands run inside an OS sandbox when one
+is available: bubblewrap on Linux and sandbox-exec on macOS. The sandbox
+disables network access by default, confines writes to the workspace, and
+mounts only system tool directories plus the workspace, so the user home is
+not visible. Set `HARNESS_BASH_SANDBOX=host` to run unbounded on the host, or
+`HARNESS_BASH_NETWORK=1` to allow network access inside the sandbox. If no
+sandbox is found, bash fails closed unless host mode is explicit. This loop
+supports real website generation, local commands, web retrieval, browser
+inspection, screenshots, JSONL sessions, steering, follow-ups, context
+compaction, and a full-screen curses TUI.
 
 The agent is instructed to **ask rather than assume**: when a request is
 missing information, it asks one question at a time through the `ask` tool
@@ -192,9 +201,35 @@ in `--interactive`); clicking one runs it as your next message.
 
 Final answers can pass through a second adversarial model call before they
 are returned or spoken. The reviewer receives the question, the draft answer,
-and the tool evidence, and removes or revises unsupported claims.
+the tool evidence, and the final contents of files the agent changed,
+including files created through `bash`. It classifies the request as
+`verifiable`, `survey`, or `advisory` and returns issues with a kind and
+severity. Delivery blocks only on a high or medium `incorrect` or
+`unsupported` issue. `unverifiable`, `missing_caveat`, and `coverage_gap`
+issues are caveats, and a caveat-only rewrite is applied only when it does not
+shorten the answer. This keeps a news roundup from being reduced to confirmed
+items while still catching bad math and fabricated sources.
+Before the review, numeric and constraint-heavy answers can pass through a
+deterministic ledger check. The harness extracts each stated total as an
+arithmetic expression, recomputes it in Python, and sends any mismatches to
+the reviewer as authoritative. `HARNESS_ANSWER_LEDGER` accepts `auto`
+(default; only numeric or constraint-heavy tasks), `1` (always), or `0`
+(never). This is the check that catches a meal plan whose daily totals do not
+add up.
+Technical answers can also pass a curated invariant checklist. Keywords select
+rules for databases, retries, security, and operations. The model marks each
+relevant claim violated, supported, or unclear, and violations go to the
+reviewer as authoritative. `HARNESS_ANSWER_INVARIANTS` accepts `auto`
+(default), `1`, or `0`.
 `HARNESS_ANSWER_REVIEW` accepts `1` (always review), `0` (never), or `auto`
 (review only tool-backed answers and answers of 400+ characters).
+`HARNESS_REVIEW_TIMEOUT` bounds one review call in seconds (default `30`).
+`HARNESS_REVIEW_LOG` appends one JSON line per review decision, including
+skips and their reasons, to the given path. `HARNESS_REVIEW_LABELS` appends
+one calibration record per final-gate candidate with the reviewer verdict and
+the gate-2 outcome. If the answer review fails or times out, the draft is
+returned and a `skipped` event is logged. Search-time review failures are
+fail-closed and block the candidate.
 
 Set `HARNESS_ADVERSARIAL_DRAFTS=N` (default `0`) to generate N independent
 drafts, adjudicate them with `adversarial.md`, and then review the winner. This
@@ -245,9 +280,8 @@ Type prompts in the bottom editor. Press Enter to submit, Backspace to edit, and
 
 `--lean` uses a short repo-editing prompt: inspect only the relevant files,
 edit, verify once, and stop. It roughly halves latency on some repository
-tasks but is less accurate than the full mode. It hides web tools and skips
-the text-only answer review after file edits. Treat it as a speed/quality
-trade-off, not a default.
+tasks but is less accurate than the full mode. It hides web tools. Treat it
+as a speed/quality trade-off, not a default.
 
 Use an isolated workspace for application generation:
 
@@ -407,7 +441,7 @@ The three manifests are a strict split:
 - `--final-task-manifest` is the validation split for gate 2. It uses unseen test cases and is never shown to the proposer.
 - `--held-out-manifest` is scored only after the winner is chosen. It never influences selection.
 
-For a Docker command instead, use `--gate-command '...'` and, optionally, `--final-gate-command '...'`. The target score stops the loop as soon as a winner reaches it. If Docker is unavailable, `--local-gate` runs the command on the host with no isolation; it is opt-in and clearly marked `isolated: false`.
+For a Docker command instead, use `--gate-command '...'` and, optionally, `--final-gate-command '...'`. The target score stops the loop as soon as a winner reaches it. `--plateau-rounds N` stops when the best score has not improved for N iterations (default `3`; `0` disables it). `--max-cost X` stops when the provider-reported cost reaches X (default `0`, disabled). If Docker is unavailable, `--local-gate` runs the command on the host with no isolation; it is opt-in and clearly marked `isolated: false`.
 
 `--proposers N` controls how many candidates each iteration requests (default 2). `--gate-threshold` is the minimum pass rate for a manifest gate (default `1.0`); a candidate that misses even one task is rejected. `--no-review-tests` disables reviewer-generated Gate 1 tests, and `--flake-runs N` sets the Gate 2 repeat count (default `2`). `HARNESS_MODEL_TIMEOUT` bounds a model call in seconds (default 180) and retries one transient timeout. A live one-iteration run against OpenCode Go completed with `winner=candidate-1 score=1.0` and `held_out=1.0` using one proposer, one reviewer, and one adjudicator call.
 
@@ -572,9 +606,12 @@ The gate uses `python:3.12-slim` with:
 - 512 MiB memory
 - read-only container filesystem
 - read-only candidate mount
+- all capabilities dropped
+- 128 process limit
+- no-new-privileges
 - automatic container removal
 
-These controls reduce risk but are not a complete hostile-code sandbox. Production execution should add rootless containers, dropped capabilities, seccomp/AppArmor, PID limits, strict process timeouts, minimal mounts, and an external isolation boundary.
+These controls reduce risk but are not a complete hostile-code sandbox. Production execution should add rootless containers, seccomp/AppArmor, strict process timeouts, minimal mounts, and an external isolation boundary.
 
 ## Evidence
 
@@ -644,6 +681,46 @@ Each config is `{"name": ..., "env": {...}, "args": [...]}`. The script runs
 the harness per task and repeat, scores hidden tests, and marks non-dominated
 configs. `benchmarks/independent/search-configs.json` contains baseline,
 verification, and verification-plus-drafts examples.
+
+### Reviewer calibration
+
+`scripts/calibrate_reviewer.py` measures reviewer precision and recall against
+gate-2 outcomes. Labels come from an optimizer run with a search manifest and
+a final-gate manifest. Set `HARNESS_REVIEW_LABELS` to emit one record per
+final-gate candidate:
+
+```bash
+HARNESS_REVIEW_LABELS=runs/review-labels.jsonl \
+python -m meta_harness.cli --optimize \
+  --task-manifest benchmarks/hard/search/manifest.json \
+  --final-task-manifest benchmarks/hard/validation/manifest.json \
+  --iterations 5 --proposers 2 --no-web \
+  "Implement the task functions correctly"
+python -m scripts.calibrate_reviewer runs/review-labels.jsonl
+```
+
+The output reports the confusion counts, precision, recall, false-positive
+rate, and accuracy. Run it before changing reviewer prompts or thresholds. The
+target in `docs/world-class-plan.md` is at least 50 percent seeded-defect
+detection with under 5 percent false positives.
+
+`scripts/campaign.py` runs the harness and a named baseline over a manifest
+for A/B evidence, records per-run results, and adds Wilson intervals plus a
+paired bootstrap interval for the delta:
+
+```bash
+source .venv/bin/activate
+python -m scripts.campaign \
+  --manifest benchmarks/independent/manifest.json \
+  --repeats 5 --out runs/campaign.json \
+  --harness-cmd "python -m meta_harness.cli --no-web" \
+  --baseline-cmd pi
+```
+
+The baseline defaults to `pi`, so Pi must be installed and on `PATH`. Use the
+activated `python` rather than a relative `.venv/bin/python` path; each run
+happens in a temporary workspace. The campaign measures agent pass rates. It
+does not produce review labels; use the optimizer command above for labels.
 
 ## Testing
 
