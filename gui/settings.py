@@ -11,6 +11,7 @@ class Settings:
         "show_commands": False,
         "show_tools": False,
         "speak_replies": True,
+        "dark_mode": False,
         "workspace": "",
     }
 
