@@ -180,6 +180,32 @@ class ArchiveService:
             manifests, key=lambda item: item.get("created_at", 0), reverse=True
         )
 
+    def delete_session_data(
+        self, record, note_store, source_store, evidence_store
+    ):
+        """Delete a live session and its scoped global records.
+
+        Parameters
+        ----------
+        record : SessionRecord
+            Session to delete.
+        note_store : NoteStore or None
+            Global note store.
+        source_store : SourceStore or None
+            Global source store.
+        evidence_store : EvidenceStore or None
+            Global evidence store.
+
+        Returns
+        -------
+        None
+            Live session and global records are removed.
+        """
+        paths = _global_paths(
+            record, note_store, source_store, evidence_store, self.root
+        )
+        _delete_live(record, paths)
+
     def restore(
         self,
         archive_id,

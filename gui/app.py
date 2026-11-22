@@ -67,6 +67,8 @@ from .cyber_style import TOOL_BUBBLE
 from .cyber_style import USER_BUBBLE
 from .store import SessionRecord
 from .store import SessionStore
+from .research.archive import ArchiveError
+from .research.archive import ArchiveService
 from .research.evidence import EvidenceStore
 from .research.notes import NoteStore
 from .research.paths import ResearchPathError
@@ -1986,11 +1988,48 @@ class MainWindow(QMainWindow):
             Note and source stores are replaced.
         """
         self._research_root, self._research_error = _resolve_research(root)
+        self._init_global_stores()
+        self._archive_service = _make_archive_service(
+            self._research_root, self._store.root
+        )
+        self._use_research_services()
+        self._show_storage_error()
+        self._recover_archives()
+
+    def _init_global_stores(self) -> None:
+        """Create the global research stores.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Store attributes are replaced.
+        """
         self._note_store = _init_store(NoteStore, self._research_root)
         self._source_store = _init_store(SourceStore, self._research_root)
         self._evidence_store = _init_store(EvidenceStore, self._research_root)
-        self._use_research_services()
-        self._show_storage_error()
+
+    def _recover_archives(self) -> None:
+        """Resume or roll back interrupted archive operations.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The startup reconciliation entry point runs.
+        """
+        if self._archive_service is None:
+            return
+        try:
+            self._archive_service.recover()
+        except (KeyError, OSError, RuntimeError, ValueError):
+            return
 
     def _use_research_services(self) -> None:
         """Point session services at the current global stores.
@@ -2403,6 +2442,7 @@ class MainWindow(QMainWindow):
         self._add_sessions(box, sidebar)
         box.addSpacing(12)
         self._add_builds(box, sidebar)
+        _add_restore_button(self, box, sidebar)
         return sidebar
 
     def _add_sessions(self, box, sidebar) -> None:
@@ -2583,7 +2623,116 @@ class MainWindow(QMainWindow):
             self._mark_active(record)
 
     def _delete(self, record: SessionRecord) -> None:
-        """Delete a session folder after confirming.
+        """Archive, delete, or cancel a session removal.
+
+        Parameters
+        ----------
+        record : SessionRecord
+            Session to remove.
+
+        Returns
+        -------
+        None
+            The chosen action runs.
+        """
+        choice = self._delete_choice(record)
+        if choice == "archive":
+            self._archive_record(record)
+        elif choice == "delete":
+            self._delete_all(record)
+
+    def _delete_choice(self, record):
+        """Ask whether to archive or delete a session.
+
+        Parameters
+        ----------
+        record : SessionRecord
+            Session to remove.
+
+        Returns
+        -------
+        str or None
+            ``archive``, ``delete``, or ``None`` when cancelled.
+        """
+        box, archive, delete = _delete_options(self, record)
+        box.exec()
+        if box.clickedButton() is archive:
+            return "archive"
+        if box.clickedButton() is delete:
+            return "delete"
+        return None
+
+    def _archive_record(self, record):
+        """Archive one session and forget it locally.
+
+        Parameters
+        ----------
+        record : SessionRecord
+            Session to archive.
+
+        Returns
+        -------
+        None
+            The archive is written and the session is forgotten.
+        """
+        if self._archive_service is None:
+            return
+        if not self._try_archive(record):
+            return
+        self._forget(record)
+
+    def _try_archive(self, record):
+        """Write an archive, reporting failures.
+
+        Parameters
+        ----------
+        record : SessionRecord
+            Session to archive.
+
+        Returns
+        -------
+        bool
+            ``True`` when the archive is written.
+        """
+        try:
+            self._archive_call(record)
+        except (ArchiveError, OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Archive", str(exc))
+            return False
+        return True
+
+    def _archive_call(self, record):
+        """Write the archive for one session.
+
+        Parameters
+        ----------
+        record : SessionRecord
+            Session to archive.
+
+        Returns
+        -------
+        None
+            The archive is written.
+        """
+        notes, sources, evidence = self._research_stores()
+        self._archive_service.archive_session(record, notes, sources, evidence)
+
+    def _research_stores(self):
+        """Return the global note, source, and evidence stores.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        tuple
+            Note, source, and evidence stores.
+        """
+        return self._note_store, self._source_store, self._evidence_store
+
+    def _delete_all(self, record):
+        """Delete a session and every scoped global record.
 
         Parameters
         ----------
@@ -2593,19 +2742,13 @@ class MainWindow(QMainWindow):
         Returns
         -------
         None
-            The folder is removed and lists refresh.
+            Live data is removed and the session is forgotten.
         """
-        answer = QMessageBox.question(
-            self,
-            "Delete",
-            "Delete '%s' permanently?" % record.title,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
         self._remove(record)
+        self._forget(record)
 
     def _remove(self, record: SessionRecord) -> None:
-        """Remove a session folder and refresh lists.
+        """Remove live session and scoped global records.
 
         Parameters
         ----------
@@ -2615,10 +2758,69 @@ class MainWindow(QMainWindow):
         Returns
         -------
         None
-            The folder is removed and lists refresh.
+            Live data is removed and lists refresh.
         """
+        self._delete_global_records(record)
         shutil.rmtree(record.folder, ignore_errors=True)
         self._refresh_sidebar()
+
+    def _delete_global_records(self, record):
+        """Delete scoped global records for a session.
+
+        Parameters
+        ----------
+        record : SessionRecord
+            Session owning the records.
+
+        Returns
+        -------
+        None
+            Scoped notes, sources, evidence, and tombstones are removed.
+        """
+        if self._archive_service is not None:
+            self._archive_service.delete_session_data(
+                record, *self._research_stores()
+            )
+
+    def _forget(self, record):
+        """Refresh lists and activate a replacement session.
+
+        Parameters
+        ----------
+        record : SessionRecord
+            Session that was removed.
+
+        Returns
+        -------
+        None
+            Another session becomes active when needed.
+        """
+        if (
+            self._record is not None
+            and self._record.session_id == record.session_id
+        ):
+            self._record = None
+        self._refresh_sidebar()
+        if self._record is None:
+            self._activate_default(record.kind)
+
+    def _activate_default(self, kind):
+        """Activate the newest session of a kind or create one.
+
+        Parameters
+        ----------
+        kind : str
+            Session kind.
+
+        Returns
+        -------
+        None
+            A session becomes active.
+        """
+        records = self._store.list(kind=kind)
+        self._activate(
+            records[0] if records else self._store.create(kind=kind)
+        )
 
     def _item(self, record: SessionRecord) -> QListWidgetItem:
         """Build a list row for a session.
@@ -3599,6 +3801,108 @@ class MainWindow(QMainWindow):
         dialog = RestoredHistoryDialog(histories, loader, self)
         dialog.exec()
 
+    def _restore_archive(self) -> None:
+        """Restore a verified archive from the sidebar.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The archive is restored or the action is cancelled.
+        """
+        if self._archive_service is None:
+            return
+        manifest = self._archive_choice(self._archive_service.list())
+        if manifest is None or not self._verify_archive(manifest):
+            return
+        self._restore_archive_choice(manifest)
+
+    def _archive_choice(self, archives):
+        """Ask which archive to restore.
+
+        Parameters
+        ----------
+        archives : list
+            Archive manifests.
+
+        Returns
+        -------
+        dict or None
+            Chosen manifest, or ``None``.
+        """
+        if not archives:
+            QMessageBox.information(
+                self, "Restore archive", "No archives available."
+            )
+            return None
+        return _choose_archive_dialog(self, archives)
+
+    def _verify_archive(self, manifest):
+        """Verify an archive before restoring it.
+
+        Parameters
+        ----------
+        manifest : dict
+            Archive manifest.
+
+        Returns
+        -------
+        bool
+            ``True`` when the archive verifies.
+        """
+        result = self._archive_service.verify(manifest["archive_id"])
+        if result["ok"]:
+            return True
+        errors = "\n".join(result["errors"])
+        QMessageBox.warning(
+            self, "Restore archive", "Verification failed:\n" + errors
+        )
+        return False
+
+    def _restore_archive_choice(self, manifest):
+        """Restore one verified archive into a new session.
+
+        Parameters
+        ----------
+        manifest : dict
+            Archive manifest.
+
+        Returns
+        -------
+        None
+            The restored session becomes active.
+        """
+        result = self._perform_restore(manifest)
+        if result is None:
+            return
+        self._refresh_sidebar()
+        self._activate(self._store.load(result["target_session_id"]))
+
+    def _perform_restore(self, manifest):
+        """Restore one archive, reporting failures.
+
+        Parameters
+        ----------
+        manifest : dict
+            Archive manifest.
+
+        Returns
+        -------
+        dict or None
+            Restore result, or ``None`` on failure.
+        """
+        notes, sources, evidence = self._research_stores()
+        try:
+            return self._archive_service.restore(
+                manifest["archive_id"], None, None, notes, sources, evidence
+            )
+        except (ArchiveError, OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Restore archive", str(exc))
+            return None
+
     def _dark_mode_button(self) -> QPushButton:
         """Create the light and dark mode toggle button.
 
@@ -4482,6 +4786,134 @@ def _research_tool_options(services):
         "note_revision_sink": services.propose_revision,
         "evidence_sink": services.capture_evidence,
     }
+
+
+def _make_archive_service(root, sessions_root):
+    """Build an archive service when research storage exists.
+
+    Parameters
+    ----------
+    root : pathlib.Path or None
+        Research root.
+    sessions_root : pathlib.Path
+        Session folder parent.
+
+    Returns
+    -------
+    ArchiveService or None
+        Archive service or ``None``.
+    """
+    return ArchiveService(root, sessions_root) if root is not None else None
+
+
+def _delete_options(window, record):
+    """Build the archive, delete, and cancel dialog.
+
+    Parameters
+    ----------
+    window : QWidget
+        Owning window.
+    record : SessionRecord
+        Session to remove.
+
+    Returns
+    -------
+    tuple
+        Dialog, archive button, and delete button.
+    """
+    box = QMessageBox(window)
+    box.setWindowTitle("Session")
+    box.setText("Archive or delete '%s'?" % record.title)
+    archive, delete = _add_delete_buttons(box)
+    return box, archive, delete
+
+
+def _add_delete_buttons(box):
+    """Add archive, delete, and cancel buttons to a dialog.
+
+    Parameters
+    ----------
+    box : QMessageBox
+        Session removal dialog.
+
+    Returns
+    -------
+    tuple
+        Archive and delete buttons.
+    """
+    archive = box.addButton(
+        "Archive research", QMessageBox.ButtonRole.AcceptRole
+    )
+    delete = box.addButton(
+        "Delete all", QMessageBox.ButtonRole.DestructiveRole
+    )
+    box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+    return archive, delete
+
+
+def _add_restore_button(window, box, sidebar):
+    """Add the sidebar restore-archive button.
+
+    Parameters
+    ----------
+    window : MainWindow
+        Owning window.
+    box : QVBoxLayout
+        Sidebar layout.
+    sidebar : QWidget
+        Sidebar widget.
+
+    Returns
+    -------
+    None
+        The button is added.
+    """
+    box.addSpacing(12)
+    window._restore_button = _new_button(
+        sidebar, "Restore archive", window._restore_archive
+    )
+    box.addWidget(window._restore_button)
+
+
+def _choose_archive_dialog(window, archives):
+    """Ask the user to choose one archive.
+
+    Parameters
+    ----------
+    window : QWidget
+        Owning window.
+    archives : list
+        Archive manifests.
+
+    Returns
+    -------
+    dict or None
+        Chosen manifest, or ``None`` when cancelled.
+    """
+    labels = [_archive_label(item) for item in archives]
+    label, ok = QInputDialog.getItem(
+        window, "Restore archive", "Archive:", labels, 0, False
+    )
+    if not ok:
+        return None
+    return archives[labels.index(label)]
+
+
+def _archive_label(manifest):
+    """Build a display label for one archive.
+
+    Parameters
+    ----------
+    manifest : dict
+        Archive manifest.
+
+    Returns
+    -------
+    str
+        Label with title and archive identifier.
+    """
+    title = manifest.get("original_session_meta", {}).get("title")
+    return f"{title or 'Archive'} ({manifest['archive_id']})"
 
 
 def _resolve_research(root):

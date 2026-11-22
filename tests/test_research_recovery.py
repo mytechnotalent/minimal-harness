@@ -8,7 +8,10 @@ from gui.research.evidence import EvidenceStore
 from gui.research.notes import NoteStore
 from gui.research.sources import SourceStore
 
-from .test_research_archive import _fixture
+try:
+    from .test_research_archive import _fixture
+except ImportError:
+    from test_research_archive import _fixture
 
 
 class _Fault:
