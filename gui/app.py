@@ -2501,11 +2501,62 @@ class MainWindow(QMainWindow):
         specs = (
             ("Show commands", "show_commands", self._on_show_commands),
             ("Show tool activity", "show_tools", self._on_show_tools),
-            ("Dark mode", "dark_mode", self._on_dark_mode),
         )
         for label, key, slot in specs:
             box = _toggle_box(self, label, key, slot)
             bar.addWidget(box)
+        bar.addWidget(self._dark_mode_button())
+
+    def _dark_mode_button(self) -> QPushButton:
+        """Create the light and dark mode toggle button.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        QPushButton
+            Button that flips the palette and updates its label.
+        """
+        self._dark_button = QPushButton("", self)
+        self._dark_button.clicked.connect(self._toggle_dark_mode)
+        self._sync_dark_button()
+        return self._dark_button
+
+    def _toggle_dark_mode(self) -> None:
+        """Flip the palette between light and dark mode.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The setting, palette, and button label update.
+        """
+        dark = not bool(self._settings.get("dark_mode"))
+        self._on_dark_mode(dark)
+        self._sync_dark_button()
+
+    def _sync_dark_button(self) -> None:
+        """Set the dark mode button text for the active palette.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The label and tooltip match the current mode.
+        """
+        dark = bool(self._settings.get("dark_mode"))
+        self._dark_button.setText("psycho mode" if dark else "\u263e")
+        self._dark_button.setStyleSheet("" if dark else "color: #000000;")
+        hint = "Switch to light mode" if dark else "Switch to dark mode"
+        self._dark_button.setToolTip(hint)
 
     def _ideas_button(self) -> QPushButton:
         """Create the ideas toggle button.
