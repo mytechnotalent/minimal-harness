@@ -9,6 +9,28 @@ from unittest.mock import patch
 from gui.research.journal import Journal
 from gui.research.locks import LockError
 from gui.research.locks import OperationLock
+from gui.research.locks import _alive
+
+
+def _windows_probe_result():
+    """Probe a simulated Windows process identifier.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    tuple
+        Liveness result, Windows probe mock, and os.kill mock.
+    """
+    with patch("gui.research.locks._is_windows", return_value=True):
+        with patch(
+            "gui.research.locks._windows_alive", return_value=False
+        ) as probe:
+            with patch("gui.research.locks.os.kill") as kill:
+                result = _alive(4321)
+    return result, probe, kill
 
 
 class OperationLockTests(unittest.TestCase):
@@ -83,9 +105,27 @@ class OperationLockTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "lock"
             path.write_text(json.dumps({"pid": 1234, "operation": "old"}))
-            with patch("gui.research.locks.os.kill", side_effect=OSError):
-                with OperationLock(path):
-                    self.assertTrue(path.exists())
+            with patch("gui.research.locks._is_windows", return_value=False):
+                with patch("gui.research.locks.os.kill", side_effect=OSError):
+                    with OperationLock(path):
+                        self.assertTrue(path.exists())
+
+    def test_windows_probe_avoids_os_kill(self) -> None:
+        """Use a process handle instead of os.kill on Windows.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The Windows probe runs and os.kill is untouched.
+        """
+        result, probe, kill = _windows_probe_result()
+        self.assertFalse(result)
+        probe.assert_called_once_with(4321)
+        kill.assert_not_called()
 
     def test_malformed_lock_is_removed(self) -> None:
         """Reclaim a lock file that cannot be decoded.

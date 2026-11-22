@@ -1,10 +1,15 @@
 """Single-operation lock files for archival and restore work."""
 
+import ctypes
 import json
 import os
 import time
 import uuid
 from pathlib import Path
+
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_STILL_ACTIVE = 259
+_ERROR_ACCESS_DENIED = 5
 
 
 class LockError(RuntimeError):
@@ -230,6 +235,39 @@ def _alive(pid):
     bool
         ``True`` when the process exists.
     """
+    if _is_windows():
+        return _windows_alive(pid)
+    return _posix_alive(pid)
+
+
+def _is_windows():
+    """Return whether the host uses Windows process semantics.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    bool
+        ``True`` on Windows.
+    """
+    return os.name == "nt"
+
+
+def _posix_alive(pid):
+    """Return whether a POSIX process identifier is alive.
+
+    Parameters
+    ----------
+    pid : int
+        Process identifier.
+
+    Returns
+    -------
+    bool
+        ``True`` when the process exists.
+    """
     try:
         return _probe_process(pid)
     except ProcessLookupError:
@@ -238,6 +276,97 @@ def _alive(pid):
         return True
     except OSError:
         return False
+
+
+def _windows_alive(pid):
+    """Return whether a Windows process identifier is alive.
+
+    Parameters
+    ----------
+    pid : int
+        Process identifier.
+
+    Returns
+    -------
+    bool
+        ``True`` when the process exists.
+    """
+    handle = _windows_handle(pid)
+    if not handle:
+        return _windows_error_alive()
+    return _windows_probe(handle)
+
+
+def _windows_handle(pid):
+    """Open a query handle for one Windows process.
+
+    Parameters
+    ----------
+    pid : int
+        Process identifier.
+
+    Returns
+    -------
+    int or None
+        Process handle, or ``None`` when opening fails.
+    """
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    return kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+
+
+def _windows_probe(handle):
+    """Query one open Windows process handle.
+
+    Parameters
+    ----------
+    handle : int
+        Open process handle.
+
+    Returns
+    -------
+    bool
+        ``True`` when the process is still active.
+    """
+    try:
+        return _windows_active(handle)
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def _windows_active(handle):
+    """Return whether an open Windows process is still active.
+
+    Parameters
+    ----------
+    handle : int
+        Open process handle.
+
+    Returns
+    -------
+    bool
+        ``True`` when the process is still active.
+    """
+    code = ctypes.c_ulong()
+    kernel32 = ctypes.windll.kernel32
+    if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+        return False
+    return code.value == _STILL_ACTIVE
+
+
+def _windows_error_alive():
+    """Treat access-denied process handles as alive.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    bool
+        ``True`` when opening failed with access denied.
+    """
+    return ctypes.windll.kernel32.GetLastError() == _ERROR_ACCESS_DENIED
 
 
 def _probe_process(pid):
