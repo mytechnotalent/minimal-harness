@@ -17,6 +17,8 @@ from .hashing import sha256_file
 from .ids import IdMap
 from .ids import new_id
 from .ids import require_id
+from .journal import Journal
+from .locks import OperationLock
 from .schemas import validate_record
 
 ARCHIVE_PREFIX = "ar"
@@ -45,7 +47,7 @@ class ArchiveError(RuntimeError):
 class ArchiveService:
     """Archive and verify complete research session snapshots."""
 
-    def __init__(self, research_root, sessions_root=None):
+    def __init__(self, research_root, sessions_root=None, fault_hook=None):
         """Prepare archive storage under a research root.
 
         Parameters
@@ -54,19 +56,37 @@ class ArchiveService:
             Global research data root.
         sessions_root : pathlib.Path or str or None
             Session folder parent used by restore.
+        fault_hook : collections.abc.Callable or None
+            Optional crash-injection hook called with a point name.
 
         Returns
         -------
         None
-            The archive and restore directories exist.
+            The archive, restore, and journal directories exist.
         """
         self.root = Path(research_root)
+        self.fault_hook = fault_hook
         self.sessions_root = _sessions_path(sessions_root)
+        self._prepare_storage()
+
+    def _prepare_storage(self):
+        """Create the archive, restore, and journal folders.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Storage paths are set and folders exist.
+        """
         self.archives = self.root / "archives"
         self.staging = self.archives / ".staging"
         self.restores = self.root / "restores"
-        self.archives.mkdir(parents=True, exist_ok=True)
-        self.restores.mkdir(parents=True, exist_ok=True)
+        self.purging = self.root / ".purging"
+        self.journals = self.root / "journals"
+        _ensure_dirs(self.archives, self.restores, self.journals)
 
     def archive_session(
         self, record, note_store, source_store, evidence_store
@@ -92,11 +112,11 @@ class ArchiveService:
         archive_id, staging, paths = self._archive_inputs(
             record, note_store, source_store, evidence_store
         )
-        try:
-            _store_archive(staging, record, paths, archive_id, self.archives)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
-        return _purge_live(record, paths, self.archives / archive_id)
+        journal = Journal(self.journals / f"archive-{archive_id}.json")
+        with self._lock("archive"):
+            return self._run_archive(
+                record, paths, archive_id, staging, journal
+            )
 
     def _archive_inputs(
         self, record, note_store, source_store, evidence_store
@@ -197,8 +217,35 @@ class ArchiveService:
             return _existing_result(target, archive_id)
         restore_id = new_id(RESTORE_PREFIX)
         idmap = _prepare_restore(self.restores, manifest, restore_id)
-        self._run_restore(manifest, restore_id, target, title, idmap)
+        self._start_restore(manifest, restore_id, target, title, idmap)
         return _restore_result(target, archive_id, restore_id)
+
+    def _start_restore(self, manifest, restore_id, target, title, idmap):
+        """Run one restore under lock and journal.
+
+        Parameters
+        ----------
+        manifest : dict
+            Verified archive manifest.
+        restore_id : str
+            Restore identifier.
+        target : dict
+            Target session description.
+        title : str or None
+            Title for a new session.
+        idmap : IdMap
+            Planned identifier mapping.
+
+        Returns
+        -------
+        None
+            The restore is committed.
+        """
+        journal = Journal(self.journals / f"restore-{restore_id}.json")
+        with self._lock("restore"):
+            self._run_restore(
+                manifest, restore_id, target, title, idmap, journal
+            )
 
     def _checked_manifest(self, archive_id):
         """Verify an archive and return its manifest.
@@ -237,8 +284,41 @@ class ArchiveService:
             return _new_target(self.sessions_root, archive_id)
         return _target(self.sessions_root, session_id, archive_id)
 
-    def _run_restore(self, manifest, restore_id, target, title, idmap):
+    def _run_restore(
+        self, manifest, restore_id, target, title, idmap, journal
+    ):
         """Stage and commit one restore operation.
+
+        Parameters
+        ----------
+        manifest : dict
+            Verified archive manifest.
+        restore_id : str
+            Restore identifier.
+        target : dict
+            Target session description.
+        title : str or None
+            Title for a new session.
+        idmap : IdMap
+            Planned identifier mapping.
+        journal : Journal
+            Operation journal.
+
+        Returns
+        -------
+        None
+            The restore is committed.
+        """
+        staging = self.restores / "staging" / restore_id
+        journal.write("staging", **_restore_journal(manifest, target, idmap))
+        try:
+            self._stage_and_commit(manifest, restore_id, target, title, idmap)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        journal.remove()
+
+    def _stage_and_commit(self, manifest, restore_id, target, title, idmap):
+        """Stage and commit a restore, recording each state.
 
         Parameters
         ----------
@@ -260,14 +340,254 @@ class ArchiveService:
         """
         archive = self.archives / manifest["archive_id"]
         staging = self.restores / "staging" / restore_id
+        _stage_restore(staging, archive, manifest, target, title, idmap)
+        self._fault("restore_staged")
+        self._finish_restore(manifest, restore_id, target, staging, idmap)
+
+    def _finish_restore(self, manifest, restore_id, target, staging, idmap):
+        """Commit a staged restore and record its states.
+
+        Parameters
+        ----------
+        manifest : dict
+            Verified archive manifest.
+        restore_id : str
+            Restore identifier.
+        target : dict
+            Target session description.
+        staging : pathlib.Path
+            Restore staging folder.
+        idmap : IdMap
+            Planned identifier mapping.
+
+        Returns
+        -------
+        None
+            The restore is committed.
+        """
+        self._write_journal_state(
+            restore_id, "committing", manifest, target, idmap
+        )
+        _commit_restore(self.root, target, staging)
+        self._write_journal_state(
+            restore_id, "committed", manifest, target, idmap
+        )
+        self._fault("restore_committed")
+
+    def _write_journal_state(self, restore_id, state, manifest, target, idmap):
+        """Write one restore journal state.
+
+        Parameters
+        ----------
+        restore_id : str
+            Restore identifier.
+        state : str
+            Operation state.
+        manifest : dict
+            Verified archive manifest.
+        target : dict
+            Target session description.
+        idmap : IdMap
+            Planned identifier mapping.
+
+        Returns
+        -------
+        None
+            The journal is updated.
+        """
+        journal = Journal(self.journals / f"restore-{restore_id}.json")
+        journal.write(state, **_restore_journal(manifest, target, idmap))
+
+    def _lock(self, operation):
+        """Return an operation lock for this research root.
+
+        Parameters
+        ----------
+        operation : str
+            Operation name.
+
+        Returns
+        -------
+        OperationLock
+            Lock for the operation.
+        """
+        return OperationLock(self.root / "operation.lock", operation)
+
+    def _fault(self, point):
+        """Invoke the configured fault hook.
+
+        Parameters
+        ----------
+        point : str
+            Fault injection point name.
+
+        Returns
+        -------
+        None
+            The hook returns normally or raises.
+        """
+        if self.fault_hook is not None:
+            self.fault_hook(point)
+
+    def _run_archive(self, record, paths, archive_id, staging, journal):
+        """Execute an archive with journaling and fault points.
+
+        Parameters
+        ----------
+        record : SessionRecord
+            Session to archive.
+        paths : list
+            Global record paths.
+        archive_id : str
+            Archive identifier.
+        staging : pathlib.Path
+            Staging folder.
+        journal : Journal
+            Operation journal.
+
+        Returns
+        -------
+        dict
+            Completed manifest.
+        """
+        journal.write("staging", **_archive_journal(record, paths, archive_id))
         try:
-            _stage_restore(staging, archive, manifest, target, title, idmap)
-            _commit_restore(self.root, target, staging)
+            _run_archive_steps(
+                self, staging, record, paths, archive_id, journal
+            )
         finally:
             shutil.rmtree(staging, ignore_errors=True)
+        return _complete_archive(journal, self.archives / archive_id)
+
+    def purge(self, archive_id):
+        """Irreversibly purge one archive with a rename-first step.
+
+        Parameters
+        ----------
+        archive_id : str
+            Archive identifier.
+
+        Returns
+        -------
+        None
+            The archive is renamed and deleted.
+        """
+        require_id(archive_id, ARCHIVE_PREFIX)
+        folder = self.archives / archive_id
+        if not folder.exists():
+            raise FileNotFoundError(archive_id)
+        journal = Journal(self.journals / f"purge-{archive_id}.json")
+        with self._lock("purge"):
+            self._run_purge(archive_id, folder, journal)
+
+    def _run_purge(self, archive_id, folder, journal):
+        """Rename and delete one archive while journaling each state.
+
+        Parameters
+        ----------
+        archive_id : str
+            Archive identifier.
+        folder : pathlib.Path
+            Archive folder.
+        journal : Journal
+            Operation journal.
+
+        Returns
+        -------
+        None
+            The archive is deleted.
+        """
+        journal.write("renaming", operation="purge", archive_id=archive_id)
+        rename_atomic(folder, self.purging / archive_id)
+        self._fault("purge_renamed")
+        journal.write("renamed")
+        shutil.rmtree(self.purging / archive_id)
+        self._fault("purge_deleted")
+        journal.remove()
+
+    def recover(self):
+        """Resume or roll back incomplete journaled operations.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Every recoverable journal is handled.
+        """
+        with self._lock("recover"):
+            for path in sorted(self.journals.glob("*.json")):
+                _recover_one(self, path)
+
+    def _recover_archive(self, data, path):
+        """Finish or roll back an interrupted archive.
+
+        Parameters
+        ----------
+        data : dict
+            Archive journal data.
+        path : pathlib.Path
+            Journal path.
+
+        Returns
+        -------
+        None
+            The archive state is reconciled.
+        """
+        folder = self.archives / data["archive_id"]
+        staging = self.staging / data["archive_id"]
+        if folder.exists():
+            _delete_journal_live(data)
+        else:
+            shutil.rmtree(staging, ignore_errors=True)
+        path.unlink(missing_ok=True)
+
+    def _recover_restore(self, data, path):
+        """Finish or roll back an interrupted restore.
+
+        Parameters
+        ----------
+        data : dict
+            Restore journal data.
+        path : pathlib.Path
+            Journal path.
+
+        Returns
+        -------
+        None
+            The restore state is reconciled.
+        """
+        staging = self.restores / "staging" / data["restore_id"]
+        if data.get("state") == "committing" and staging.exists():
+            _resume_commit(self, data, staging)
+        shutil.rmtree(staging, ignore_errors=True)
+        path.unlink(missing_ok=True)
+
+    def _recover_purge(self, data, path):
+        """Finish an interrupted purge.
+
+        Parameters
+        ----------
+        data : dict
+            Purge journal data.
+        path : pathlib.Path
+            Journal path.
+
+        Returns
+        -------
+        None
+            The purge state is reconciled.
+        """
+        archive_id = data["archive_id"]
+        purging = self.purging / archive_id
+        archive = self.archives / archive_id
+        _purge_remaining(purging, archive)
+        path.unlink(missing_ok=True)
 
 
-def _store_archive(staging, record, paths, archive_id, archives):
+def _store_archive(staging, record, paths, archive_id, archives, fault):
     """Stage, verify, and rename one archive.
 
     Parameters
@@ -282,6 +602,8 @@ def _store_archive(staging, record, paths, archive_id, archives):
         New archive identifier.
     archives : pathlib.Path
         Completed archive parent.
+    fault : collections.abc.Callable
+        Fault injection callback.
 
     Returns
     -------
@@ -290,6 +612,7 @@ def _store_archive(staging, record, paths, archive_id, archives):
     """
     manifest = _stage_archive(staging, record, paths, archive_id)
     _require_verified(_verify(staging, manifest))
+    fault("archive_staged")
     rename_atomic(staging, archives / archive_id)
 
 
@@ -2944,3 +3267,279 @@ _MERGE_PARTS = (
     ("restored",),
     ("research", "restores"),
 )
+
+
+def _ensure_dirs(*paths):
+    """Create every given folder.
+
+    Parameters
+    ----------
+    paths : tuple
+        Folders to create.
+
+    Returns
+    -------
+    None
+        Every folder exists.
+    """
+    for path in paths:
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def _archive_journal(record, paths, archive_id):
+    """Build archive journal fields.
+
+    Parameters
+    ----------
+    record : SessionRecord
+        Session to archive.
+    paths : list
+        Global record paths.
+    archive_id : str
+        Archive identifier.
+
+    Returns
+    -------
+    dict
+        Journal fields.
+    """
+    return {
+        "operation": "archive",
+        "archive_id": archive_id,
+        "session_folder": str(record.folder),
+        "global_paths": [str(path) for path in paths],
+    }
+
+
+def _restore_journal(manifest, target, idmap):
+    """Build restore journal fields.
+
+    Parameters
+    ----------
+    manifest : dict
+        Verified archive manifest.
+    target : dict
+        Target session description.
+    idmap : IdMap
+        Planned identifier mapping.
+
+    Returns
+    -------
+    dict
+        Journal fields.
+    """
+    return {
+        "operation": "restore",
+        "restore_id": idmap.restore_id,
+        "archive_id": manifest["archive_id"],
+        "target_session_id": target["session_id"],
+        "session_folder": str(target["folder"]),
+        "existing": target["existing"],
+    }
+
+
+def _run_archive_steps(service, staging, record, paths, archive_id, journal):
+    """Stage, verify, rename, and delete live archive data.
+
+    Parameters
+    ----------
+    service : ArchiveService
+        Owning service.
+    staging : pathlib.Path
+        Staging folder.
+    record : SessionRecord
+        Session to archive.
+    paths : list
+        Global record paths.
+    archive_id : str
+        Archive identifier.
+    journal : Journal
+        Operation journal.
+
+    Returns
+    -------
+    None
+        The archive is renamed and live data is removed.
+    """
+    _store_archive(
+        staging, record, paths, archive_id, service.archives, service._fault
+    )
+    _after_archive_rename(service, record, paths, journal)
+
+
+def _after_archive_rename(service, record, paths, journal):
+    """Delete live data after an archive is safely renamed.
+
+    Parameters
+    ----------
+    service : ArchiveService
+        Owning service.
+    record : SessionRecord
+        Archived session.
+    paths : list
+        Global record paths.
+    journal : Journal
+        Operation journal.
+
+    Returns
+    -------
+    None
+        Live data is removed.
+    """
+    service._fault("archive_renamed")
+    journal.write("renamed")
+    service._fault("archive_before_delete")
+    _delete_live(record, paths)
+    service._fault("archive_after_delete")
+
+
+def _complete_archive(journal, folder):
+    """Remove an archive journal and return the manifest.
+
+    Parameters
+    ----------
+    journal : Journal
+        Operation journal.
+    folder : pathlib.Path
+        Completed archive folder.
+
+    Returns
+    -------
+    dict
+        Completed manifest.
+    """
+    journal.remove()
+    return read_json(folder / _MANIFEST)
+
+
+def _recover_one(service, path):
+    """Dispatch one journal to its recovery handler.
+
+    Parameters
+    ----------
+    service : ArchiveService
+        Owning service.
+    path : pathlib.Path
+        Journal path.
+
+    Returns
+    -------
+    None
+        The journal is handled.
+    """
+    data = read_json(path)
+    handler = _recovery_handler(service, data.get("operation"))
+    if handler is not None:
+        handler(data, path)
+
+
+def _recovery_handler(service, operation):
+    """Return the recovery handler for an operation.
+
+    Parameters
+    ----------
+    service : ArchiveService
+        Owning service.
+    operation : str or None
+        Journal operation name.
+
+    Returns
+    -------
+    collections.abc.Callable or None
+        Recovery handler.
+    """
+    handlers = {
+        "archive": service._recover_archive,
+        "restore": service._recover_restore,
+        "purge": service._recover_purge,
+    }
+    return handlers.get(operation)
+
+
+def _delete_journal_live(data):
+    """Delete the live data recorded in an archive journal.
+
+    Parameters
+    ----------
+    data : dict
+        Archive journal data.
+
+    Returns
+    -------
+    None
+        Session and global records are removed.
+    """
+    for item in data.get("global_paths", []):
+        Path(item).unlink(missing_ok=True)
+    folder = data.get("session_folder")
+    if folder:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _resume_commit(service, data, staging):
+    """Resume an interrupted restore commit.
+
+    Parameters
+    ----------
+    service : ArchiveService
+        Owning service.
+    data : dict
+        Restore journal data.
+    staging : pathlib.Path
+        Restore staging folder.
+
+    Returns
+    -------
+    None
+        The commit is finished.
+    """
+    target = _journal_target(data)
+    if target["existing"] or target["folder"].exists():
+        _merge_session(target["folder"], staging / "session")
+        _copy_staged_globals(service.root, staging / "global")
+        return
+    _commit_restore(service.root, target, staging)
+
+
+def _journal_target(data):
+    """Build a target session description from journal data.
+
+    Parameters
+    ----------
+    data : dict
+        Restore journal data.
+
+    Returns
+    -------
+    dict
+        Target session description.
+    """
+    return {
+        "session_id": data["target_session_id"],
+        "folder": Path(data["session_folder"]),
+        "existing": bool(data.get("existing")),
+        "archive_id": data["archive_id"],
+    }
+
+
+def _purge_remaining(purging, archive):
+    """Finish a purge that was renamed but not deleted.
+
+    Parameters
+    ----------
+    purging : pathlib.Path
+        Purging folder.
+    archive : pathlib.Path
+        Archive folder.
+
+    Returns
+    -------
+    None
+        The archive is deleted.
+    """
+    if purging.exists():
+        shutil.rmtree(purging)
+        return
+    if archive.exists():
+        rename_atomic(archive, purging)
+        shutil.rmtree(purging)
