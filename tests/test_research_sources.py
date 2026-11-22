@@ -166,6 +166,25 @@ class SourceStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             canonical_url("file:///etc/passwd")
 
+    def test_search_matches_url_and_title(self) -> None:
+        """Find sources by title, URL, or excerpt.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Only the matching source is returned.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            store = SourceStore(folder)
+            first = _add(store, _scope(), "https://example.com/a", "Alpha")
+            _add(store, _scope(), "https://example.com/b", "Beta")
+            found = store.search("alpha")
+        self.assertEqual([source["id"] for source in found], [first["id"]])
+
     def test_delete_removes_source(self) -> None:
         """Delete one source file.
 

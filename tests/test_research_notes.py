@@ -212,6 +212,25 @@ class NoteStoreTests(unittest.TestCase):
             self.assertFalse((store.notes / f"{note['id']}.json").exists())
             self.assertFalse((store.revision_root / note["id"]).exists())
 
+    def test_search_matches_title_and_body(self) -> None:
+        """Find notes by title or body text.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Only the matching note is returned.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            store = NoteStore(folder)
+            first = _new(store, _scope(), "alpha body")
+            _new(store, _scope(), "beta body")
+            found = store.search("alpha")
+        self.assertEqual([note["id"] for note in found], [first["id"]])
+
     def test_invalid_identifier_is_rejected(self) -> None:
         """Reject a path-like note identifier.
 

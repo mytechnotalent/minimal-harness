@@ -1,5 +1,6 @@
 """Session-scoped research thread metadata and transcripts."""
 
+import shutil
 import time
 from pathlib import Path
 
@@ -170,6 +171,23 @@ class ThreadStore:
             Updated metadata.
         """
         return self._set_status(thread_id, "active")
+
+    def delete(self, thread_id):
+        """Delete a thread folder and transcript.
+
+        Parameters
+        ----------
+        thread_id : str
+            Thread identifier.
+
+        Returns
+        -------
+        dict
+            Deleted thread metadata.
+        """
+        meta = self.get(thread_id)
+        shutil.rmtree(self._folder(thread_id), ignore_errors=True)
+        return meta
 
     def _set_status(self, thread_id, status):
         """Set a thread status and archive timestamp.

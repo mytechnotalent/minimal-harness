@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject
@@ -66,12 +67,15 @@ from .cyber_style import TOOL_BUBBLE
 from .cyber_style import USER_BUBBLE
 from .store import SessionRecord
 from .store import SessionStore
+from .research.evidence import EvidenceStore
 from .research.notes import NoteStore
 from .research.paths import ResearchPathError
 from .research.paths import research_root
 from .research.restored import RestoredHistoryStore
+from .research.services import ResearchServices
 from .research.sources import SourceStore
 from .research.threads import ThreadStore
+from .research.tombstones import write_thread_tombstone
 from .research_context import research_context
 from .research_workspace import ResearchWorkspace
 from .restored_history import RestoredHistoryDialog
@@ -394,6 +398,7 @@ class ChatPanel(QWidget):
 
     posted = Signal()
     heard = Signal(str)
+    note_requested = Signal(str)
 
     def __init__(
         self,
@@ -591,7 +596,47 @@ class ChatPanel(QWidget):
         self._log.setLineWrapMode(QTextEdit.WidgetWidth)
         self._log.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._log.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._log.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._log.customContextMenuRequested.connect(self._log_menu)
         self._layout.addWidget(self._log)
+
+    def _log_menu(self, pos):
+        """Offer actions for selected transcript text.
+
+        Parameters
+        ----------
+        pos : QPoint
+            Menu request position.
+
+        Returns
+        -------
+        None
+            The menu runs until dismissed.
+        """
+        menu = self._log.createStandardContextMenu()
+        self._add_note_action(menu)
+        menu.exec(self._log.mapToGlobal(pos))
+
+    def _add_note_action(self, menu):
+        """Add a save-selection note action when text is selected.
+
+        Parameters
+        ----------
+        menu : QMenu
+            Transcript context menu.
+
+        Returns
+        -------
+        None
+            The action is added when text is selected.
+        """
+        cursor = self._log.textCursor()
+        if not cursor.hasSelection():
+            return
+        action = menu.addAction("Save selection as note")
+        action.triggered.connect(
+            lambda: self.note_requested.emit(cursor.selectedText())
+        )
 
     def _build_input_row(self) -> None:
         """Create the input, talk, and send row.
@@ -1837,7 +1882,11 @@ class MainWindow(QMainWindow):
         self._thread_store = None
         self._research_thread = None
         self._restored_store = None
+        self._show_archived_threads = False
         self._reset_research_stores(root)
+        self._services = ResearchServices(
+            self._note_store, self._source_store, self._evidence_store
+        )
 
     def _reset_research_stores(self, root) -> None:
         """Resolve global stores while keeping session stores intact.
@@ -1855,7 +1904,26 @@ class MainWindow(QMainWindow):
         self._research_root, self._research_error = _resolve_research(root)
         self._note_store = _init_store(NoteStore, self._research_root)
         self._source_store = _init_store(SourceStore, self._research_root)
+        self._evidence_store = _init_store(EvidenceStore, self._research_root)
+        self._use_research_services()
         self._show_storage_error()
+
+    def _use_research_services(self) -> None:
+        """Point session services at the current global stores.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Store references are updated when services exist.
+        """
+        if hasattr(self, "_services"):
+            self._services.use_stores(
+                self._note_store, self._source_store, self._evidence_store
+            )
 
     def _show_storage_error(self) -> None:
         """Mirror the research storage error into the visible tabs.
@@ -1918,6 +1986,7 @@ class MainWindow(QMainWindow):
         """
         self._research_panel = self._make_research_panel()
         self._research_panel.posted.connect(self._on_research_posted)
+        self._research_panel.note_requested.connect(self._save_research_note)
         self._research_workspace = ResearchWorkspace(
             self._research_panel, self._research_error
         )
@@ -1935,12 +2004,41 @@ class MainWindow(QMainWindow):
         None
             Signals are connected.
         """
-        self._research_workspace.thread_selected.connect(
-            self._select_research_thread
-        )
-        self._research_workspace.new_thread_requested.connect(
-            self._new_research_thread
-        )
+        self._wire_thread_workspace()
+        self._wire_note_workspace()
+
+    def _wire_thread_workspace(self) -> None:
+        """Connect thread selection and lifecycle actions.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Thread signals are connected.
+        """
+        for signal, slot in _thread_signals(self):
+            signal.connect(slot)
+
+    def _wire_note_workspace(self) -> None:
+        """Connect note, revision, and proposal actions.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Note signals are connected.
+        """
+        workspace = self._research_workspace
+        workspace.edit_note_requested.connect(self._edit_note)
+        workspace.revisions_requested.connect(self._show_note_revisions)
+        workspace.proposal_save_requested.connect(self._save_proposal)
+        workspace.proposal_discard_requested.connect(self._discard_proposal)
 
     def _panel_options(self) -> dict:
         """Return shared chat-panel keyword options.
@@ -2090,7 +2188,7 @@ class MainWindow(QMainWindow):
             Agent bound to a research transcript.
         """
         path = Path("runs/gui-research.jsonl")
-        tools = _research_tools(self._root)
+        tools = _research_tools(self._root, self._services)
         return self._make_agent(path, load_prompt("research"), tools)
 
     def _turns(self) -> int:
@@ -2517,6 +2615,7 @@ class MainWindow(QMainWindow):
             The research transcript and tabs are updated.
         """
         self._research_thread = thread
+        self._services.bind(self._record, thread)
         path = self._thread_store.transcript_path(thread["id"])
         self._research_panel.switch_session(Session(path))
         self._refresh_research_workspace()
@@ -2536,9 +2635,27 @@ class MainWindow(QMainWindow):
         if self._thread_store is None:
             return
         active = self._research_thread["id"]
-        self._research_workspace.set_threads(self._thread_store.list(), active)
+        self._refresh_thread_list(active)
         self._research_workspace.set_notes(self._session_notes())
         self._research_workspace.set_sources(self._session_sources())
+        self._research_workspace.set_proposals(self._services.proposals())
+
+    def _refresh_thread_list(self, active):
+        """Refresh the thread list for the archived visibility setting.
+
+        Parameters
+        ----------
+        active : str
+            Active thread identifier.
+
+        Returns
+        -------
+        None
+            The thread list is updated.
+        """
+        status = None if self._show_archived_threads else "active"
+        threads = self._thread_store.list(status=status)
+        self._research_workspace.set_threads(threads, active)
 
     def _select_research_thread(self, thread_id) -> None:
         """Switch the research panel without touching the primary panel.
@@ -2572,6 +2689,446 @@ class MainWindow(QMainWindow):
         if self._thread_store is None:
             return
         self._open_research_thread(self._thread_store.create())
+
+    def _archive_research_thread(self, thread_id) -> None:
+        """Archive one research thread.
+
+        Parameters
+        ----------
+        thread_id : str
+            Thread identifier.
+
+        Returns
+        -------
+        None
+            The thread leaves the active list.
+        """
+        if self._thread_store is None:
+            return
+        self._thread_store.archive(thread_id)
+        self._refresh_research_workspace()
+
+    def _restore_research_thread(self, thread_id) -> None:
+        """Restore one archived research thread.
+
+        Parameters
+        ----------
+        thread_id : str
+            Thread identifier.
+
+        Returns
+        -------
+        None
+            The thread returns to the active list.
+        """
+        if self._thread_store is None:
+            return
+        self._thread_store.restore(thread_id)
+        self._refresh_research_workspace()
+
+    def _delete_research_thread(self, thread_id) -> None:
+        """Delete a thread transcript while keeping notes and sources.
+
+        Parameters
+        ----------
+        thread_id : str
+            Thread identifier.
+
+        Returns
+        -------
+        None
+            The thread is removed or deletion is cancelled.
+        """
+        if self._thread_store is None:
+            return
+        if not self._confirm_thread_delete(thread_id):
+            return
+        self._remove_thread(self._thread_store.get(thread_id))
+
+    def _remove_thread(self, thread) -> None:
+        """Remove one thread and keep its surviving records.
+
+        Parameters
+        ----------
+        thread : dict
+            Thread metadata.
+
+        Returns
+        -------
+        None
+            The thread is deleted and the list refreshed.
+        """
+        thread_id = thread["id"]
+        self._write_thread_tombstone(thread)
+        self._thread_store.delete(thread_id)
+        if self._research_thread["id"] == thread_id:
+            self._open_research_thread(self._thread_store.default())
+        self._refresh_research_workspace()
+
+    def _confirm_thread_delete(self, thread_id) -> bool:
+        """Ask whether to delete one thread transcript.
+
+        Parameters
+        ----------
+        thread_id : str
+            Thread identifier.
+
+        Returns
+        -------
+        bool
+            ``True`` when the user confirms deletion.
+        """
+        thread = self._thread_store.get(thread_id)
+        answer = QMessageBox.question(
+            self,
+            "Delete research thread",
+            "Delete the transcript for '%s'? Notes and sources are kept."
+            % thread.get("title", thread_id),
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _write_thread_tombstone(self, thread) -> None:
+        """Persist provenance for a deleted thread.
+
+        Parameters
+        ----------
+        thread : dict
+            Thread metadata.
+
+        Returns
+        -------
+        None
+            A tombstone is written when storage is available.
+        """
+        if self._research_root is None:
+            return
+        note_ids = _record_ids(self._thread_notes(thread["id"]))
+        source_ids = _record_ids(self._thread_sources(thread["id"]))
+        write_thread_tombstone(
+            self._research_root, thread, note_ids, source_ids
+        )
+
+    def _thread_notes(self, thread_id) -> list:
+        """Return notes associated with one thread.
+
+        Parameters
+        ----------
+        thread_id : str
+            Thread identifier.
+
+        Returns
+        -------
+        list
+            Matching notes.
+        """
+        if self._note_store is None or self._record is None:
+            return []
+        return self._note_store.list(self._record.session_id, thread_id)
+
+    def _thread_sources(self, thread_id) -> list:
+        """Return sources associated with one thread.
+
+        Parameters
+        ----------
+        thread_id : str
+            Thread identifier.
+
+        Returns
+        -------
+        list
+            Matching sources.
+        """
+        if self._source_store is None or self._record is None:
+            return []
+        return self._source_store.list(self._record.session_id, thread_id)
+
+    def _toggle_archived_threads(self, checked) -> None:
+        """Show or hide archived research threads.
+
+        Parameters
+        ----------
+        checked : bool
+            Whether archived threads should be visible.
+
+        Returns
+        -------
+        None
+            The thread list is refreshed.
+        """
+        self._show_archived_threads = checked
+        self._refresh_research_workspace()
+
+    def _save_research_note(self, text) -> None:
+        """Save selected research text as a note immediately.
+
+        Parameters
+        ----------
+        text : str
+            Selected transcript text.
+
+        Returns
+        -------
+        None
+            The note is created when storage is available.
+        """
+        body = text.strip()
+        if not self._can_save_note(body):
+            return
+        self._create_research_note(body)
+        self._refresh_research_workspace()
+        self._research_workspace.show_notes()
+
+    def _can_save_note(self, body) -> bool:
+        """Return whether a note can be saved.
+
+        Parameters
+        ----------
+        body : str
+            Selected text.
+
+        Returns
+        -------
+        bool
+            ``True`` when storage and scope are ready.
+        """
+        return (
+            bool(body)
+            and self._note_store is not None
+            and self._services.scope
+        )
+
+    def _create_research_note(self, body) -> None:
+        """Create one note from selected text.
+
+        Parameters
+        ----------
+        body : str
+            Selected text.
+
+        Returns
+        -------
+        None
+            The note is persisted.
+        """
+        scope = self._services.scope
+        title = _note_title(body)
+        origin = _selection_origin(body)
+        self._note_store.create(scope, title, body, origin)
+
+    def _edit_note(self, note_id) -> None:
+        """Edit a note through a title and markdown dialog.
+
+        Parameters
+        ----------
+        note_id : str
+            Note identifier.
+
+        Returns
+        -------
+        None
+            The note is updated or the dialog is cancelled.
+        """
+        if self._note_store is None:
+            return
+        note = self._note_store.get(note_id)
+        values = self._read_note_edit(note)
+        if values is None:
+            return
+        self._apply_note_edit(note_id, values[0], values[1])
+
+    def _read_note_edit(self, note):
+        """Read a title and body edit from dialogs.
+
+        Parameters
+        ----------
+        note : dict
+            Note record.
+
+        Returns
+        -------
+        tuple or None
+            New title and body, or ``None`` when cancelled.
+        """
+        title = self._edit_title(note)
+        if title is None:
+            return None
+        body = self._edit_body(note)
+        if body is None:
+            return None
+        return title, body
+
+    def _apply_note_edit(self, note_id, title, body) -> None:
+        """Persist an edited note and refresh views.
+
+        Parameters
+        ----------
+        note_id : str
+            Note identifier.
+        title : str
+            New title.
+        body : str
+            New markdown body.
+
+        Returns
+        -------
+        None
+            The note and views are updated.
+        """
+        self._note_store.update(note_id, title=title, body_md=body)
+        self._refresh_research_workspace()
+
+    def _edit_title(self, note):
+        """Ask for a note title.
+
+        Parameters
+        ----------
+        note : dict
+            Note record.
+
+        Returns
+        -------
+        str or None
+            New title, or ``None`` when cancelled.
+        """
+        title, ok = QInputDialog.getText(
+            self, "Edit note", "Title:", text=note["title"]
+        )
+        return title if ok and title.strip() else None
+
+    def _edit_body(self, note):
+        """Ask for note markdown.
+
+        Parameters
+        ----------
+        note : dict
+            Note record.
+
+        Returns
+        -------
+        str or None
+            New body, or ``None`` when cancelled.
+        """
+        body, ok = QInputDialog.getMultiLineText(
+            self, "Edit note", "Markdown:", note["body_md"]
+        )
+        return body if ok else None
+
+    def _show_note_revisions(self, note_id) -> None:
+        """Select and restore an earlier note revision.
+
+        Parameters
+        ----------
+        note_id : str
+            Note identifier.
+
+        Returns
+        -------
+        None
+            The note is restored or the dialog is cancelled.
+        """
+        if self._note_store is None:
+            return
+        revisions = self._note_store.revisions(note_id)
+        number = self._revision_choice(revisions)
+        if number is None:
+            return
+        self._restore_note_revision(note_id, number)
+
+    def _revision_choice(self, revisions):
+        """Ask for a revision number when revisions exist.
+
+        Parameters
+        ----------
+        revisions : list
+            Revision records.
+
+        Returns
+        -------
+        int or None
+            Chosen revision, or ``None``.
+        """
+        if not revisions:
+            QMessageBox.information(self, "Revisions", "No earlier revisions.")
+            return None
+        return self._choose_revision(revisions)
+
+    def _restore_note_revision(self, note_id, number) -> None:
+        """Restore a note revision and refresh views.
+
+        Parameters
+        ----------
+        note_id : str
+            Note identifier.
+        number : int
+            Revision number.
+
+        Returns
+        -------
+        None
+            The note and views are updated.
+        """
+        self._note_store.restore_revision(note_id, number)
+        self._refresh_research_workspace()
+
+    def _choose_revision(self, revisions):
+        """Ask which revision to restore.
+
+        Parameters
+        ----------
+        revisions : list
+            Revision records.
+
+        Returns
+        -------
+        int or None
+            Revision number, or ``None`` when cancelled.
+        """
+        labels = [f"Revision {item['revision']}" for item in revisions]
+        label, ok = QInputDialog.getItem(
+            self, "Revisions", "Restore:", labels, 0, False
+        )
+        if not ok:
+            return None
+        return int(label.split()[-1])
+
+    def _save_proposal(self, proposal_id) -> None:
+        """Approve and persist one pending note proposal.
+
+        Parameters
+        ----------
+        proposal_id : str
+            Proposal identifier.
+
+        Returns
+        -------
+        None
+            The note is saved and the proposal removed.
+        """
+        if self._services is None:
+            return
+        try:
+            self._services.apply_proposal(proposal_id)
+        except (RuntimeError, ValueError, KeyError):
+            return
+        self._refresh_research_workspace()
+
+    def _discard_proposal(self, proposal_id) -> None:
+        """Discard one pending note proposal.
+
+        Parameters
+        ----------
+        proposal_id : str
+            Proposal identifier.
+
+        Returns
+        -------
+        None
+            The proposal is removed.
+        """
+        if self._services is None:
+            return
+        self._services.discard_proposal(proposal_id)
+        self._refresh_research_workspace()
 
     def _on_research_posted(self) -> None:
         """Touch the active research thread after a message.
@@ -3341,6 +3898,103 @@ def _make_voice(missing: list[str]):
     return VoiceEngine()
 
 
+def _thread_signals(window):
+    """Return thread action signal and slot pairs.
+
+    Parameters
+    ----------
+    window : MainWindow
+        Owning window.
+
+    Returns
+    -------
+    tuple
+        Signal and slot pairs.
+    """
+    workspace = window._research_workspace
+    return (
+        (workspace.thread_selected, window._select_research_thread),
+        (workspace.new_thread_requested, window._new_research_thread),
+    ) + _thread_lifecycle_signals(window)
+
+
+def _thread_lifecycle_signals(window):
+    """Return thread lifecycle signal and slot pairs.
+
+    Parameters
+    ----------
+    window : MainWindow
+        Owning window.
+
+    Returns
+    -------
+    tuple
+        Signal and slot pairs.
+    """
+    workspace = window._research_workspace
+    return (
+        (workspace.thread_archive_requested, window._archive_research_thread),
+        (workspace.thread_restore_requested, window._restore_research_thread),
+        (workspace.thread_delete_requested, window._delete_research_thread),
+        (workspace.archived_toggled, window._toggle_archived_threads),
+    )
+
+
+def _record_ids(records):
+    """Return identifiers from a list of record mappings.
+
+    Parameters
+    ----------
+    records : list
+        Record mappings.
+
+    Returns
+    -------
+    list
+        Record identifiers.
+    """
+    return [record["id"] for record in records]
+
+
+def _note_title(body):
+    """Return a short title from selected note text.
+
+    Parameters
+    ----------
+    body : str
+        Note body.
+
+    Returns
+    -------
+    str
+        First line, bounded to 80 characters.
+    """
+    first = body.splitlines()[0].strip()
+    return (first or "Research note")[:80]
+
+
+def _selection_origin(body):
+    """Build an origin snapshot for a saved selection.
+
+    Parameters
+    ----------
+    body : str
+        Selected text.
+
+    Returns
+    -------
+    dict
+        Origin snapshot.
+    """
+    return {
+        "message_seq": None,
+        "message_hash": "",
+        "role": "selection",
+        "excerpt": body[:500],
+        "captured_at": time.time(),
+    }
+
+
 def _agent_options(root, path, prompt, tools):
     """Build optional agent keyword arguments.
 
@@ -3368,26 +4022,64 @@ def _agent_options(root, path, prompt, tools):
     }
 
 
-def _research_tools(root):
+def _research_tools(root, services):
     """Build the default-deny research tool registry.
 
     Parameters
     ----------
     root : pathlib.Path
         Active project workspace.
+    services : ResearchServices
+        Session-bound note and evidence services.
 
     Returns
     -------
     ToolRegistry
         Read-only registry with private paths and unsafe URLs blocked.
     """
-    return ToolRegistry(
-        root,
-        allowed_tools=RESEARCH_TOOL_NAMES,
-        read_only=True,
-        deny_private=True,
-        safe_urls=True,
-    )
+    options = _research_tool_options(services)
+    options.update(_research_registry_options())
+    return ToolRegistry(root, **options)
+
+
+def _research_registry_options():
+    """Return static research registry policy options.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    dict
+        Registry policy options.
+    """
+    return {
+        "allowed_tools": RESEARCH_TOOL_NAMES,
+        "read_only": True,
+        "deny_private": True,
+        "safe_urls": True,
+    }
+
+
+def _research_tool_options(services):
+    """Build research service callback options.
+
+    Parameters
+    ----------
+    services : ResearchServices
+        Session-bound research services.
+
+    Returns
+    -------
+    dict
+        Tool registry callback options.
+    """
+    return {
+        "note_sink": services.propose_note,
+        "note_revision_sink": services.propose_revision,
+        "evidence_sink": services.capture_evidence,
+    }
 
 
 def _resolve_research(root):

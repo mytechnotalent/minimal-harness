@@ -130,6 +130,27 @@ class NoteStore:
         notes = [read_json(path) for path in self._paths()]
         return [n for n in notes if _matches(n, session_id, thread_id, status)]
 
+    def search(self, query, session_id=None):
+        """Return notes matching text in title, body, or tags.
+
+        Parameters
+        ----------
+        query : str
+            Case-insensitive search text.
+        session_id : str or None
+            Optional session scope.
+
+        Returns
+        -------
+        list
+            Matching note records.
+        """
+        needle = query.strip().lower()
+        notes = self.list(session_id, status=None)
+        if not needle:
+            return notes
+        return [note for note in notes if _contains(note, needle)]
+
     def update(self, note_id, editor="user", **changes):
         """Apply changes and store the previous version as a revision.
 
@@ -543,6 +564,26 @@ def _revision_text(note, editor):
         "editor": editor,
         "restored_from_revision": None,
     }
+
+
+def _contains(note, needle):
+    """Return whether a note contains the search text.
+
+    Parameters
+    ----------
+    note : dict
+        Note record.
+    needle : str
+        Lowercase search text.
+
+    Returns
+    -------
+    bool
+        ``True`` when any searchable field matches.
+    """
+    tags = " ".join(str(tag) for tag in note.get("tags", []))
+    text = " ".join([note.get("title", ""), note.get("body_md", ""), tags])
+    return needle in text.lower()
 
 
 def _matches(note, session_id, thread_id, status):

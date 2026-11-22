@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -62,6 +63,32 @@ def _assert_read_only(case, research):
     case.assertNotIn("write", research._agent.tools.tools)
 
 
+def _assert_survived(case, window, note, tombstone, thread_id):
+    """Assert that a deleted thread kept its note and tombstone.
+
+    Parameters
+    ----------
+    case : unittest.TestCase
+        Owning test case.
+    window : MainWindow
+        Window under test.
+    note : dict
+        Saved note.
+    tombstone : pathlib.Path
+        Tombstone folder.
+    thread_id : str
+        Deleted thread identifier.
+
+    Returns
+    -------
+    None
+        Assertions pass.
+    """
+    saved = window._note_store.get(note["id"])
+    case.assertEqual(saved["title"], "A finding")
+    case.assertTrue((tombstone / f"{thread_id}.json").exists())
+
+
 @unittest.skipIf(MainWindow is None, "PySide6 is not installed")
 class MainWindowResearchTests(unittest.TestCase):
     """Verify the research panel stays separate from the primary chat."""
@@ -95,11 +122,30 @@ class MainWindowResearchTests(unittest.TestCase):
         """
         self._folder = tempfile.TemporaryDirectory()
         base = Path(self._folder.name)
+        self._start_env(base)
         store = SessionStore(base / "sessions")
         store.create()
         settings = Settings(base / "settings.json")
         self.window = MainWindow(store, base / "project", settings)
         self.addCleanup(self._close)
+
+    def _start_env(self, base) -> None:
+        """Point research storage at the temporary folder.
+
+        Parameters
+        ----------
+        base : pathlib.Path
+            Temporary base directory.
+
+        Returns
+        -------
+        None
+            The environment override is active.
+        """
+        env = {"HARNESS_RESEARCH_DIR": str(base / "research")}
+        self._env = patch.dict(os.environ, env)
+        self._env.start()
+        self.addCleanup(self._env.stop)
 
     def _close(self) -> None:
         """Stop worker threads and remove the temporary folder.
@@ -115,6 +161,27 @@ class MainWindowResearchTests(unittest.TestCase):
         """
         self.window._stop_panels()
         self._folder.cleanup()
+
+    def test_thread_delete_keeps_saved_note(self) -> None:
+        """Keep a saved note and tombstone after thread deletion.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The note survives and provenance is written.
+        """
+        window = self.window
+        window._save_research_note("A finding")
+        note = window._note_store.list(window._record.session_id)[0]
+        thread_id = window._research_thread["id"]
+        with patch.object(window, "_confirm_thread_delete", return_value=True):
+            window._delete_research_thread(thread_id)
+        tombstone = window._research_root / "tombstones" / "threads"
+        _assert_survived(self, window, note, tombstone, thread_id)
 
     def test_research_is_independent_from_primary(self) -> None:
         """Keep transcripts, prompts, and thread selection separate.

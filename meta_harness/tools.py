@@ -127,6 +127,19 @@ TOOL_SCHEMAS = {
         }
     },
     "list_models": {"free_only": {"type": "boolean"}},
+    "note_propose": {
+        "title": {"type": "string"},
+        "body_md": {"type": "string"},
+    },
+    "note_revision_propose": {
+        "note_id": {"type": "string"},
+        "title": {"type": "string"},
+        "body_md": {"type": "string"},
+    },
+    "evidence_capture": {
+        "url": {"type": "string"},
+        "caption": {"type": "string"},
+    },
 }
 
 
@@ -146,6 +159,11 @@ TOOL_DESCRIPTIONS = {
     "glob": "Find workspace files by a glob pattern such as **/*.py.",
     "grep": "Search workspace file contents with a regular expression.",
     "repo_map": "Return a compact sorted list of workspace files.",
+    "note_propose": "Propose a new research note that the user must save.",
+    "note_revision_propose": (
+        "Propose a revision to an existing research note for user approval."
+    ),
+    "evidence_capture": "Capture a screenshot into research evidence storage.",
 }
 
 
@@ -945,6 +963,9 @@ class ToolRegistry:
         read_only: bool = False,
         deny_private: bool = False,
         safe_urls: bool = False,
+        note_sink=None,
+        note_revision_sink=None,
+        evidence_sink=None,
     ) -> None:
         """Initialize tools rooted at one workspace.
 
@@ -969,6 +990,12 @@ class ToolRegistry:
             Hide credential, secret, and app-data paths.
         safe_urls : bool
             Reject browser URLs that are not public HTTP or HTTPS.
+        note_sink : collections.abc.Callable or None
+            Optional new-note proposal sink.
+        note_revision_sink : collections.abc.Callable or None
+            Optional note revision proposal sink.
+        evidence_sink : collections.abc.Callable or None
+            Optional screenshot evidence sink.
 
         Returns
         -------
@@ -979,8 +1006,30 @@ class ToolRegistry:
         self._configure_policy(
             allowed_tools, read_only, deny_private, safe_urls
         )
+        self._configure_sinks(note_sink, note_revision_sink, evidence_sink)
         self.suggestions: list[str] = []
         self.tools = self._tool_map()
+
+    def _configure_sinks(self, note_sink, revision_sink, evidence_sink):
+        """Store optional research service callbacks.
+
+        Parameters
+        ----------
+        note_sink : collections.abc.Callable or None
+            New-note proposal sink.
+        revision_sink : collections.abc.Callable or None
+            Revision proposal sink.
+        evidence_sink : collections.abc.Callable or None
+            Evidence capture sink.
+
+        Returns
+        -------
+        None
+            Sink callbacks are stored.
+        """
+        self.note_sink = note_sink
+        self.note_revision_sink = revision_sink
+        self.evidence_sink = evidence_sink
 
     def _set_base(self, root, questioner, require_project_folder, web_enabled):
         """Store the base workspace and interaction settings.
@@ -1604,6 +1653,67 @@ class ToolRegistry:
             Deterministic app evaluation.
         """
         return AppEvaluator().evaluate(self._path(path))
+
+    def note_propose(self, title: str, body_md: str) -> dict[str, Any]:
+        """Propose a new note for user approval.
+
+        Parameters
+        ----------
+        title : str
+            Proposed title.
+        body_md : str
+            Proposed markdown body.
+
+        Returns
+        -------
+        dict[str, Any]
+            Pending proposal record.
+        """
+        if self.note_sink is None:
+            raise ToolError("note proposals are unavailable")
+        return self.note_sink(title, body_md)
+
+    def note_revision_propose(
+        self, note_id: str, title: str, body_md: str
+    ) -> dict[str, Any]:
+        """Propose a revision to an existing note.
+
+        Parameters
+        ----------
+        note_id : str
+            Existing note identifier.
+        title : str
+            Proposed title.
+        body_md : str
+            Proposed markdown body.
+
+        Returns
+        -------
+        dict[str, Any]
+            Pending proposal record.
+        """
+        if self.note_revision_sink is None:
+            raise ToolError("note revision proposals are unavailable")
+        return self.note_revision_sink(note_id, title, body_md)
+
+    def evidence_capture(self, url: str, caption: str = "") -> dict[str, Any]:
+        """Capture a screenshot into research evidence storage.
+
+        Parameters
+        ----------
+        url : str
+            Page URL.
+        caption : str
+            Optional caption.
+
+        Returns
+        -------
+        dict[str, Any]
+            Evidence record.
+        """
+        if self.evidence_sink is None:
+            raise ToolError("evidence capture is unavailable")
+        return self.evidence_sink(url, caption)
 
     def list_models(self, free_only: bool = False) -> list[dict[str, Any]]:
         """List OpenRouter models.

@@ -78,6 +78,26 @@ def _assert_denied(case, registry, name):
         registry.read(name)
 
 
+def _sink_registry(folder):
+    """Build a research registry with simple sink callbacks.
+
+    Parameters
+    ----------
+    folder : str
+        Workspace directory.
+
+    Returns
+    -------
+    ToolRegistry
+        Registry with note and evidence sinks.
+    """
+    return _registry(
+        folder,
+        note_sink=lambda title, body: {"title": title, "body": body},
+        evidence_sink=lambda url, caption: {"url": url},
+    )
+
+
 class ResearchSecurityTests(unittest.TestCase):
     """Verify allowlists, read-only mode, and private-path denial."""
 
@@ -173,6 +193,26 @@ class ResearchSecurityTests(unittest.TestCase):
             _seed(root)
             registry = _registry(root)
             self.assertEqual(registry.grep("TOKEN")["matches"], [])
+
+    def test_note_and_evidence_sinks_are_used(self) -> None:
+        """Route note and evidence tools through injected callbacks.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Both sinks receive arguments and results are returned.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            registry = _sink_registry(folder)
+            run = registry.execute
+            note = run("note_propose", {"title": "T", "body_md": "B"})
+            evidence = run("evidence_capture", {"url": "https://x"})
+        self.assertIn("T", note)
+        self.assertIn("https://x", evidence)
 
     def test_symlink_escape_is_rejected(self) -> None:
         """Reject a symlink that resolves outside the workspace.

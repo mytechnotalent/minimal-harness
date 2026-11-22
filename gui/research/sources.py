@@ -120,6 +120,27 @@ class SourceStore:
             s for s in sources if _matches(s, session_id, thread_id, status)
         ]
 
+    def search(self, query, session_id=None):
+        """Return sources matching text in title, URL, or excerpt.
+
+        Parameters
+        ----------
+        query : str
+            Case-insensitive search text.
+        session_id : str or None
+            Optional session scope.
+
+        Returns
+        -------
+        list
+            Matching source records.
+        """
+        needle = query.strip().lower()
+        sources = self.list(session_id, status=None)
+        if not needle:
+            return sources
+        return [source for source in sources if _contains(source, needle)]
+
     def delete(self, source_id):
         """Delete one source record.
 
@@ -536,6 +557,31 @@ def _equivalent(source, facts):
         source.get("url") == facts["url"]
         and source.get("content_hash") == facts["content_hash"]
     )
+
+
+def _contains(source, needle):
+    """Return whether a source contains the search text.
+
+    Parameters
+    ----------
+    source : dict
+        Source record.
+    needle : str
+        Lowercase search text.
+
+    Returns
+    -------
+    bool
+        ``True`` when any searchable field matches.
+    """
+    text = " ".join(
+        [
+            source.get("title", ""),
+            source.get("url", ""),
+            source.get("excerpt", ""),
+        ]
+    )
+    return needle in text.lower()
 
 
 def _matches(source, session_id, thread_id, status):
