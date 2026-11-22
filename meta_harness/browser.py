@@ -6,6 +6,8 @@ from typing import Any
 import importlib
 import os
 
+from .url_policy import validate_url
+
 
 class BrowserError(RuntimeError):
     """Represent unavailable or failed browser automation."""
@@ -13,6 +15,21 @@ class BrowserError(RuntimeError):
 
 class BrowserClient:
     """Open pages and capture screenshots with Playwright."""
+
+    def __init__(self, safe: bool = False) -> None:
+        """Configure URL safety checks.
+
+        Parameters
+        ----------
+        safe : bool
+            Reject non-public and non-HTTP URLs.
+
+        Returns
+        -------
+        None
+            The client is ready.
+        """
+        self.safe = safe
 
     def open(self, url: str) -> dict[str, str]:
         """Navigate to a URL and return metadata.
@@ -237,8 +254,26 @@ class BrowserClient:
         dict[str, str]
             Operation result.
         """
+        self._guard(url)
         page.goto(url, wait_until="networkidle", timeout=30000)
+        self._guard(page.url)
         return self._page_result(mode, page, path)
+
+    def _guard(self, url):
+        """Validate a URL when safe mode is enabled.
+
+        Parameters
+        ----------
+        url : str
+            URL about to be loaded.
+
+        Returns
+        -------
+        None
+            The URL is accepted.
+        """
+        if self.safe:
+            validate_url(url)
 
     def _close(self, playwright: Any, browser: Any) -> None:
         """Close Playwright resources when initialized.

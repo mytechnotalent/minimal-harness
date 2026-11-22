@@ -183,6 +183,7 @@ class Agent:
         lean: bool = False,
         repo: bool = False,
         system_prompt: str | None = None,
+        tools: ToolRegistry | None = None,
     ) -> None:
         """Initialize an agent session.
 
@@ -209,6 +210,8 @@ class Agent:
 
         system_prompt : str or None
             Optional full system prompt override.
+        tools : ToolRegistry or None
+            Optional preconfigured tool registry.
 
         Returns
         -------
@@ -219,7 +222,7 @@ class Agent:
         self.lean = lean
         self.repo = repo or _repo_env()
         self.client = client or OpenRouterClient()
-        self.tools = ToolRegistry(root, web_enabled=web_enabled)
+        self.tools = tools or ToolRegistry(root, web_enabled=web_enabled)
         self.max_turns = max_turns
         self.session = session
         self._init_state(session)

@@ -37,6 +37,35 @@ _WEB_TOOLS = (
     "browser_screenshot",
     "browser_assert",
 )
+_WRITE_TOOLS = frozenset(
+    {
+        "write",
+        "edit",
+        "patch",
+        "bash",
+        "browser_screenshot",
+        "evaluate_app",
+    }
+)
+_PRIVATE_DIRS = frozenset({".git", ".ssh", "secrets", "runs"})
+_PRIVATE_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
+RESEARCH_TOOL_NAMES = frozenset(
+    {
+        "read",
+        "list",
+        "glob",
+        "grep",
+        "repo_map",
+        "web_search",
+        "browser_open",
+        "browser_assert",
+        "ask",
+        "suggest",
+        "note_propose",
+        "note_revision_propose",
+        "evidence_capture",
+    }
+)
 TOOL_SCHEMAS = {
     "read": {
         "path": {"type": "string"},
@@ -163,6 +192,22 @@ def _output_limit() -> int:
         return 12000
 
 
+def _allowlist(names):
+    """Return an immutable tool allowlist.
+
+    Parameters
+    ----------
+    names : collections.abc.Iterable or None
+        Optional tool names.
+
+    Returns
+    -------
+    frozenset or None
+        Immutable allowlist, or ``None`` for no restriction.
+    """
+    return None if names is None else frozenset(names)
+
+
 def _bound_output(text: str) -> str:
     """Truncate oversized tool output while keeping both ends.
 
@@ -205,6 +250,29 @@ def _skip_path(root: Path, path: Path) -> bool:
     except ValueError:
         return True
     return any(part in _SKIP_DIRS for part in relative.parts)
+
+
+def _denied_relative(relative: Path) -> bool:
+    """Return whether a relative path is private or credential material.
+
+    Parameters
+    ----------
+    relative : pathlib.Path
+        Path relative to the workspace root.
+
+    Returns
+    -------
+    bool
+        ``True`` when the path must stay hidden.
+    """
+    if any(part in _PRIVATE_DIRS for part in relative.parts):
+        return True
+    name = relative.name
+    if name == ".env" or name.startswith(".env."):
+        return True
+    if name.startswith("id_rsa"):
+        return True
+    return name.endswith(_PRIVATE_SUFFIXES)
 
 
 def _iter_files(target: Path):
@@ -483,7 +551,7 @@ def _line_records(text: str, relative: str, regex, limit: int) -> list[dict]:
     return found[:limit]
 
 
-def _grep_path(target: Path, root: Path, regex, limit: int) -> list[dict]:
+def _grep_path(target: Path, root: Path, regex, limit: int, deny=None):
     """Return matching lines from a file or directory.
 
     Parameters
@@ -496,6 +564,8 @@ def _grep_path(target: Path, root: Path, regex, limit: int) -> list[dict]:
         Compiled pattern.
     limit : int
         Maximum matches.
+    deny : collections.abc.Callable or None
+        Optional path rejection predicate.
 
     Returns
     -------
@@ -503,10 +573,10 @@ def _grep_path(target: Path, root: Path, regex, limit: int) -> list[dict]:
         Match records.
     """
     files = [target] if target.is_file() else list(_iter_files(target))
-    return _collect_matches(files, root, regex, limit)
+    return _collect_matches(files, root, regex, limit, deny)
 
 
-def _collect_matches(files, root: Path, regex, limit: int) -> list[dict]:
+def _collect_matches(files, root: Path, regex, limit: int, deny=None):
     """Collect matching lines from a list of files.
 
     Parameters
@@ -519,6 +589,8 @@ def _collect_matches(files, root: Path, regex, limit: int) -> list[dict]:
         Compiled pattern.
     limit : int
         Maximum matches.
+    deny : collections.abc.Callable or None
+        Optional path rejection predicate.
 
     Returns
     -------
@@ -527,12 +599,34 @@ def _collect_matches(files, root: Path, regex, limit: int) -> list[dict]:
     """
     matches = []
     for path in files:
-        if _skip_path(root, path):
+        if _reject_path(root, path, deny):
             continue
         matches.extend(_file_matches(path, root, regex, limit - len(matches)))
         if len(matches) >= limit:
             break
     return matches
+
+
+def _reject_path(root, path, deny):
+    """Return whether a grep candidate must be skipped.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+    path : pathlib.Path
+        Candidate file.
+    deny : collections.abc.Callable or None
+        Optional path rejection predicate.
+
+    Returns
+    -------
+    bool
+        ``True`` when the file must not be read.
+    """
+    if _skip_path(root, path):
+        return True
+    return deny is not None and deny(path)
 
 
 def _repo_files(root: Path, limit: int) -> list[str]:
@@ -847,6 +941,10 @@ class ToolRegistry:
         questioner: Callable[[str, list[str]], str] | None = None,
         require_project_folder: bool = False,
         web_enabled: bool = True,
+        allowed_tools=None,
+        read_only: bool = False,
+        deny_private: bool = False,
+        safe_urls: bool = False,
     ) -> None:
         """Initialize tools rooted at one workspace.
 
@@ -863,18 +961,76 @@ class ToolRegistry:
 
         web_enabled : bool
             Advertise web and browser tools.
+        allowed_tools : collections.abc.Iterable or None
+            Optional exact tool allowlist.
+        read_only : bool
+            Refuse every mutating tool.
+        deny_private : bool
+            Hide credential, secret, and app-data paths.
+        safe_urls : bool
+            Reject browser URLs that are not public HTTP or HTTPS.
 
         Returns
         -------
         None
             This initializer configures the registry.
         """
+        self._set_base(root, questioner, require_project_folder, web_enabled)
+        self._configure_policy(
+            allowed_tools, read_only, deny_private, safe_urls
+        )
+        self.suggestions: list[str] = []
+        self.tools = self._tool_map()
+
+    def _set_base(self, root, questioner, require_project_folder, web_enabled):
+        """Store the base workspace and interaction settings.
+
+        Parameters
+        ----------
+        root : pathlib.Path or str
+            Workspace root.
+        questioner : collections.abc.Callable or None
+            Optional interactive questioner.
+        require_project_folder : bool
+            Refuse new root-level files.
+        web_enabled : bool
+            Advertise web and browser tools.
+
+        Returns
+        -------
+        None
+            Base fields are stored.
+        """
         self.root = Path(root).resolve()
         self.questioner = questioner
         self.require_project_folder = require_project_folder
         self.web_enabled = web_enabled
-        self.suggestions: list[str] = []
-        self.tools = self._tool_map()
+
+    def _configure_policy(
+        self, allowed_tools, read_only, deny_private, safe_urls
+    ):
+        """Store tool and path security settings.
+
+        Parameters
+        ----------
+        allowed_tools : collections.abc.Iterable or None
+            Optional exact allowlist.
+        read_only : bool
+            Refuse mutating tools.
+        deny_private : bool
+            Hide sensitive and app-data paths.
+        safe_urls : bool
+            Restrict browser URLs.
+
+        Returns
+        -------
+        None
+            Policy fields are stored.
+        """
+        self.allowed_tools = _allowlist(allowed_tools)
+        self.read_only = read_only
+        self.deny_private = deny_private
+        self.safe_urls = safe_urls
 
     def _tool_map(self) -> dict[str, Callable[..., Any]]:
         """Build the registered tool map.
@@ -888,12 +1044,27 @@ class ToolRegistry:
         dict[str, Callable[..., Any]]
             Tool names and bound implementations.
         """
-        names = [
-            name
-            for name in TOOL_SCHEMAS
-            if self.web_enabled or name not in _WEB_TOOLS
-        ]
+        names = [name for name in TOOL_SCHEMAS if self._allowed(name)]
         return {name: getattr(self, name) for name in names}
+
+    def _allowed(self, name):
+        """Return whether one tool may be advertised.
+
+        Parameters
+        ----------
+        name : str
+            Tool name.
+
+        Returns
+        -------
+        bool
+            ``True`` when the tool is permitted.
+        """
+        if not self.web_enabled and name in _WEB_TOOLS:
+            return False
+        if self.allowed_tools is not None and name not in self.allowed_tools:
+            return False
+        return not (self.read_only and name in _WRITE_TOOLS)
 
     def schema(self, names=None) -> list[dict[str, Any]]:
         """Return OpenAI-compatible tool schemas.
@@ -989,6 +1160,7 @@ class ToolRegistry:
         dict[str, Any]
             Written path and byte count.
         """
+        self._require_writable()
         target = self._path(path)
         self._check_project_path(target)
         _validate_python(target, content)
@@ -1034,6 +1206,7 @@ class ToolRegistry:
         dict[str, Any]
             Edited path and replacement count.
         """
+        self._require_writable()
         target = self._path(path)
         content = target.read_text()
         updated, count = _apply_edit(content, old, new)
@@ -1056,6 +1229,7 @@ class ToolRegistry:
         dict[str, Any]
             Edited path and replacement count.
         """
+        self._require_writable()
         target = self._path(path)
         updated = _apply_patches(target.read_text(), edits)
         _validate_python(target, updated)
@@ -1075,7 +1249,11 @@ class ToolRegistry:
         dict[str, Any]
             Entries with name, type, and size.
         """
-        entries = _directory_entries(self._path(path))
+        target = self._path(path)
+        entries = _directory_entries(target)
+        entries = [
+            item for item in entries if not self._denied(target / item["name"])
+        ]
         return {"path": path, "entries": entries, "count": len(entries)}
 
     def glob(self, pattern: str, limit: int = 100) -> dict[str, Any]:
@@ -1094,6 +1272,7 @@ class ToolRegistry:
             Matching relative paths.
         """
         files = _glob_files(self.root, pattern, max(1, limit))
+        files = [name for name in files if not self._denied(self.root / name)]
         return {"pattern": pattern, "files": files, "count": len(files)}
 
     def grep(
@@ -1119,7 +1298,9 @@ class ToolRegistry:
             regex = re.compile(pattern)
         except re.error as exc:
             raise ToolError(f"invalid pattern: {exc}") from exc
-        matches = _grep_path(self._path(path), self.root, regex, limit)
+        matches = _grep_path(
+            self._path(path), self.root, regex, limit, self._denied
+        )
         return {"pattern": pattern, "matches": matches, "count": len(matches)}
 
     def repo_map(self, limit: int = 200) -> dict[str, Any]:
@@ -1136,6 +1317,7 @@ class ToolRegistry:
             Relative file paths.
         """
         files = _repo_files(self.root, max(1, limit))
+        files = [name for name in files if not self._denied(self.root / name)]
         return {"files": files, "count": len(files)}
 
     def bash(self, command: str, timeout: int = 30) -> dict[str, Any]:
@@ -1153,14 +1335,46 @@ class ToolRegistry:
         dict[str, Any]
             Exit code and bounded output.
         """
+        self._require_writable()
+        self._prepare_command(command)
+        return self._command_result(self._run_checked(command, timeout))
+
+    def _prepare_command(self, command):
+        """Validate and approve a shell command.
+
+        Parameters
+        ----------
+        command : str
+            Shell command.
+
+        Returns
+        -------
+        None
+            The command is ready to run.
+        """
         self._check_command(command)
         if self._is_install(command):
             self._require_install_ok()
+
+    def _run_checked(self, command, timeout):
+        """Run a sandboxed command and translate sandbox failures.
+
+        Parameters
+        ----------
+        command : str
+            Shell command.
+        timeout : int
+            Timeout seconds.
+
+        Returns
+        -------
+        subprocess.CompletedProcess
+            Completed process.
+        """
         try:
-            result = self._run_command(command, timeout)
+            return self._run_command(command, timeout)
         except SandboxUnavailable as exc:
             raise ToolError(str(exc)) from exc
-        return self._command_result(result)
 
     def _check_command(self, command: str) -> None:
         """Reject shell commands that reach outside the workspace.
@@ -1338,7 +1552,7 @@ class ToolRegistry:
         dict[str, str]
             Page URL, title, and visible text.
         """
-        return BrowserClient().open(url)
+        return BrowserClient(safe=self.safe_urls).open(url)
 
     def browser_screenshot(self, url: str, path: str) -> dict[str, str]:
         """Capture a page screenshot.
@@ -1355,8 +1569,9 @@ class ToolRegistry:
         dict[str, str]
             Page URL and screenshot path.
         """
+        self._require_writable()
         target = self._path(path)
-        return BrowserClient().screenshot(url, str(target))
+        return BrowserClient(safe=self.safe_urls).screenshot(url, str(target))
 
     def browser_assert(self, url: str, text: str) -> dict[str, Any]:
         """Assert visible text on a page.
@@ -1373,7 +1588,7 @@ class ToolRegistry:
         dict[str, Any]
             Assertion result.
         """
-        return BrowserClient().assert_page(url, text)
+        return BrowserClient(safe=self.safe_urls).assert_page(url, text)
 
     def evaluate_app(self, path: str = ".") -> dict[str, Any]:
         """Score a web application deterministically.
@@ -1461,7 +1676,45 @@ class ToolRegistry:
         target = (self.root / path).resolve()
         if target != self.root and self.root not in target.parents:
             raise ToolError("path escapes workspace")
+        if self._denied(target):
+            raise ToolError("path is not available")
         return target
+
+    def _denied(self, target):
+        """Return whether a path is hidden by the current policy.
+
+        Parameters
+        ----------
+        target : pathlib.Path
+            Candidate path.
+
+        Returns
+        -------
+        bool
+            ``True`` when the path must not be accessed.
+        """
+        if not self.deny_private:
+            return False
+        try:
+            relative = target.resolve().relative_to(self.root)
+        except ValueError:
+            return True
+        return _denied_relative(relative)
+
+    def _require_writable(self):
+        """Reject a mutating operation in read-only mode.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The operation may continue.
+        """
+        if self.read_only:
+            raise ToolError("tool is read-only")
 
     def _schema(self, name: str) -> dict[str, Any]:
         """Build one tool schema.

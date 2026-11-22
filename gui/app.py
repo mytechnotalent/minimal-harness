@@ -54,6 +54,8 @@ from meta_harness.openrouter import OpenRouterClient
 from meta_harness.profiles import effective_turns
 from meta_harness.prompts import load as load_prompt
 from meta_harness.session import Session
+from meta_harness.tools import RESEARCH_TOOL_NAMES
+from meta_harness.tools import ToolRegistry
 from meta_harness.voice import VoiceEngine
 from meta_harness.voice import missing_dependencies
 from meta_harness.voice_text import match_option
@@ -2052,7 +2054,7 @@ class MainWindow(QMainWindow):
         main.addWidget(self._research_card)
         return main
 
-    def _make_agent(self, path, prompt=None) -> Agent:
+    def _make_agent(self, path, prompt=None, tools=None) -> Agent:
         """Build an agent for one panel.
 
         Parameters
@@ -2061,23 +2063,22 @@ class MainWindow(QMainWindow):
             Transcript path.
         prompt : str or None
             Optional full system prompt override.
+        tools : ToolRegistry or None
+            Optional restricted tool registry.
 
         Returns
         -------
         Agent
             Agent bound to the working session.
         """
-        agent = Agent(
-            root=self._root,
-            max_turns=self._turns(),
-            session=Session(path),
-            system_prompt=prompt,
-        )
+        options = _agent_options(self._root, path, prompt, tools)
+        options["max_turns"] = self._turns()
+        agent = Agent(**options)
         agent.tools.require_project_folder = True
         return agent
 
     def _make_research_agent(self) -> Agent:
-        """Build the research agent with its own prompt.
+        """Build the read-only research agent with its own prompt.
 
         Parameters
         ----------
@@ -2089,7 +2090,8 @@ class MainWindow(QMainWindow):
             Agent bound to a research transcript.
         """
         path = Path("runs/gui-research.jsonl")
-        return self._make_agent(path, load_prompt("research"))
+        tools = _research_tools(self._root)
+        return self._make_agent(path, load_prompt("research"), tools)
 
     def _turns(self) -> int:
         """Return the effective turn budget for the active model.
@@ -3337,6 +3339,55 @@ def _make_voice(missing: list[str]):
     if missing:
         return None
     return VoiceEngine()
+
+
+def _agent_options(root, path, prompt, tools):
+    """Build optional agent keyword arguments.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+    path : pathlib.Path
+        Transcript path.
+    prompt : str or None
+        Optional system prompt.
+    tools : ToolRegistry or None
+        Optional restricted registry.
+
+    Returns
+    -------
+    dict
+        Agent keyword arguments.
+    """
+    return {
+        "root": root,
+        "session": Session(path),
+        "system_prompt": prompt,
+        "tools": tools,
+    }
+
+
+def _research_tools(root):
+    """Build the default-deny research tool registry.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Active project workspace.
+
+    Returns
+    -------
+    ToolRegistry
+        Read-only registry with private paths and unsafe URLs blocked.
+    """
+    return ToolRegistry(
+        root,
+        allowed_tools=RESEARCH_TOOL_NAMES,
+        read_only=True,
+        deny_private=True,
+        safe_urls=True,
+    )
 
 
 def _resolve_research(root):

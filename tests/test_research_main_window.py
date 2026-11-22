@@ -39,7 +39,27 @@ def _assert_isolation(case, window):
     case.assertNotEqual(
         research._agent.session.path, window._record.transcript
     )
+    _assert_read_only(case, research)
     case.assertEqual(window._make_research_context(), "")
+
+
+def _assert_read_only(case, research):
+    """Assert that the research agent is read-only.
+
+    Parameters
+    ----------
+    case : unittest.TestCase
+        Owning test case.
+    research : ChatPanel
+        Research panel.
+
+    Returns
+    -------
+    None
+        Security assertions pass.
+    """
+    case.assertTrue(research._agent.tools.read_only)
+    case.assertNotIn("write", research._agent.tools.tools)
 
 
 @unittest.skipIf(MainWindow is None, "PySide6 is not installed")
