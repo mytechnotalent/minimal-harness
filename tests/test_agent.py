@@ -941,6 +941,25 @@ class AnswerReviewTests(unittest.TestCase):
         agent = Agent(root=".", client=ReviewClient(review), max_turns=1)
         self.assertEqual(agent.run("question"), "better answer")
 
+    def test_revision_records_original_and_revised(self) -> None:
+        """A revision records both the original and the corrected answer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Both texts are present in the review event.
+        """
+        review = _rejected_review()
+        agent = Agent(root=".", client=ReviewClient(review), max_turns=1)
+        agent.run("question")
+        event = _revised_event(agent)
+        self.assertEqual("draft answer", event["original"])
+        self.assertEqual("better answer", event["revised"])
+
     def test_invalid_review_keeps_answer(self) -> None:
         """An invalid review does not break the answer.
 
@@ -2065,6 +2084,23 @@ def _rejected_review() -> str:
             "revised_answer": "better answer",
         }
     )
+
+
+def _revised_event(agent) -> dict:
+    """Return the first revision event from an agent.
+
+    Parameters
+    ----------
+    agent : Agent
+        Agent with recorded review events.
+
+    Returns
+    -------
+    dict
+        Revision event.
+    """
+    events = agent.review_events
+    return [item for item in events if item.get("reason") == "revised"][0]
 
 
 def _search_results(root: Path) -> tuple:

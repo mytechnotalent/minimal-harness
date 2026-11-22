@@ -23,6 +23,8 @@ gate 2 → log → repeat**. See [docs/adversarial-loop.md](docs/adversarial-loo
 - `scripts/ab_pi.py` — headless A/B comparison against Pi.
 - `scripts/prove_advantage.py` — deterministic gate-2 and reviewer proofs.
 - `scripts/search_harness.py` — harness configuration search and Pareto archive.
+- `scripts/regression.py` — run one permanent benchmark regression entry.
+- `benchmarks/regression/` — pinned regression entries with prompts and checks.
 - `benchmarks/headtohead/` — single-file seed corpus for the A/B runner.
 - `benchmarks/repo/` — multi-file agentic corpus with hidden tests.
 - `benchmarks/independent/` — vendored real-project tasks with project tests
@@ -75,10 +77,23 @@ to ask one question at a time (via the `ask` tool) instead of assuming. The
 Every final Q&A answer is reviewed by `answer_reviewer.md`; disable it with
 `HARNESS_ANSWER_REVIEW=0`. `HARNESS_ANSWER_LEDGER=auto` runs `verify_ledger.md`
 for numeric or constraint-heavy answers, recomputes the stated totals in
-Python, and passes mismatches to the reviewer as authoritative.
+Python, verifies derived and sensitivity totals from their own inputs, honors
+a stated rounding tolerance, checks word/character limits, and passes
+mismatches to the reviewer as authoritative.
 `HARNESS_ANSWER_INVARIANTS=auto` runs `technical_reviewer.md` with a curated
 checklist from `meta_harness/invariants.py` for database, retry, security, and
 operations claims.
+`HARNESS_REQUIREMENT_CHECK=auto` runs `requirements_reviewer.md` for multi-turn
+spec work, marks each requirement with a state, and passes contradictions and
+promoted recommendations to the reviewer as authoritative.
+`deliverables.py` checks requested and named files, passing-test claims, and
+the explicit completion status on file-producing tasks.
+The reviewer also receives `tool_trace`, the task id, execution id, invocation
+time, redacted arguments, status, short result, retry link, and cited flag of
+every tool call, so tool-use claims can be checked against what actually ran.
+`HARNESS_TRACE_LOG` appends each record to a JSONL file. The reviewer also
+receives `task`, the workspace, earlier requests, and the files changed during
+the current task, so content from another task is blocked instead of shipped.
 `HARNESS_ADVERSARIAL_DRAFTS=N` generates N drafts
 and picks one with `adversarial.md`. `reviewer.md` also emits executable
 `unittest` sources that Gate 1 runs; keep them standard-library only and

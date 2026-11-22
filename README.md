@@ -214,13 +214,52 @@ deterministic ledger check. The harness extracts each stated total as an
 arithmetic expression, recomputes it in Python, and sends any mismatches to
 the reviewer as authoritative. `HARNESS_ANSWER_LEDGER` accepts `auto`
 (default; only numeric or constraint-heavy tasks), `1` (always), or `0`
-(never). This is the check that catches a meal plan whose daily totals do not
-add up.
+(never). The same pass counts words and characters against a stated limit in
+the prompt and flags a constraint the answer marks `impossible` without a
+reason. Derived totals, including sensitivity scenarios, are recomputed from
+their own expressions, and a stated rounding tolerance is honored. Without a
+stated tolerance the allowed difference is absolute 0.01, so a small financial
+error is not hidden by a percentage allowance. Percentage distributions must
+sum to their total, and an annual figure must be twelve times its monthly
+counterpart. A derived total with no arithmetic is flagged instead of omitted.
+This is the check that catches a meal plan whose daily totals do not add up.
 Technical answers can also pass a curated invariant checklist. Keywords select
-rules for databases, retries, security, and operations. The model marks each
-relevant claim violated, supported, or unclear, and violations go to the
-reviewer as authoritative. `HARNESS_ANSWER_INVARIANTS` accepts `auto`
+rules for databases, idempotency and retries, security, operations, and
+architecture. The retry checklist covers key scope, payload fingerprint,
+in-progress and completed states, concurrent same-key requests, stored-result
+replay, unsafe retries, and database versus application safeguards. The
+architecture checklist covers the audit outbox transaction boundary, worker
+document authorization, per-unit cost models, and service-specific limits.
+The model marks each relevant claim violated, supported, or unclear, and
+violations go to the reviewer as authoritative. `HARNESS_ANSWER_INVARIANTS` accepts `auto`
 (default), `1`, or `0`.
+Multi-turn specification work can also pass a requirement-state extraction.
+The model marks each requirement confirmed, proposed, assumed, rejected,
+deferred, superseded, unknown, or contradicted, and keeps prototype and
+production decisions separate. Contradictions and proposed or deferred items
+presented as approved go to the reviewer as authoritative.
+`HARNESS_REQUIREMENT_CHECK` accepts `auto` (default; only when a prior request
+and specification language are present), `1`, or `0`.
+File-producing answers also pass a deterministic deliverable check. Requested
+files must appear in the current-task file list, named files must have been
+changed, a passing-test claim needs a successful test command in the trace,
+and the answer must end with an explicit completion status: completed and
+verified, completed but not fully verified, partially completed, blocked, or
+failed.
+The reviewer also receives `tool_trace`: one record per tool call with its
+name, invocation time, redacted arguments, status, and a short result. The
+reviewer treats a claim that it searched, opened, ran, or verified something
+as an `unsupported` defect when the trace has no matching successful call.
+It also receives `task`, the current workspace, earlier requests, and the
+files changed during the current task, so it can block sections, files, or
+results that belong to another task. A file named in the answer must appear
+in that current-task file list or in `artifacts`.
+Each trace record carries a task id, execution id, timestamp, redacted
+arguments, status, result excerpt, length, retry link, workspace, and whether
+the result was cited in the answer. `tool_trace_origin` is `recorded` when a
+live trace exists and `none` otherwise, so the reviewer can reject claimed
+tool use without evidence. Set `HARNESS_TRACE_LOG` to append every record to a
+JSONL file.
 `HARNESS_ANSWER_REVIEW` accepts `1` (always review), `0` (never), or `auto`
 (review only tool-backed answers and answers of 400+ characters).
 `HARNESS_REVIEW_TIMEOUT` bounds one review call in seconds (default `30`).
@@ -622,6 +661,25 @@ with:
 ```bash
 python scripts/prove_advantage.py
 ```
+
+## Regression suite
+
+Permanent benchmark entries live in `benchmarks/regression/tests/`. Each entry
+pins the prompt sequence, model, limits, checks, expected behaviors, known
+failures, rubric, and historical score. Entries record a SHA-256 of the prompt
+sequence so a changed prompt is visible. Run one entry with:
+
+```bash
+python -m scripts.regression --entry benchmarks/regression/tests/14.json
+```
+
+The runner writes `runs/regression/<id>/<timestamp>/result.json` with the
+unedited turns, tool trace, changed files, config, commit, check results,
+score, and the delta from the previous run. Original prompts stay in the entry
+under `prompt_version`; do not edit an original entry to add an improved
+prompt. Tests 14 and 16 currently use `reconstructed-from-listed-inputs`
+because the original wording was not available; their inputs, expected
+results, and failure conditions are the supplied originals.
 
 ## Head-to-head A/B against Pi
 

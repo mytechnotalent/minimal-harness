@@ -50,6 +50,8 @@ from meta_harness.app_mode import ui_mode
 from meta_harness.app_mode import voice_enabled
 from meta_harness.env import load_env
 from meta_harness.markdown_text import readable_markdown
+from meta_harness.openrouter import OpenRouterClient
+from meta_harness.profiles import effective_turns
 from meta_harness.session import Session
 from meta_harness.voice import VoiceEngine
 from meta_harness.voice import missing_dependencies
@@ -1951,10 +1953,26 @@ class MainWindow(QMainWindow):
         """
         agent = Agent(
             root=self._root,
+            max_turns=self._turns(),
             session=Session(self._active_path()),
         )
         agent.tools.require_project_folder = True
         return agent
+
+    def _turns(self) -> int:
+        """Return the effective turn budget for the active model.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        int
+            Profile or default turn count.
+        """
+        client = OpenRouterClient()
+        return effective_turns(client.model, None)
 
     def _active_path(self) -> Path:
         """Return the active session transcript path.

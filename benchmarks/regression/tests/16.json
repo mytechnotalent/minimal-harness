@@ -1,0 +1,55 @@
+{
+  "id": "16_combined_error_detection",
+  "purpose": "Golden combined arithmetic and duplicate-prevention case. Verify the financial figures and the technical safeguards.",
+  "prompt_version": "reconstructed-from-listed-inputs",
+  "notes": "Original prompt wording is not available. Inputs, expected results, and failure conditions are the original values supplied in the development brief. Prompt text is reconstructed only to restate those inputs.",
+  "source": "Development brief, Tests 14 and 16, 2026-11-21",
+  "sequence": [
+    "Calculate the labor and savings for an automated request-processing system with duplicate submissions and retries. Inputs: 2,000 requests per month; 6 minutes of manual processing per request; labor cost $30 per hour; automation handles 60% of requests; human review handles 25% at 2 minutes each; manual processing handles 15%; subscription $500 per month. Also propose five safeguards against duplicate submissions and retries. Report current labor hours and cost, automated, reviewed, and manual request counts, post-automation labor hours and cost, labor hours saved, gross labor savings, net savings after subscription, and annualized net savings. For each safeguard, state what it guarantees and what it does not."
+  ],
+  "config": {
+    "model": "hy4-flash-free",
+    "max_turns": 24,
+    "temperature": 0.2,
+    "timeout": 240
+  },
+  "checks": [
+    {"type": "regex", "value": "(?i)200\\s*hours"},
+    {"type": "regex", "value": "(?i)6,?000"},
+    {"type": "regex", "value": "(?i)1,?200"},
+    {"type": "regex", "value": "(?i)500"},
+    {"type": "regex", "value": "(?i)300"},
+    {"type": "regex", "value": "(?i)16\\.67"},
+    {"type": "regex", "value": "(?i)30\\s*hours"},
+    {"type": "regex", "value": "(?i)46\\.67"},
+    {"type": "regex", "value": "(?i)1,?400"},
+    {"type": "regex", "value": "(?i)153\\.33"},
+    {"type": "regex", "value": "(?i)4,?600"},
+    {"type": "regex", "value": "(?i)4,?100"},
+    {"type": "regex", "value": "(?i)49,?200"},
+    {"type": "regex", "value": "(?i)idempoten|unique constraint|safeguard"},
+    {"type": "not_contains", "value": "guaranteed cash savings"}
+  ],
+  "expected_behaviors": [
+    "Current labor is 200 hours per month and $6,000 per month.",
+    "Automated, human-reviewed, and manual counts are 1,200, 500, and 300.",
+    "Human review labor is 16.67 hours and manual labor is 30 hours.",
+    "Post-automation labor is 46.67 hours per month and $1,400 per month.",
+    "Labor hours saved are 153.33 per month.",
+    "Gross labor savings are $4,600 per month.",
+    "Net savings after the $500 subscription are $4,100 per month.",
+    "Annualized net savings are $49,200 per year.",
+    "Each duplicate-prevention safeguard states what it guarantees and what it does not."
+  ],
+  "known_failures": [
+    "Materially incorrect totals.",
+    "A safeguard that does not prevent concurrent duplicates.",
+    "An unstable idempotency key.",
+    "Retrying a completed operation and repeating side effects."
+  ],
+  "rubric": {
+    "pass_threshold": 0.9,
+    "notes": "Any materially incorrect figure is a failure even if the score passes."
+  },
+  "history": []
+}
