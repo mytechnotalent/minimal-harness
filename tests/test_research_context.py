@@ -41,6 +41,8 @@ class ResearchContextTests(unittest.TestCase):
             Path(folder, "notes.txt").write_text("x")
             text = research_context(folder, True)
         self.assertIn("notes.txt", text)
+        self.assertIn("Snapshot taken at", text)
+        self.assertIn("HEAD:", text)
         self.assertNotIn("Recent commands conversation", text)
 
 

@@ -76,6 +76,7 @@ from .research.services import ResearchServices
 from .research.sources import SourceStore
 from .research.threads import ThreadStore
 from .research.tombstones import write_thread_tombstone
+from .research.transfers import TransferStore
 from .research_context import research_context
 from .research_workspace import ResearchWorkspace
 from .restored_history import RestoredHistoryDialog
@@ -399,6 +400,9 @@ class ChatPanel(QWidget):
     posted = Signal()
     heard = Signal(str)
     note_requested = Signal(str)
+    transfer_requested = Signal(str, str)
+    snapshot_toggled = Signal(bool)
+    tool_observed = Signal(str, dict, str)
 
     def __init__(
         self,
@@ -411,6 +415,7 @@ class ChatPanel(QWidget):
         voice_on: bool = False,
         theme: str = "classic",
         dark: bool = False,
+        transfer_label: str | None = None,
     ) -> None:
         """Build the panel and start its background worker.
 
@@ -434,6 +439,8 @@ class ChatPanel(QWidget):
             Active theme name (``classic`` or ``cyber``).
         dark : bool
             Whether the dark palette is active.
+        transfer_label : str or None
+            Optional label for the cross-window transfer action.
 
         Returns
         -------
@@ -441,7 +448,7 @@ class ChatPanel(QWidget):
             The panel is ready to show.
         """
         super().__init__()
-        self._agent = agent
+        self._agent, self._transfer_label = agent, transfer_label
         self._context = context
         self._show_tools = show_tools
         self._settings = settings
@@ -615,6 +622,7 @@ class ChatPanel(QWidget):
         """
         menu = self._log.createStandardContextMenu()
         self._add_note_action(menu)
+        self._add_transfer_action(menu)
         menu.exec(self._log.mapToGlobal(pos))
 
     def _add_note_action(self, menu):
@@ -637,6 +645,81 @@ class ChatPanel(QWidget):
         action.triggered.connect(
             lambda: self.note_requested.emit(cursor.selectedText())
         )
+
+    def _add_transfer_action(self, menu):
+        """Add a cross-window transfer action.
+
+        Parameters
+        ----------
+        menu : QMenu
+            Transcript context menu.
+
+        Returns
+        -------
+        None
+            The action is added when a label and text exist.
+        """
+        if not self._transfer_label:
+            return
+        cursor = self._log.textCursor()
+        text, kind = _cursor_text(cursor)
+        if not text:
+            return
+        action = menu.addAction(f"Send to {self._transfer_label}")
+        action.triggered.connect(lambda: self._transfer_text(text, kind))
+
+    def _transfer_text(self, text, kind):
+        """Emit a cross-window transfer request.
+
+        Parameters
+        ----------
+        text : str
+            Transferred text.
+        kind : str
+            Message or selection.
+
+        Returns
+        -------
+        None
+            The request signal is emitted.
+        """
+        self.transfer_requested.emit(text, kind)
+
+    def prefill(self, text):
+        """Place text in the composer without sending it.
+
+        Parameters
+        ----------
+        text : str
+            Draft text.
+
+        Returns
+        -------
+        None
+            The composer is updated.
+        """
+        self._input.setPlainText(text)
+        self._input.setFocus()
+
+    def set_snapshot_included(self, enabled):
+        """Set the snapshot toggle without emitting a change.
+
+        Parameters
+        ----------
+        enabled : bool
+            Whether the snapshot should be included.
+
+        Returns
+        -------
+        None
+            The toggle state is updated.
+        """
+        self._snapshot_included = bool(enabled)
+        if self._snapshot_toggle is None:
+            return
+        self._snapshot_toggle.blockSignals(True)
+        self._snapshot_toggle.setChecked(self._snapshot_included)
+        self._snapshot_toggle.blockSignals(False)
 
     def _build_input_row(self) -> None:
         """Create the input, talk, and send row.
@@ -997,6 +1080,7 @@ class ChatPanel(QWidget):
             The note flag is updated.
         """
         self._snapshot_included = state == Qt.CheckState.Checked.value
+        self.snapshot_toggled.emit(self._snapshot_included)
 
     def _build_voice(self) -> None:
         """Configure the voice controls for this environment.
@@ -1730,6 +1814,7 @@ class ChatPanel(QWidget):
         None
             Activity renders only when the toggle is on.
         """
+        self.tool_observed.emit(name, arguments, content)
         if not self._show_tools:
             return
         self._append_tool(name, arguments, content)
@@ -1879,9 +1964,8 @@ class MainWindow(QMainWindow):
         None
             Research stores are configured or disabled.
         """
-        self._thread_store = None
-        self._research_thread = None
-        self._restored_store = None
+        self._thread_store = self._research_thread = None
+        self._restored_store = self._transfer_store = None
         self._show_archived_threads = False
         self._reset_research_stores(root)
         self._services = ResearchServices(
@@ -1971,6 +2055,9 @@ class MainWindow(QMainWindow):
         """
         self._command_panel = self._make_command_panel()
         self._command_panel.posted.connect(self._on_posted)
+        self._command_panel.transfer_requested.connect(
+            self._transfer_to_research
+        )
 
     def _build_research_panel(self) -> None:
         """Create the research tab workspace.
@@ -1985,12 +2072,30 @@ class MainWindow(QMainWindow):
             The research workspace is ready.
         """
         self._research_panel = self._make_research_panel()
-        self._research_panel.posted.connect(self._on_research_posted)
-        self._research_panel.note_requested.connect(self._save_research_note)
+        self._wire_research_panel()
         self._research_workspace = ResearchWorkspace(
             self._research_panel, self._research_error
         )
         self._wire_research_workspace()
+
+    def _wire_research_panel(self) -> None:
+        """Connect research chat actions to window handlers.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Chat signals are connected.
+        """
+        panel = self._research_panel
+        panel.posted.connect(self._on_research_posted)
+        panel.note_requested.connect(self._save_research_note)
+        panel.transfer_requested.connect(self._transfer_to_primary)
+        panel.snapshot_toggled.connect(self._on_snapshot_toggled)
+        panel.tool_observed.connect(self._capture_source)
 
     def _wire_research_workspace(self) -> None:
         """Connect research tab actions to window handlers.
@@ -2072,9 +2177,9 @@ class MainWindow(QMainWindow):
         ChatPanel
             Panel for direct commands.
         """
-        return ChatPanel(
-            self._make_agent(self._active_path()), **self._panel_options()
-        )
+        options = self._panel_options()
+        options["transfer_label"] = "Research"
+        return ChatPanel(self._make_agent(self._active_path()), **options)
 
     def _make_research_panel(self):
         """Create the research chat panel.
@@ -2088,13 +2193,25 @@ class MainWindow(QMainWindow):
         ChatPanel
             Panel for research conversations.
         """
-        return ChatPanel(
-            self._make_research_agent(),
-            title="Research",
-            context=self._make_research_context,
-            show_snapshot_toggle=True,
-            **self._panel_options(),
-        )
+        agent = self._make_research_agent()
+        options = self._research_panel_options()
+        return _new_research_panel(agent, options, self._make_research_context)
+
+    def _research_panel_options(self) -> dict:
+        """Return research chat options including transfer label.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            Shared and research-specific panel options.
+        """
+        options = self._panel_options()
+        options["transfer_label"] = "Primary chat"
+        return options
 
     def _build_window(self) -> None:
         """Compose the window chrome and activate the first session.
@@ -2598,6 +2715,7 @@ class MainWindow(QMainWindow):
         """
         self._thread_store = ThreadStore(record.folder)
         self._restored_store = RestoredHistoryStore(record.folder)
+        self._transfer_store = TransferStore(record.folder)
         self._open_research_thread(self._thread_store.default())
         self._refresh_restored_button()
 
@@ -2616,6 +2734,9 @@ class MainWindow(QMainWindow):
         """
         self._research_thread = thread
         self._services.bind(self._record, thread)
+        self._research_panel.set_snapshot_included(
+            thread.get("snapshot_enabled", False)
+        )
         path = self._thread_store.transcript_path(thread["id"])
         self._research_panel.switch_session(Session(path))
         self._refresh_research_workspace()
@@ -3129,6 +3250,139 @@ class MainWindow(QMainWindow):
             return
         self._services.discard_proposal(proposal_id)
         self._refresh_research_workspace()
+
+    def _transfer_to_primary(self, text, kind) -> None:
+        """Send selected research text to the primary composer.
+
+        Parameters
+        ----------
+        text : str
+            Transferred text.
+        kind : str
+            Message or selection.
+
+        Returns
+        -------
+        None
+            The primary composer is prefilled and provenance recorded.
+        """
+        if self._transfer_store is None:
+            return
+        thread_id = _active_thread_id(self._research_thread)
+        self._transfer_store.append(
+            "research_to_primary", kind, text, source_thread_id=thread_id
+        )
+        self._command_panel.prefill(text)
+
+    def _transfer_to_research(self, text, kind) -> None:
+        """Send selected primary text to a chosen research thread.
+
+        Parameters
+        ----------
+        text : str
+            Transferred text.
+        kind : str
+            Message or selection.
+
+        Returns
+        -------
+        None
+            The research composer is prefilled and provenance recorded.
+        """
+        thread = self._choose_research_target()
+        if thread is None or self._transfer_store is None:
+            return
+        self._transfer_store.append(
+            "primary_to_research", kind, text, target_thread_id=thread["id"]
+        )
+        self._open_research_thread(thread)
+        self._research_panel.prefill(text)
+
+    def _choose_research_target(self):
+        """Choose or create a research thread for a transfer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict or None
+            Chosen thread.
+        """
+        if self._thread_store is None:
+            return None
+        threads = self._thread_store.list()
+        if not threads:
+            return self._thread_store.create()
+        if len(threads) == 1:
+            return threads[0]
+        return self._pick_thread(threads)
+
+    def _pick_thread(self, threads):
+        """Ask which research thread should receive a transfer.
+
+        Parameters
+        ----------
+        threads : list
+            Active thread metadata.
+
+        Returns
+        -------
+        dict or None
+            Chosen thread, or ``None`` when cancelled.
+        """
+        labels = [thread.get("title") or thread["id"] for thread in threads]
+        label, ok = QInputDialog.getItem(
+            self, "Send to research", "Thread:", labels, 0, False
+        )
+        if not ok:
+            return None
+        return threads[labels.index(label)]
+
+    def _on_snapshot_toggled(self, enabled) -> None:
+        """Persist the per-thread snapshot toggle.
+
+        Parameters
+        ----------
+        enabled : bool
+            Whether the workspace snapshot is included.
+
+        Returns
+        -------
+        None
+            Thread metadata is updated.
+        """
+        if self._thread_store is None or self._research_thread is None:
+            return
+        self._research_thread = self._thread_store.update(
+            self._research_thread["id"], snapshot_enabled=enabled
+        )
+
+    def _capture_source(self, name, arguments, content) -> None:
+        """Capture web tool results as structured sources.
+
+        Parameters
+        ----------
+        name : str
+            Tool name.
+        arguments : dict
+            Tool arguments.
+        content : str
+            Serialized tool result.
+
+        Returns
+        -------
+        None
+            New sources are stored when relevant.
+        """
+        if self._source_store is None or self._services.scope is None:
+            return
+        data = _parse_tool_json(content)
+        if name == "web_search":
+            _capture_search(self._source_store, self._services.scope, data)
+        elif name in ("browser_open", "browser_assert", "evidence_capture"):
+            _capture_page(self._source_store, self._services.scope, data)
 
     def _on_research_posted(self) -> None:
         """Touch the active research thread after a message.
@@ -3940,6 +4194,110 @@ def _thread_lifecycle_signals(window):
     )
 
 
+def _active_thread_id(thread):
+    """Return the active research thread identifier.
+
+    Parameters
+    ----------
+    thread : dict or None
+        Active thread metadata.
+
+    Returns
+    -------
+    str or None
+        Thread identifier.
+    """
+    return thread["id"] if thread else None
+
+
+def _parse_tool_json(content):
+    """Parse serialized tool output without raising.
+
+    Parameters
+    ----------
+    content : str
+        Tool result text.
+
+    Returns
+    -------
+    object
+        Parsed value or ``None``.
+    """
+    try:
+        return json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def _capture_search(store, scope, data):
+    """Store search result pages as sources.
+
+    Parameters
+    ----------
+    store : SourceStore
+        Source store.
+    scope : dict
+        Research scope.
+    data : object
+        Parsed search results.
+
+    Returns
+    -------
+    None
+        Valid results are stored.
+    """
+    if not isinstance(data, list):
+        return
+    for item in data:
+        if isinstance(item, dict) and item.get("url"):
+            _store_source(store, scope, item)
+
+
+def _capture_page(store, scope, data):
+    """Store one opened page as a source.
+
+    Parameters
+    ----------
+    store : SourceStore
+        Source store.
+    scope : dict
+        Research scope.
+    data : object
+        Parsed page result.
+
+    Returns
+    -------
+    None
+        The page is stored when it has a URL.
+    """
+    if isinstance(data, dict) and data.get("url"):
+        _store_source(store, scope, data)
+
+
+def _store_source(store, scope, item):
+    """Store one tool result as a source, ignoring invalid URLs.
+
+    Parameters
+    ----------
+    store : SourceStore
+        Source store.
+    scope : dict
+        Research scope.
+    item : dict
+        Tool result mapping.
+
+    Returns
+    -------
+    None
+        The source is stored when the URL is valid.
+    """
+    excerpt = item.get("snippet") or str(item.get("text", ""))[:500]
+    try:
+        store.add(scope, item["url"], item.get("title", ""), excerpt)
+    except (KeyError, ValueError):
+        return
+
+
 def _record_ids(records):
     """Return identifiers from a list of record mappings.
 
@@ -3954,6 +4312,24 @@ def _record_ids(records):
         Record identifiers.
     """
     return [record["id"] for record in records]
+
+
+def _cursor_text(cursor):
+    """Return selected text or the current block as message text.
+
+    Parameters
+    ----------
+    cursor : QTextCursor
+        Transcript cursor.
+
+    Returns
+    -------
+    tuple
+        Text and transfer kind.
+    """
+    if cursor.hasSelection():
+        return cursor.selectedText().strip(), "selection"
+    return cursor.block().text().strip(), "message"
 
 
 def _note_title(body):
@@ -3993,6 +4369,32 @@ def _selection_origin(body):
         "excerpt": body[:500],
         "captured_at": time.time(),
     }
+
+
+def _new_research_panel(agent, options, context):
+    """Build the research chat panel.
+
+    Parameters
+    ----------
+    agent : Agent
+        Research agent.
+    options : dict
+        Shared panel options.
+    context : collections.abc.Callable
+        Research context builder.
+
+    Returns
+    -------
+    ChatPanel
+        Configured research panel.
+    """
+    return ChatPanel(
+        agent,
+        title="Research",
+        context=context,
+        show_snapshot_toggle=True,
+        **options,
+    )
 
 
 def _agent_options(root, path, prompt, tools):

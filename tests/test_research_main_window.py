@@ -183,6 +183,64 @@ class MainWindowResearchTests(unittest.TestCase):
         tombstone = window._research_root / "tombstones" / "threads"
         _assert_survived(self, window, note, tombstone, thread_id)
 
+    def test_transfer_prefills_target_composer(self) -> None:
+        """Prefill the destination composer and record provenance.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The draft and transfer record are present.
+        """
+        window = self.window
+        window._transfer_to_primary("research text", "selection")
+        records = window._transfer_store.list()
+        self.assertEqual(
+            window._command_panel._input.toPlainText(), "research text"
+        )
+        self.assertEqual(records[0]["direction"], "research_to_primary")
+
+    def test_web_search_results_are_captured_as_sources(self) -> None:
+        """Store search results in the source store.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            One source is captured.
+        """
+        window = self.window
+        content = '[{"url": "https://example.com", "title": "E"}]'
+        window._capture_source("web_search", {}, content)
+        self.assertEqual(
+            len(window._source_store.list(window._record.session_id)), 1
+        )
+
+    def test_snapshot_toggle_is_persisted_per_thread(self) -> None:
+        """Store the snapshot toggle on the active thread.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Thread metadata reflects the setting.
+        """
+        window = self.window
+        window._on_snapshot_toggled(True)
+        thread_id = window._research_thread["id"]
+        self.assertTrue(
+            window._thread_store.get(thread_id)["snapshot_enabled"]
+        )
+
     def test_research_is_independent_from_primary(self) -> None:
         """Keep transcripts, prompts, and thread selection separate.
 

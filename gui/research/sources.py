@@ -344,10 +344,11 @@ def _facts_scope(scope, canonical):
     dict
         Scope fields.
     """
+    title = scope.get("thread_title") or scope.get("thread_title_snapshot", "")
     return {
         "session_id": scope["session_id"],
         "thread_id": scope["thread_id"],
-        "thread_title": scope["thread_title"],
+        "thread_title": title,
         "url": canonical,
     }
 
