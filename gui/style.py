@@ -1,6 +1,11 @@
 """Color palette and stylesheet for the Minimal Harness desktop shell."""
 
-from PySide6.QtWidgets import QApplication
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from PySide6.QtWidgets import QApplication
 
 DOMINANT = "#11302A"
 SECONDARY = "#AFB4AD"
