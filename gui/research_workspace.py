@@ -32,6 +32,7 @@ class ResearchWorkspace(QWidget):
     revisions_requested = Signal(str)
     proposal_save_requested = Signal(str)
     proposal_discard_requested = Signal(str)
+    help_requested = Signal()
 
     def __init__(self, chat, storage_error=None):
         """Build the four research tabs around an existing chat panel.
@@ -53,6 +54,7 @@ class ResearchWorkspace(QWidget):
         self._notes, self._all_notes = [], []
         self._sources, self._all_sources = [], []
         self._proposals = []
+        self._project_name = ""
         self._build_layout()
         self.set_storage_error(storage_error)
 
@@ -72,7 +74,90 @@ class ResearchWorkspace(QWidget):
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._tabs = QTabWidget(self)
         self._add_tabs()
+        self._layout.addLayout(self._header_row())
         self._layout.addWidget(self._tabs)
+
+    def _header_row(self):
+        """Build the persistent Research Desk header.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        QHBoxLayout
+            Header row with the title and help button.
+        """
+        row = QHBoxLayout()
+        row.addWidget(self._title_widget())
+        row.addStretch(1)
+        row.addWidget(self._help_widget())
+        return row
+
+    def _title_widget(self):
+        """Build the Research Desk title label.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        QLabel
+            Header title label.
+        """
+        self._title_label = QLabel(_header_text(self._project_name), self)
+        self._title_label.setObjectName("researchDeskHeader")
+        return self._title_label
+
+    def _help_widget(self):
+        """Build the header help button.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        QPushButton
+            Button that reopens the introduction.
+        """
+        self._help_button = QPushButton("?", self)
+        self._help_button.setFixedWidth(28)
+        self._help_button.setToolTip("About Research Desk")
+        self._help_button.clicked.connect(self._request_help)
+        return self._help_button
+
+    def _request_help(self):
+        """Request the Research Desk introduction.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The help signal is emitted.
+        """
+        self.help_requested.emit()
+
+    def set_project_name(self, name):
+        """Update the project shown in the header.
+
+        Parameters
+        ----------
+        name : str or None
+            Current project name.
+
+        Returns
+        -------
+        None
+            The header label is updated.
+        """
+        self._project_name = name or ""
+        self._title_label.setText(_header_text(self._project_name))
 
     def _add_tabs(self):
         """Add the four research tabs in display order.
@@ -910,3 +995,21 @@ def _source_text(source):
     title = source.get("title") or source.get("url", "")
     parts = [f"**{title}**", source.get("url", ""), source.get("excerpt", "")]
     return "\n\n".join(part for part in parts if part)
+
+
+def _header_text(name):
+    """Build the Research Desk header text.
+
+    Parameters
+    ----------
+    name : str
+        Current project name.
+
+    Returns
+    -------
+    str
+        Header text.
+    """
+    if not name:
+        return "Research Desk"
+    return f"Research Desk \u00b7 {name}"

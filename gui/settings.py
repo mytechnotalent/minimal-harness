@@ -12,7 +12,9 @@ class Settings:
         "show_tools": False,
         "speak_replies": True,
         "dark_mode": False,
+        "unwise_mode": False,
         "workspace": "",
+        "research_desk_welcome_seen": False,
     }
 
     def __init__(self, path: Path | str = "runs/gui-settings.json") -> None:

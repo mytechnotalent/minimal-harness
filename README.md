@@ -395,6 +395,33 @@ the default voice is the female `en-US-AriaNeural` (override with
 macOS and Windows prompt for microphone permission the first time. On Linux,
 ensure PortAudio is installed (for example `sudo apt install libportaudio2`).
 
+### Research Desk
+
+The desktop shell includes a per-project Research Desk alongside Primary Chat.
+Open it with the **Research Desk** button. Each project has its own threads,
+notes, sources, evidence, transfers, and restored histories. The research
+agent can read project materials and approved sources, but it cannot modify
+project files.
+
+- **Threads** keep separate research conversations.
+- **Chat** investigates ideas with the read-only research agent.
+- **Notes** store findings with revision history.
+- **Sources** collect URLs, excerpts, and captured evidence.
+- **Transfers** deliberately move messages or selections between Primary Chat
+  and Research Desk; nothing is shared automatically.
+
+Deleting a session offers **Archive research**, **Delete all**, or **Cancel**.
+Archives are verified before restore, can be restored into a new or existing
+session, and can be purged separately from live session deletion. Interrupted
+archive, restore, and purge operations resume or roll back at startup.
+
+The first open shows a welcome introduction. The `?` button in the Research
+Desk header reopens it at any time.
+
+The classic interface offers Light, Dark (psycho), and **Unwise** appearance
+options. Unwise Mode renders the window at 50 percent opacity and is reversible
+without losing the light or dark palette choice.
+
 ### macOS app bundle
 
 Build and install the real `.app` so the Dock and menu bar say **Minimal

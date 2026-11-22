@@ -32,6 +32,7 @@ from PySide6.QtWidgets import QFileDialog
 from PySide6.QtWidgets import QHBoxLayout
 from PySide6.QtWidgets import QInputDialog
 from PySide6.QtWidgets import QFrame
+from PySide6.QtWidgets import QGraphicsOpacityEffect
 from PySide6.QtWidgets import QLabel
 from PySide6.QtWidgets import QLineEdit
 from PySide6.QtWidgets import QListWidget
@@ -80,6 +81,7 @@ from .research.threads import ThreadStore
 from .research.tombstones import write_thread_tombstone
 from .research.transfers import TransferStore
 from .research_context import research_context
+from .research_welcome import ResearchWelcomeDialog
 from .research_workspace import ResearchWorkspace
 from .restored_history import RestoredHistoryDialog
 from .settings import Settings
@@ -1951,7 +1953,23 @@ class MainWindow(QMainWindow):
         self._voice_on = voice_enabled()
         self._theme = ui_mode()
         self._record: SessionRecord | None = None
+        self._enable_wayland_transparency()
         self._configure_research(root)
+
+    def _enable_wayland_transparency(self) -> None:
+        """Allow opacity effects on a Wayland window surface.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The translucent attribute is enabled on Wayland.
+        """
+        if _window_platform() == "wayland":
+            self.setAttribute(Qt.WA_TranslucentBackground, True)
 
     def _configure_research(self, root) -> None:
         """Prepare session-local and global research stores.
@@ -2115,6 +2133,7 @@ class MainWindow(QMainWindow):
         self._research_workspace = ResearchWorkspace(
             self._research_panel, self._research_error
         )
+        self._research_workspace.set_project_name(_project_name(self._root))
         self._wire_research_workspace()
 
     def _wire_research_panel(self) -> None:
@@ -2150,6 +2169,9 @@ class MainWindow(QMainWindow):
         """
         self._wire_thread_workspace()
         self._wire_note_workspace()
+        self._research_workspace.help_requested.connect(
+            self._show_research_welcome
+        )
 
     def _wire_thread_workspace(self) -> None:
         """Connect thread selection and lifecycle actions.
@@ -2957,6 +2979,7 @@ class MainWindow(QMainWindow):
         """
         if self._thread_store is None:
             return
+        self._research_workspace.set_project_name(_project_name(self._root))
         active = self._research_thread["id"]
         self._refresh_thread_list(active)
         self._research_workspace.set_notes(self._session_notes())
@@ -3744,6 +3767,7 @@ class MainWindow(QMainWindow):
         for label, key, slot in _toggle_specs(self):
             bar.addWidget(_toggle_box(self, label, key, slot))
         bar.addWidget(self._dark_mode_button())
+        bar.addWidget(self._unwise_button())
         bar.addWidget(self._restored_button())
 
     def _restored_button(self) -> QPushButton:
@@ -3920,6 +3944,78 @@ class MainWindow(QMainWindow):
         self._sync_dark_button()
         return self._dark_button
 
+    def _unwise_button(self) -> QPushButton:
+        """Create the 50 percent opacity Unwise Mode toggle.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        QPushButton
+            Checkable button that applies or removes 50 percent opacity.
+        """
+        self._unwise_button = QPushButton("Unwise", self)
+        self._unwise_button.setCheckable(True)
+        self._unwise_button.setChecked(bool(self._settings.get("unwise_mode")))
+        self._unwise_button.toggled.connect(self._on_unwise_mode)
+        self._apply_unwise(self._unwise_button.isChecked())
+        return self._unwise_button
+
+    def _on_unwise_mode(self, checked: bool) -> None:
+        """Persist and apply Unwise Mode.
+
+        Parameters
+        ----------
+        checked : bool
+            Whether Unwise Mode is enabled.
+
+        Returns
+        -------
+        None
+            The window opacity and setting update.
+        """
+        self._settings.set("unwise_mode", checked)
+        self._apply_unwise(checked)
+
+    def _apply_unwise(self, enabled: bool) -> None:
+        """Apply or remove the Unwise Mode window opacity.
+
+        Parameters
+        ----------
+        enabled : bool
+            Whether 50 percent opacity should be applied.
+
+        Returns
+        -------
+        None
+            The window opacity is updated.
+        """
+        if _window_platform() == "wayland":
+            self._apply_unwise_effect(enabled)
+        else:
+            self.setWindowOpacity(0.5 if enabled else 1.0)
+        self._unwise_button.setToolTip(_unwise_hint(enabled))
+
+    def _apply_unwise_effect(self, enabled: bool) -> None:
+        """Apply 50 percent opacity with a graphics effect on Wayland.
+
+        Parameters
+        ----------
+        enabled : bool
+            Whether 50 percent opacity should be applied.
+
+        Returns
+        -------
+        None
+            The graphics effect and translucent attribute update.
+        """
+        effect = QGraphicsOpacityEffect(self) if enabled else None
+        if effect is not None:
+            effect.setOpacity(0.5)
+        self.setGraphicsEffect(effect)
+
     def _toggle_dark_mode(self) -> None:
         """Flip the palette between light and dark mode.
 
@@ -3966,7 +4062,7 @@ class MainWindow(QMainWindow):
         QPushButton
             Button that opens or closes the research panel.
         """
-        self._toggle = QPushButton("Open Research", self)
+        self._toggle = QPushButton("Research Desk", self)
         self._toggle.clicked.connect(self.toggle_research)
         return self._toggle
 
@@ -4105,10 +4201,43 @@ class MainWindow(QMainWindow):
         """
         if self._research_card.isVisible():
             self._research_card.hide()
-            self._toggle.setText("Open Research")
+            self._toggle.setText("Research Desk")
         else:
             self._research_card.show()
-            self._toggle.setText("Close Research")
+            self._toggle.setText("Close Research Desk")
+            self._maybe_show_research_welcome()
+
+    def _maybe_show_research_welcome(self):
+        """Show the introduction once, before it has been dismissed.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The dialog is shown only on first use.
+        """
+        if self._settings.get("research_desk_welcome_seen"):
+            return
+        self._show_research_welcome()
+
+    def _show_research_welcome(self):
+        """Open the Research Desk introduction and mark it seen.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The dialog runs until closed.
+        """
+        dialog = ResearchWelcomeDialog(self)
+        dialog.exec()
+        self._settings.set("research_desk_welcome_seen", True)
 
     def _card(self, panel: QWidget) -> QWidget:
         """Wrap a panel in a buffered card container.
@@ -4786,6 +4915,57 @@ def _research_tool_options(services):
         "note_revision_sink": services.propose_revision,
         "evidence_sink": services.capture_evidence,
     }
+
+
+def _window_platform():
+    """Return the active Qt platform plugin name.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        Platform name, or an empty string without an application.
+    """
+    app = QApplication.instance()
+    return app.platformName() if app is not None else ""
+
+
+def _unwise_hint(enabled):
+    """Build the Unwise Mode tooltip.
+
+    Parameters
+    ----------
+    enabled : bool
+        Whether Unwise Mode is active.
+
+    Returns
+    -------
+    str
+        Tooltip text.
+    """
+    if enabled:
+        return "Restore full opacity"
+    return "Apply 50 percent opacity"
+
+
+def _project_name(root):
+    """Return the current project folder name.
+
+    Parameters
+    ----------
+    root : pathlib.Path or str
+        Workspace root.
+
+    Returns
+    -------
+    str
+        Project name.
+    """
+    name = Path(root).name
+    return name or str(root)
 
 
 def _make_archive_service(root, sessions_root):
