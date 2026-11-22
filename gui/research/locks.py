@@ -231,11 +231,29 @@ def _alive(pid):
         ``True`` when the process exists.
     """
     try:
-        os.kill(pid, 0)
+        return _probe_process(pid)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    except OSError:
+        return False
+
+
+def _probe_process(pid):
+    """Probe one process without handling platform errors.
+
+    Parameters
+    ----------
+    pid : int
+        Process identifier.
+
+    Returns
+    -------
+    bool
+        ``True`` when the probe succeeds.
+    """
+    os.kill(pid, 0)
     return True
 
 

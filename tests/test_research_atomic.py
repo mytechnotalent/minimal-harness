@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from gui.research.atomic import read_json
 from gui.research.atomic import rename_atomic
@@ -11,6 +12,28 @@ from gui.research.atomic import write_json_atomic
 from gui.research.hashing import hash_json
 from gui.research.hashing import sha256_file
 from gui.research.hashing import sha256_text
+
+
+def _rename_without_sync(folder):
+    """Rename a file with directory syncing disabled.
+
+    Parameters
+    ----------
+    folder : str
+        Temporary folder.
+
+    Returns
+    -------
+    tuple
+        Target path and the patched ``os.open`` mock.
+    """
+    source = Path(folder) / "a.txt"
+    target = Path(folder) / "b.txt"
+    source.write_text("value")
+    with patch("gui.research.atomic._can_sync_directory", return_value=False):
+        with patch("gui.research.atomic.os.open") as open_mock:
+            rename_atomic(source, target)
+    return target, open_mock
 
 
 class AtomicWriteTests(unittest.TestCase):
@@ -86,6 +109,23 @@ class AtomicWriteTests(unittest.TestCase):
             source.write_text("value")
             rename_atomic(source, target)
             self.assertFalse(source.exists())
+            self.assertEqual(target.read_text(), "value")
+
+    def test_windows_directory_sync_is_skipped(self) -> None:
+        """Skip directory fsync where Windows cannot open directories.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The rename succeeds without opening the directory.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            target, open_mock = _rename_without_sync(folder)
+            self.assertFalse(open_mock.called)
             self.assertEqual(target.read_text(), "value")
 
     def test_hash_helpers_are_stable(self) -> None:

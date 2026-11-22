@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from gui.research.journal import Journal
 from gui.research.locks import LockError
@@ -66,6 +67,25 @@ class OperationLockTests(unittest.TestCase):
             path.write_text(json.dumps({"pid": 999999, "operation": "old"}))
             with OperationLock(path):
                 self.assertTrue(path.exists())
+
+    def test_invalid_process_error_is_stale(self) -> None:
+        """Reclaim a lock when the platform rejects the PID check.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            A new lock can be acquired.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "lock"
+            path.write_text(json.dumps({"pid": 1234, "operation": "old"}))
+            with patch("gui.research.locks.os.kill", side_effect=OSError):
+                with OperationLock(path):
+                    self.assertTrue(path.exists())
 
     def test_malformed_lock_is_removed(self) -> None:
         """Reclaim a lock file that cannot be decoded.

@@ -168,6 +168,21 @@ def _discard(path):
         return
 
 
+def _can_sync_directory():
+    """Return whether directory fsync is supported here.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    bool
+        ``False`` on Windows, where directories cannot be opened this way.
+    """
+    return os.name != "nt"
+
+
 def _sync_dir(path):
     """Flush a directory entry to disk.
 
@@ -181,6 +196,8 @@ def _sync_dir(path):
     None
         The directory metadata is flushed.
     """
+    if not _can_sync_directory():
+        return
     handle = os.open(path, os.O_RDONLY)
     try:
         os.fsync(handle)
