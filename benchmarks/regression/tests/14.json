@@ -1,0 +1,54 @@
+{
+  "id": "14_arithmetic_verification",
+  "purpose": "Golden arithmetic and labor-savings case. Verify independent recalculation and the distinction between released capacity and cash.",
+  "prompt_version": "reconstructed-from-listed-inputs",
+  "notes": "Original prompt wording is not available. Inputs, expected results, and failure conditions are the original values supplied in the development brief. Prompt text is reconstructed only to restate those inputs.",
+  "source": "Development brief, Tests 14 and 16, 2026-11-21",
+  "sequence": [
+    "Calculate the labor and savings for an automated request-processing system. Inputs: 10,000 requests per month; 8 minutes of manual processing per request; labor cost $25 per hour; automation handles 70% of requests; human review handles 20% at 3 minutes each; manual processing handles 10%; subscription $400 per month. Report current labor hours and cost, post-automation labor hours and cost, labor hours saved, gross labor savings, net savings after subscription, and annualized net savings. Distinguish released labor capacity from actual cash savings."
+  ],
+  "config": {
+    "model": "hy4-flash-free",
+    "max_turns": 24,
+    "temperature": 0.2,
+    "timeout": 240
+  },
+  "checks": [
+    {"type": "regex", "value": "(?i)1,?333\\.33"},
+    {"type": "regex", "value": "(?i)33,?333\\.33"},
+    {"type": "regex", "value": "(?i)233\\.33"},
+    {"type": "regex", "value": "(?i)5,?833\\.33"},
+    {"type": "regex", "value": "(?i)1,?100"},
+    {"type": "regex", "value": "(?i)27,?500"},
+    {"type": "regex", "value": "(?i)27,?100"},
+    {"type": "regex", "value": "(?i)325,?200"},
+    {"type": "regex", "value": "(?i)released capacity|capacity.*cash|cash.*capacity"},
+    {"type": "not_contains", "value": "guaranteed cash savings"}
+  ],
+  "expected_behaviors": [
+    "Current labor is 1,333.33 hours per month and $33,333.33 per month.",
+    "Post-automation labor is 233.33 hours per month and $5,833.33 per month.",
+    "Labor hours saved are 1,100 per month.",
+    "Gross labor savings are $27,500 per month.",
+    "Net savings after the $400 subscription are $27,100 per month.",
+    "Annualized net savings are $325,200 per year.",
+    "Released labor capacity is distinguished from actual cash savings."
+  ],
+  "known_failures": [
+    "Materially incorrect totals.",
+    "Missing assumptions.",
+    "Presenting labor efficiency as guaranteed cash savings."
+  ],
+  "rubric": {
+    "pass_threshold": 0.9,
+    "notes": "Any materially incorrect figure is a failure even if the score passes."
+  },
+  "history": [
+    {
+      "date": "2026-11-21",
+      "score": 100,
+      "source": "Phase 2 test report",
+      "notes": "Historical evaluator score. Not produced by this regression runner."
+    }
+  ]
+}

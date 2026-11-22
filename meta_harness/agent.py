@@ -8,16 +8,22 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 from ._json_util import json_value
+from .deliverables import deliverable_issues
 from .invariants import relevant_invariants
 from .ledger import ledger_issues
+from .ledger import limit_issues
 from .ledger import needs_ledger
 from .openrouter import OpenRouterClient
 from .profiles import profile_for
 from .prompts import load as _load_prompt
+from .requirements import needs_requirements
+from .requirements import requirement_issues
 from .session import Session
 from .sandbox import TestSandbox
 from .task_evaluator import run_workspace_tests
@@ -247,7 +253,24 @@ class Agent:
         self._mutated = False
         self._nudged = False
         self._workspace_before: dict[str, tuple[int, int]] | None = None
+        self._init_execution_state()
         self.review_events: list[dict[str, Any]] = []
+
+    def _init_execution_state(self) -> None:
+        """Initialize the execution trace and task boundary.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Trace, task id, and task start are initialized.
+        """
+        self._trace: list[dict[str, Any]] = []
+        self._task_id = ""
+        self._task_start = 0
 
     def _begin_run(self, prompt: str) -> None:
         """Reset run state and append the user turn.
@@ -264,7 +287,10 @@ class Agent:
         """
         self._mutated = False
         self._workspace_before = None
+        self._trace = []
+        self._task_id = uuid.uuid4().hex[:8]
         self.review_events = []
+        self._task_start = len(self.messages)
         self._append({"role": "user", "content": prompt})
         self._trim_system(prompt)
 
@@ -638,9 +664,33 @@ class Agent:
         if not self._review_enabled(answer):
             self._record_review("skipped", "disabled")
             return answer
+        if _is_turn_limit(answer, self.max_turns):
+            self._record_review("skipped", "turn_limit")
+            return answer
+        return self._reviewed(prompt, answer)
+
+    def _reviewed(self, prompt: str, answer: str) -> str:
+        """Run deterministic checks and the adversarial answer review.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        str
+            Reviewed answer.
+        """
+        self._mark_trace_usage(answer)
         verification = self._verify_ledger(prompt, answer)
         invariants = self._invariant_review(prompt, answer)
-        return self._review_answer(prompt, answer, verification, invariants)
+        requirements = self._requirement_review(prompt, answer)
+        return self._review_answer(
+            prompt, answer, verification, invariants, requirements
+        )
 
     def _review_answer(
         self,
@@ -648,6 +698,7 @@ class Agent:
         answer: str,
         verification: dict | None = None,
         invariants: dict | None = None,
+        requirements: dict | None = None,
     ) -> str:
         """Adversarially review and possibly revise a final answer.
 
@@ -661,6 +712,8 @@ class Agent:
             Deterministic ledger findings.
         invariants : dict or None
             Technical invariant findings.
+        requirements : dict or None
+            Requirement-state findings.
 
         Returns
         -------
@@ -670,7 +723,41 @@ class Agent:
         if not self._review_enabled(answer):
             self._record_review("skipped", "disabled")
             return answer
-        review = self._answer_review(prompt, answer, verification, invariants)
+        return self._apply_verdict(
+            prompt, answer, verification, invariants, requirements
+        )
+
+    def _apply_verdict(
+        self,
+        prompt: str,
+        answer: str,
+        verification: dict | None,
+        invariants: dict | None,
+        requirements: dict | None,
+    ) -> str:
+        """Apply the adversarial review verdict to an answer.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft final answer.
+        verification : dict or None
+            Deterministic ledger findings.
+        invariants : dict or None
+            Technical invariant findings.
+        requirements : dict or None
+            Requirement-state findings.
+
+        Returns
+        -------
+        str
+            Approved answer or a revised answer.
+        """
+        review = self._answer_review(
+            prompt, answer, verification, invariants, requirements
+        )
         if not review:
             return answer
         return self._apply_review(answer, review)
@@ -715,11 +802,11 @@ class Agent:
         if not self._ledger_enabled(prompt, answer):
             return None
         ledger = self._ledger_data(prompt, answer)
-        if ledger is None:
+        issues = _verification_issues(prompt, answer, ledger)
+        if ledger is None and not issues:
             return None
-        issues = ledger_issues(ledger)
         self._record_ledger(issues)
-        return {**ledger, "issues": issues}
+        return {**(ledger or {}), "issues": issues}
 
     def _ledger_data(self, prompt: str, answer: str) -> dict | None:
         """Request and decode the ledger for one answer.
@@ -784,6 +871,181 @@ class Agent:
         """
         reason = "mismatch" if issues else "ok"
         self._record_review("ledger", reason, issues=issues)
+
+    def _requirement_enabled(self, prompt: str) -> bool:
+        """Return whether requirement extraction should run.
+
+        Parameters
+        ----------
+        prompt : str
+            Current user question.
+
+        Returns
+        -------
+        bool
+            ``True`` when configured and the task needs it.
+        """
+        mode = _requirement_mode()
+        if mode == "off" or not hasattr(self.client, "complete"):
+            return False
+        if mode == "on":
+            return True
+        return needs_requirements(prompt, self._requirement_history())
+
+    def _requirement_history(self) -> list[str]:
+        """Return prior user requests for requirement extraction.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        list of str
+            Up to eight earlier requests, each bounded.
+        """
+        history = [
+            str(message.get("content") or "")[:2000]
+            for message in self.messages[: self._task_start]
+            if message.get("role") == "user"
+        ]
+        return history[-8:]
+
+    def _requirement_review(self, prompt: str, answer: str) -> dict | None:
+        """Extract requirement states and contradiction issues.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        dict or None
+            Requirement findings, or ``None`` when skipped.
+        """
+        if not self._requirement_enabled(prompt):
+            return None
+        history = self._requirement_history()
+        return self._requirement_result(prompt, answer, history)
+
+    def _requirement_result(
+        self, prompt: str, answer: str, history: list[str]
+    ) -> dict | None:
+        """Return requirement findings for one answer.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+        history : list of str
+            Earlier user requests.
+
+        Returns
+        -------
+        dict or None
+            Requirement findings, or ``None`` when unavailable.
+        """
+        ledger = self._requirement_data(prompt, answer, history)
+        if ledger is None:
+            return None
+        issues = requirement_issues(ledger)
+        self._record_requirements(issues)
+        return {**ledger, "issues": issues}
+
+    def _requirement_data(
+        self, prompt: str, answer: str, history: list[str]
+    ) -> dict | None:
+        """Request and decode the requirement extraction.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+        history : list of str
+            Earlier user requests.
+
+        Returns
+        -------
+        dict or None
+            Decoded ledger, or ``None`` when unavailable.
+        """
+        raw = self._requirement_raw(prompt, answer, history)
+        if not raw:
+            return None
+        return self._requirement_decoded(raw)
+
+    def _requirement_decoded(self, raw: str) -> dict | None:
+        """Decode and screen a requirement extraction.
+
+        Parameters
+        ----------
+        raw : str
+            Raw extractor response.
+
+        Returns
+        -------
+        dict or None
+            Decoded ledger, or ``None`` when unavailable.
+        """
+        value = _ledger_value(raw)
+        if value is None:
+            self._record_review("requirements", "invalid")
+            return None
+        if value.get("applies") is False:
+            self._record_review("requirements", "not_applicable")
+            return None
+        return value
+
+    def _requirement_raw(
+        self, prompt: str, answer: str, history: list[str]
+    ) -> str:
+        """Request the raw requirement extraction.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+        history : list of str
+            Earlier user requests.
+
+        Returns
+        -------
+        str
+            Raw extraction response, or an empty string on failure.
+        """
+        context = _requirement_context(history, prompt, answer)
+        try:
+            return self._review_with_timeout(
+                _load_prompt("requirements_reviewer"), context
+            )
+        except Exception as exc:
+            self._record_review("requirements", "error", detail=str(exc))
+            return ""
+
+    def _record_requirements(self, issues: list[str]) -> None:
+        """Record one requirement decision.
+
+        Parameters
+        ----------
+        issues : list of str
+            Deterministic issues.
+
+        Returns
+        -------
+        None
+            The event is stored and optionally logged.
+        """
+        reason = "conflict" if issues else "ok"
+        self._record_review("requirements", reason, issues=issues)
 
     def _invariant_enabled(self) -> bool:
         """Return whether invariant checks are configured.
@@ -938,14 +1200,16 @@ class Agent:
         blocking = _blocking_review(review, mode)
         revised = review.get("revised_answer")
         if _allow_revision(mode, answer, revised, blocking):
-            return self._revised_review(revised, mode)
+            return self._revised_review(answer, revised, mode)
         return self._kept_review(answer, mode, blocking)
 
-    def _revised_review(self, revised: str, mode: str) -> str:
+    def _revised_review(self, original: str, revised: str, mode: str) -> str:
         """Record and return a reviewer replacement.
 
         Parameters
         ----------
+        original : str
+            Draft answer before review.
         revised : str
             Replacement answer.
         mode : str
@@ -956,8 +1220,11 @@ class Agent:
         str
             Replacement answer text.
         """
-        self._record_review("engaged", "revised", mode=mode)
-        return str(revised).strip()
+        text = str(revised).strip()
+        self._record_review(
+            "engaged", "revised", mode=mode, original=original, revised=text
+        )
+        return text
 
     def _kept_review(self, answer: str, mode: str, blocking: bool) -> str:
         """Record and return the original answer.
@@ -1051,6 +1318,7 @@ class Agent:
         answer: str,
         verification: dict | None = None,
         invariants: dict | None = None,
+        requirements: dict | None = None,
     ) -> dict:
         """Request one structured answer review.
 
@@ -1064,6 +1332,8 @@ class Agent:
             Deterministic ledger findings.
         invariants : dict or None
             Technical invariant findings.
+        requirements : dict or None
+            Requirement-state findings.
 
         Returns
         -------
@@ -1071,7 +1341,9 @@ class Agent:
             Decoded review, or an empty dict on failure.
         """
         try:
-            raw = self._review_raw(prompt, answer, verification, invariants)
+            raw = self._review_raw(
+                prompt, answer, verification, invariants, requirements
+            )
         except Exception as exc:
             self._record_review("skipped", "error", detail=str(exc))
             return {}
@@ -1105,6 +1377,7 @@ class Agent:
         answer: str,
         verification: dict | None = None,
         invariants: dict | None = None,
+        requirements: dict | None = None,
     ) -> str:
         """Request the raw reviewer response.
 
@@ -1112,24 +1385,25 @@ class Agent:
         ----------
         prompt : str
             User question.
-
         answer : str
             Draft final answer.
-
         verification : dict or None
             Deterministic ledger findings.
-
         invariants : dict or None
             Technical invariant findings.
+        requirements : dict or None
+            Requirement-state findings.
 
         Returns
         -------
         str
             Raw reviewer response text.
         """
+        context = self._review_context(
+            prompt, answer, verification, invariants, requirements
+        )
         return self._review_with_timeout(
-            _load_prompt("answer_reviewer"),
-            self._review_context(prompt, answer, verification, invariants),
+            _load_prompt("answer_reviewer"), context
         )
 
     def _review_with_timeout(self, system: str, user: str) -> str:
@@ -1199,6 +1473,7 @@ class Agent:
         answer: str,
         verification: dict | None = None,
         invariants: dict | None = None,
+        requirements: dict | None = None,
     ) -> str:
         """Build the reviewer payload from the answer and tool evidence.
 
@@ -1212,6 +1487,8 @@ class Agent:
             Deterministic ledger findings.
         invariants : dict or None
             Technical invariant findings.
+        requirements : dict or None
+            Requirement-state findings.
 
         Returns
         -------
@@ -1219,7 +1496,7 @@ class Agent:
             JSON review context.
         """
         payload = self._review_payload(
-            prompt, answer, verification, invariants
+            prompt, answer, verification, invariants, requirements
         )
         return json.dumps(payload)
 
@@ -1229,6 +1506,7 @@ class Agent:
         answer: str,
         verification: dict | None = None,
         invariants: dict | None = None,
+        requirements: dict | None = None,
     ) -> dict[str, Any]:
         """Build the reviewer context as a mapping.
 
@@ -1242,20 +1520,138 @@ class Agent:
             Deterministic ledger findings.
         invariants : dict or None
             Technical invariant findings.
+        requirements : dict or None
+            Requirement-state findings.
 
         Returns
         -------
         dict[str, Any]
             Question, answer, evidence, artifacts, and checks.
         """
-        payload = _base_payload(prompt, answer, self.messages)
+        payload = _base_payload(prompt, answer, self.messages, self._trace)
+        payload["deliverables"] = self._deliverable_context(prompt, answer)
+        return self._complete_context(
+            payload, verification, invariants, requirements
+        )
+
+    def _complete_context(
+        self,
+        payload: dict[str, Any],
+        verification: dict | None,
+        invariants: dict | None,
+        requirements: dict | None,
+    ) -> dict[str, Any]:
+        """Attach checks and task boundary to a reviewer payload.
+
+        Parameters
+        ----------
+        payload : dict[str, Any]
+            Base reviewer payload.
+        verification : dict or None
+            Deterministic ledger findings.
+        invariants : dict or None
+            Technical invariant findings.
+        requirements : dict or None
+            Requirement-state findings.
+
+        Returns
+        -------
+        dict[str, Any]
+            Completed reviewer context.
+        """
         if verification:
             payload["verification"] = verification
         if invariants:
             payload["invariants"] = invariants
+        if requirements:
+            payload["requirements"] = requirements
+        payload["task"] = self._task_context()
+        return self._attach_artifacts(payload)
+
+    def _task_messages(self) -> list[dict[str, Any]]:
+        """Return messages from the current task only.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        list of dict[str, Any]
+            Messages at or after the task start.
+        """
+        return self.messages[self._task_start :]
+
+    def _attach_artifacts(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Attach current-task artifacts to a reviewer payload.
+
+        Parameters
+        ----------
+        payload : dict[str, Any]
+            Reviewer payload.
+
+        Returns
+        -------
+        dict[str, Any]
+            Payload with current-task artifacts.
+        """
+        recent = self._task_messages()
         return _with_artifacts(
-            payload, self.messages, self.tools.root, self._workspace_before
+            payload, recent, self.tools.root, self._workspace_before
         )
+
+    def _task_context(self) -> dict[str, Any]:
+        """Return the current task boundary and changed files.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict[str, Any]
+            Workspace, prior requests, and current-run files.
+        """
+        prior = _prior_requests(self.messages, self._task_start)
+        return {
+            "workspace": str(self.tools.root),
+            "prior_requests": prior,
+            "changed_files": self._task_files(),
+        }
+
+    def _deliverable_context(self, prompt: str, answer: str) -> dict:
+        """Return current-task files and deliverable issues.
+
+        Parameters
+        ----------
+        prompt : str
+            User question.
+        answer : str
+            Draft answer.
+
+        Returns
+        -------
+        dict
+            Changed files and deterministic deliverable issues.
+        """
+        changed = self._task_files()
+        issues = deliverable_issues(prompt, answer, changed, self._trace)
+        return {"changed_files": changed, "issues": issues}
+
+    def _task_files(self) -> list[str]:
+        """Return paths changed during the current task only.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        list of str
+            Current-run workspace paths.
+        """
+        paths = _changed_paths(self._task_messages())
+        return _task_changed(paths, self.tools.root, self._workspace_before)
 
     def steer(self, prompt: str) -> None:
         """Queue a message to guide the next agent turn.
@@ -1406,7 +1802,7 @@ class Agent:
             self._maybe_nudge(turn)
             message = self._message(turn)
             if not message.get("tool_calls"):
-                return str(message.get("content", ""))
+                return _final_text(message)
             self._execute_calls(message["tool_calls"])
         return self._finalize()
 
@@ -1423,13 +1819,46 @@ class Agent:
             Final assistant text, or a fallback message.
         """
         self._append(_turn_limit_message())
+        for _ in range(2):
+            message = self._final_attempt()
+            if not message.get("tool_calls"):
+                text = _final_text(message)
+                return text or _turn_limit_text(self.max_turns)
+            self._execute_calls(message["tool_calls"])
+        return _turn_limit_text(self.max_turns)
+
+    def _final_attempt(self) -> dict[str, Any]:
+        """Request, append, and return one final assistant message.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict[str, Any]
+            Final assistant message.
+        """
+        message = self._final_message()
+        self._append(message)
+        return message
+
+    def _final_message(self) -> dict[str, Any]:
+        """Request one final answer without advertised tools.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict[str, Any]
+            Assistant message with any markup converted to calls.
+        """
         response = self.client.chat(self.messages, [])
         message = response["choices"][0]["message"]
-        self._append(message)
-        return str(
-            message.get("content")
-            or "Agent stopped after reaching the turn limit."
-        )
+        _recover_markup_calls(message, set(self.tools.tools))
+        return message
 
     def _message(self, turn: int = 0) -> dict[str, Any]:
         """Request and append one assistant message.
@@ -1448,6 +1877,7 @@ class Agent:
         response = self.client.chat(self.messages, self._tool_schemas(turn))
         message = response["choices"][0]["message"]
         _repair_tool_calls(message)
+        _recover_markup_calls(message, set(self.tools.tools))
         self._append(message)
         return message
 
@@ -1610,7 +2040,8 @@ class Agent:
         dict[str, Any]
             Tool result message.
         """
-        arguments, content = self._run_tool(function)
+        arguments, content, status = self._run_tool(function)
+        self._record_trace(name, arguments, content, status)
         self._notify(name, arguments, content)
         return {"role": "tool", "tool_call_id": call["id"], "content": content}
 
@@ -1629,6 +2060,7 @@ class Agent:
         """
         name = call["function"]["name"]
         content = _blocked_tool_message(name)
+        self._record_trace(name, {}, content, "blocked")
         self._notify(name, {}, content)
         return {"role": "tool", "tool_call_id": call["id"], "content": content}
 
@@ -1643,15 +2075,66 @@ class Agent:
         Returns
         -------
         tuple
-            Parsed arguments and the tool output string.
+            Parsed arguments, output string, and status label.
         """
         arguments: dict[str, Any] = {}
         try:
             arguments = json.loads(function.get("arguments", "{}"))
             content = self.tools.execute(function["name"], arguments)
+            return arguments, content, "ok"
         except (ToolError, json.JSONDecodeError, KeyError) as exc:
-            content = json.dumps({"error": str(exc)})
-        return arguments, content
+            return arguments, json.dumps({"error": str(exc)}), "error"
+
+    def _record_trace(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        content: str,
+        status: str,
+    ) -> None:
+        """Append one auditable tool invocation to the trace.
+
+        Parameters
+        ----------
+        name : str
+            Tool name.
+        arguments : dict[str, Any]
+            Parsed tool arguments.
+        content : str
+            Tool output string.
+        status : str
+            Status label: ok, error, or blocked.
+
+        Returns
+        -------
+        None
+            The trace entry is appended.
+        """
+        entry = _trace_core(self._task_id, name, arguments, status)
+        entry["result"] = _result_head(content)
+        entry["result_chars"] = len(content)
+        entry["retry_of"] = _retry_of(self._trace, name, entry["arguments"])
+        entry["id"] = f"tool-{len(self._trace) + 1}"
+        entry["workspace"] = str(self.tools.root)
+        self._trace.append(entry)
+        _append_trace_record(entry)
+
+    def _mark_trace_usage(self, answer: str) -> None:
+        """Mark execution records cited in the final answer.
+
+        Parameters
+        ----------
+        answer : str
+            Final answer text.
+
+        Returns
+        -------
+        None
+            Matching records gain ``used_in_final``.
+        """
+        for entry in self._trace:
+            if _trace_used(entry, answer):
+                entry["used_in_final"] = True
 
     def _notify(self, name: str, arguments: dict, content: str) -> None:
         """Report one tool result to the observer.
@@ -1695,6 +2178,40 @@ def _turn_limit_message() -> dict[str, str]:
             "already gathered. Do not call tools."
         ),
     }
+
+
+def _turn_limit_text(limit: int) -> str:
+    """Return the fallback text after the turn limit.
+
+    Parameters
+    ----------
+    limit : int
+        Configured turn budget.
+
+    Returns
+    -------
+    str
+        Fallback message naming the limit.
+    """
+    return f"Agent stopped after reaching the turn limit of {limit} turns."
+
+
+def _is_turn_limit(answer: str, limit: int) -> bool:
+    """Return whether an answer is the turn-limit fallback.
+
+    Parameters
+    ----------
+    answer : str
+        Final answer text.
+    limit : int
+        Configured turn budget.
+
+    Returns
+    -------
+    bool
+        ``True`` when the answer is the fallback message.
+    """
+    return answer == _turn_limit_text(limit)
 
 
 def _blocked_tool_message(name: str) -> str:
@@ -1773,6 +2290,197 @@ def _repair_tool_calls(message: dict[str, Any]) -> None:
             function["arguments"] = "{}"
 
 
+_MARKUP_CALL = re.compile(
+    r"<tool_call:[^>]+>\s*([A-Za-z0-9_]+)(.*?)</tool_call:[^>]+>",
+    re.S,
+)
+_MARKUP_ARG = re.compile(
+    r"<arg_key:[^>]+>(.*?)</arg_key:[^>]+>\s*"
+    r"<arg_value:[^>]+>(.*?)</arg_value:[^>]+>",
+    re.S,
+)
+_MARKUP_GROUP = re.compile(r"<tool_calls:[^>]*>.*?</tool_calls:[^>]*>", re.S)
+_MARKUP_ONE = re.compile(r"<tool_call:[^>]*>.*?</tool_call:[^>]*>", re.S)
+
+
+def _recover_markup_calls(message: dict[str, Any], allowed: set) -> None:
+    """Convert embedded tool-call markup into real tool calls.
+
+    Parameters
+    ----------
+    message : dict[str, Any]
+        Assistant message repaired in place.
+    allowed : set
+        Tool names the registry can execute.
+
+    Returns
+    -------
+    None
+        Valid markup becomes ``tool_calls`` and is removed from content.
+    """
+    content = str(message.get("content") or "")
+    calls = _markup_calls(content)
+    if message.get("tool_calls") or not _valid_calls(calls, allowed):
+        return
+    message["tool_calls"] = calls
+    message["content"] = _strip_markup(content)
+
+
+def _markup_calls(content: str) -> list[dict[str, Any]]:
+    """Parse tool-call markup into OpenAI-style calls.
+
+    Parameters
+    ----------
+    content : str
+        Assistant text that may contain markup.
+
+    Returns
+    -------
+    list of dict[str, Any]
+        Parsed calls, in source order.
+    """
+    matches = list(_MARKUP_CALL.finditer(content))
+    return [_markup_call(match, index) for index, match in enumerate(matches)]
+
+
+def _markup_call(match, index: int) -> dict[str, Any]:
+    """Build one call from a markup match.
+
+    Parameters
+    ----------
+    match : re.Match
+        Match containing the tool name and argument block.
+    index : int
+        Zero-based call position.
+
+    Returns
+    -------
+    dict[str, Any]
+        OpenAI-compatible tool call.
+    """
+    name = match.group(1)
+    arguments = _markup_arguments(match.group(2))
+    return _call_document(name, arguments, index)
+
+
+def _call_document(
+    name: str, arguments: dict[str, Any], index: int
+) -> dict[str, Any]:
+    """Build the call envelope for one recovered tool call.
+
+    Parameters
+    ----------
+    name : str
+        Tool name.
+    arguments : dict[str, Any]
+        Parsed arguments.
+    index : int
+        Zero-based call position.
+
+    Returns
+    -------
+    dict[str, Any]
+        OpenAI-compatible tool call.
+    """
+    call = {"id": f"markup-{index}", "type": "function"}
+    call["function"] = {
+        "name": name,
+        "arguments": json.dumps(arguments),
+    }
+    return call
+
+
+def _markup_arguments(block: str) -> dict[str, Any]:
+    """Parse argument key and value pairs from a markup block.
+
+    Parameters
+    ----------
+    block : str
+        Text between one opening and closing call tag.
+
+    Returns
+    -------
+    dict[str, Any]
+        Parsed arguments.
+    """
+    arguments: dict[str, Any] = {}
+    for key, value in _MARKUP_ARG.findall(block):
+        arguments[key.strip()] = _markup_value(value.strip())
+    return arguments
+
+
+def _markup_value(text: str) -> Any:
+    """Decode one argument value as JSON when possible.
+
+    Parameters
+    ----------
+    text : str
+        Raw argument value.
+
+    Returns
+    -------
+    Any
+        Decoded value, or the original text when it is not JSON.
+    """
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return text
+
+
+def _valid_calls(calls: list[dict[str, Any]], allowed: set) -> bool:
+    """Return whether every parsed call names an executable tool.
+
+    Parameters
+    ----------
+    calls : list of dict[str, Any]
+        Parsed calls.
+    allowed : set
+        Tool names the registry can execute.
+
+    Returns
+    -------
+    bool
+        ``True`` when there is at least one call and every name is known.
+    """
+    if not calls:
+        return False
+    return all(call["function"]["name"] in allowed for call in calls)
+
+
+def _strip_markup(content: str) -> str:
+    """Remove tool-call markup from assistant text.
+
+    Parameters
+    ----------
+    content : str
+        Assistant text.
+
+    Returns
+    -------
+    str
+        Text without markup blocks.
+    """
+    cleaned = _MARKUP_GROUP.sub("", content)
+    return _MARKUP_ONE.sub("", cleaned).strip()
+
+
+def _final_text(message: dict[str, Any]) -> str:
+    """Return the final answer text with any markup removed.
+
+    Parameters
+    ----------
+    message : dict[str, Any]
+        Assistant message.
+
+    Returns
+    -------
+    str
+        Clean answer text.
+    """
+    return _strip_markup(str(message.get("content") or ""))
+
+
 def _system_prompt(lean: bool = False, repo: bool = False) -> str:
     """Build the combined interactive system prompt.
 
@@ -1810,6 +2518,231 @@ def _full_prompt() -> str:
     return _load_prompt("agent") + "\n\n" + _load_prompt("coding_standards")
 
 
+_SECRET_KEYS = (
+    "secret",
+    "token",
+    "password",
+    "passwd",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+)
+_MAX_ARG_CHARS = 200
+_MAX_RESULT_CHARS = 280
+
+
+def _redact_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of tool arguments with secrets masked.
+
+    Parameters
+    ----------
+    arguments : dict[str, Any]
+        Parsed tool arguments.
+
+    Returns
+    -------
+    dict[str, Any]
+        Arguments safe to log and review.
+    """
+    if not isinstance(arguments, dict):
+        return {"value": _short_value(arguments)}
+    return {
+        str(key): _redact_value(key, value) for key, value in arguments.items()
+    }
+
+
+def _redact_value(key: Any, value: Any) -> Any:
+    """Redact or shorten one argument value.
+
+    Parameters
+    ----------
+    key : Any
+        Argument name.
+    value : Any
+        Argument value.
+
+    Returns
+    -------
+    Any
+        Redacted or truncated value.
+    """
+    if any(word in str(key).lower() for word in _SECRET_KEYS):
+        return "[redacted]"
+    return _short_value(value)
+
+
+def _short_value(value: Any) -> Any:
+    """Shorten a long string argument.
+
+    Parameters
+    ----------
+    value : Any
+        Argument value.
+
+    Returns
+    -------
+    Any
+        String capped at the maximum length, otherwise unchanged.
+    """
+    if isinstance(value, str):
+        return value[:_MAX_ARG_CHARS]
+    return value
+
+
+def _result_head(content: str) -> str:
+    """Return a short readable head of a tool result.
+
+    Parameters
+    ----------
+    content : str
+        Tool output string.
+
+    Returns
+    -------
+    str
+        Leading text capped at the maximum length.
+    """
+    return str(content)[:_MAX_RESULT_CHARS]
+
+
+def _trace_core(
+    task: str, name: str, arguments: dict, status: str
+) -> dict[str, Any]:
+    """Build the common fields of one execution record.
+
+    Parameters
+    ----------
+    task : str
+        Task identifier.
+    name : str
+        Tool name.
+    arguments : dict
+        Parsed tool arguments.
+    status : str
+        Status label.
+
+    Returns
+    -------
+    dict[str, Any]
+        Partial execution record.
+    """
+    entry = {"task": task, "tool": name, "status": status}
+    entry["at"] = round(time.time(), 3)
+    entry["arguments"] = _redact_arguments(arguments)
+    entry["used_in_final"] = False
+    return entry
+
+
+def _retry_of(
+    trace: list[dict[str, Any]], name: str, arguments: dict
+) -> str | None:
+    """Return the id of an earlier identical call.
+
+    Parameters
+    ----------
+    trace : list of dict[str, Any]
+        Earlier execution records.
+    name : str
+        Tool name.
+    arguments : dict
+        Redacted tool arguments.
+
+    Returns
+    -------
+    str or None
+        Earlier call id when the same call was already recorded.
+    """
+    signature = _signature(name, arguments)
+    for entry in reversed(trace):
+        if _signature(entry.get("tool"), entry.get("arguments")) == signature:
+            return entry.get("id")
+    return None
+
+
+def _signature(name: Any, arguments: Any) -> str:
+    """Return a stable signature for one tool call.
+
+    Parameters
+    ----------
+    name : Any
+        Tool name.
+    arguments : Any
+        Tool arguments.
+
+    Returns
+    -------
+    str
+        Signature string.
+    """
+    try:
+        text = json.dumps(arguments, sort_keys=True)
+    except (TypeError, ValueError):
+        text = str(arguments)
+    return f"{name}:{text}"
+
+
+def _trace_used(entry: dict[str, Any], answer: str) -> bool:
+    """Return whether a call's file or source appears in the answer.
+
+    Parameters
+    ----------
+    entry : dict[str, Any]
+        Execution record.
+    answer : str
+        Final answer text.
+
+    Returns
+    -------
+    bool
+        ``True`` when a path or result URL is cited.
+    """
+    arguments = entry.get("arguments") or {}
+    path = str(arguments.get("path") or "")
+    if path and path in answer:
+        return True
+    result = str(entry.get("result") or "")
+    return any(url in answer for url in _urls(result))
+
+
+def _urls(text: str) -> list[str]:
+    """Return URLs found in a result excerpt.
+
+    Parameters
+    ----------
+    text : str
+        Result excerpt.
+
+    Returns
+    -------
+    list of str
+        Extracted URLs.
+    """
+    return re.findall(r"https?://[^\s)\]\"'<>]+", text)
+
+
+def _append_trace_record(entry: dict[str, Any]) -> None:
+    """Append one execution record when HARNESS_TRACE_LOG is set.
+
+    Parameters
+    ----------
+    entry : dict[str, Any]
+        Execution record.
+
+    Returns
+    -------
+    None
+        The record is appended to the log path when configured.
+    """
+    path = os.getenv("HARNESS_TRACE_LOG")
+    if not path:
+        return
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(entry, default=str) + "\n")
+
+
 def _tool_evidence(messages: list[dict[str, Any]]) -> list[str]:
     """Collect the newest tool-result content for the reviewer.
 
@@ -1832,7 +2765,10 @@ def _tool_evidence(messages: list[dict[str, Any]]) -> list[str]:
 
 
 def _base_payload(
-    prompt: str, answer: str, messages: list[dict[str, Any]]
+    prompt: str,
+    answer: str,
+    messages: list[dict[str, Any]],
+    tool_trace: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the reviewer payload without workspace artifacts.
 
@@ -1844,16 +2780,21 @@ def _base_payload(
         Draft final answer.
     messages : list of dict[str, Any]
         Conversation messages.
+    tool_trace : list of dict[str, Any] or None
+        Auditable tool invocation records.
 
     Returns
     -------
     dict[str, Any]
-        Question, answer, and tool evidence.
+        Question, answer, tool evidence, and tool trace.
     """
+    recorded = "recorded" if tool_trace else "none"
     return {
         "question": prompt,
         "answer": answer,
         "tool_evidence": _tool_evidence(messages),
+        "tool_trace": tool_trace or [],
+        "tool_trace_origin": recorded,
     }
 
 
@@ -1994,6 +2935,56 @@ def _with_artifacts(
     if artifacts:
         payload["artifacts"] = artifacts
     return payload
+
+
+def _prior_requests(messages: list[dict[str, Any]], start: int) -> list[str]:
+    """Return earlier user requests before the current task.
+
+    Parameters
+    ----------
+    messages : list of dict[str, Any]
+        Conversation messages.
+    start : int
+        Index of the current task's user message.
+
+    Returns
+    -------
+    list of str
+        Up to five earlier requests, each bounded.
+    """
+    requests = [
+        str(message.get("content") or "")[:200]
+        for message in messages[:start]
+        if message.get("role") == "user"
+    ]
+    return requests[-5:]
+
+
+def _task_changed(
+    paths: list[str],
+    root: Path,
+    before: dict[str, tuple[int, int]] | None,
+) -> list[str]:
+    """Return current-run changed paths with workspace diffs.
+
+    Parameters
+    ----------
+    paths : list of str
+        Paths touched by current-run edit calls.
+    root : pathlib.Path
+        Workspace root.
+    before : dict[str, tuple[int, int]] or None
+        Pre-run workspace state.
+
+    Returns
+    -------
+    list of str
+        Unique current-run paths.
+    """
+    if before is None:
+        return paths
+    current = _diff_paths(before, _workspace_state(root))
+    return _unique(current + paths)
 
 
 def _artifact_evidence(
@@ -2223,6 +3214,32 @@ def _ledger_mode() -> str:
     return "on"
 
 
+def _requirement_context(history: list[str], prompt: str, answer: str) -> str:
+    """Build the requirement extraction payload.
+
+    Parameters
+    ----------
+    history : list of str
+        Earlier user requests.
+    prompt : str
+        Current user question.
+    answer : str
+        Draft answer.
+
+    Returns
+    -------
+    str
+        JSON payload for the extractor.
+    """
+    return json.dumps(
+        {
+            "prior_requests": history,
+            "question": prompt,
+            "answer": answer,
+        }
+    )
+
+
 def _ledger_value(raw: str) -> dict | None:
     """Decode a ledger response into a mapping.
 
@@ -2241,6 +3258,32 @@ def _ledger_value(raw: str) -> dict | None:
     except ValueError:
         return None
     return value if isinstance(value, dict) else None
+
+
+def _verification_issues(
+    prompt: str, answer: str, ledger: dict | None
+) -> list[str]:
+    """Combine limit checks with ledger arithmetic issues.
+
+    Parameters
+    ----------
+    prompt : str
+        User question.
+    answer : str
+        Draft answer.
+    ledger : dict or None
+        Extracted numeric ledger.
+
+    Returns
+    -------
+    list of str
+        Limit violations and ledger issues.
+    """
+    issues = limit_issues(prompt, answer)
+    if ledger is None:
+        return issues
+    issues.extend(ledger_issues(ledger))
+    return issues
 
 
 def _applicable_ledger(value: dict, record) -> dict | None:
@@ -2277,6 +3320,26 @@ def _invariant_mode() -> str:
         ``off``, ``auto``, or ``on``.
     """
     value = os.getenv("HARNESS_ANSWER_INVARIANTS", "auto").strip().lower()
+    if value in ("0", "false", "no", "off"):
+        return "off"
+    if value in ("", "auto"):
+        return "auto"
+    return "on"
+
+
+def _requirement_mode() -> str:
+    """Return the configured requirement-check mode.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        ``off``, ``auto``, or ``on``.
+    """
+    value = os.getenv("HARNESS_REQUIREMENT_CHECK", "auto").strip().lower()
     if value in ("0", "false", "no", "off"):
         return "off"
     if value in ("", "auto"):
