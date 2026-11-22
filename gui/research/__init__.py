@@ -1,5 +1,7 @@
 """Research storage foundations for the desktop application."""
 
+from .archive import ArchiveError
+from .archive import ArchiveService
 from .evidence import EvidenceStore
 from .index import SearchIndex
 from .journal import Journal
@@ -14,6 +16,8 @@ from .sources import SourceStore
 from .threads import ThreadStore
 
 __all__ = [
+    "ArchiveError",
+    "ArchiveService",
     "EvidenceStore",
     "Journal",
     "LockError",
