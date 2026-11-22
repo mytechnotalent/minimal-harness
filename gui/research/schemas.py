@@ -274,6 +274,24 @@ def validate_evidence(record):
     _validate_status(record["status"])
 
 
+def validate_thread(record):
+    """Validate one research thread record.
+
+    Parameters
+    ----------
+    record : dict
+        Thread metadata to validate.
+
+    Returns
+    -------
+    None
+        The thread is accepted.
+    """
+    validate_record("thread", record)
+    require_id(record["id"], "th")
+    _validate_status(record["status"])
+
+
 def _validate_status(status):
     """Require a supported record status.
 

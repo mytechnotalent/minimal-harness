@@ -52,6 +52,7 @@ from meta_harness.env import load_env
 from meta_harness.markdown_text import readable_markdown
 from meta_harness.openrouter import OpenRouterClient
 from meta_harness.profiles import effective_turns
+from meta_harness.prompts import load as load_prompt
 from meta_harness.session import Session
 from meta_harness.voice import VoiceEngine
 from meta_harness.voice import missing_dependencies
@@ -63,7 +64,15 @@ from .cyber_style import TOOL_BUBBLE
 from .cyber_style import USER_BUBBLE
 from .store import SessionRecord
 from .store import SessionStore
-from .context import snapshot
+from .research.notes import NoteStore
+from .research.paths import ResearchPathError
+from .research.paths import research_root
+from .research.restored import RestoredHistoryStore
+from .research.sources import SourceStore
+from .research.threads import ThreadStore
+from .research_context import research_context
+from .research_workspace import ResearchWorkspace
+from .restored_history import RestoredHistoryDialog
 from .settings import Settings
 from .style import apply_palette
 from .worker import AgentWorker
@@ -389,7 +398,7 @@ class ChatPanel(QWidget):
         agent: Agent,
         title: str = "Minimal Harness",
         context=None,
-        show_notes_toggle: bool = False,
+        show_snapshot_toggle: bool = False,
         show_tools: bool = False,
         settings=None,
         voice_on: bool = False,
@@ -406,8 +415,8 @@ class ChatPanel(QWidget):
             Panel header title.
         context : callable or None
             Optional live-workspace snapshot builder.
-        show_notes_toggle : bool
-            Whether to show the notes context checkbox.
+        show_snapshot_toggle : bool
+            Whether to show the snapshot context checkbox.
         show_tools : bool
             Whether to render tool activity in the log.
         settings : Settings or None
@@ -431,7 +440,7 @@ class ChatPanel(QWidget):
         self._settings = settings
         self._configure_state(voice_on, dark)
         self._theme = theme
-        self._start_worker(agent, title, show_notes_toggle)
+        self._start_worker(agent, title, show_snapshot_toggle)
 
     def _configure_state(self, voice_on: bool, dark: bool) -> None:
         """Initialize per-panel mutable state.
@@ -450,14 +459,14 @@ class ChatPanel(QWidget):
         """
         self._voice_on = voice_on
         self._dark = dark
-        self._notes_included = False
+        self._snapshot_included = False
         self._outgoing: list[str] = []
         self._queued = 0
         self._hearing = False
         self._voice_missing = missing_dependencies() if voice_on else []
         self._voice = _make_voice(self._voice_missing)
 
-    def _start_worker(self, agent, title, show_notes_toggle) -> None:
+    def _start_worker(self, agent, title, show_snapshot_toggle) -> None:
         """Start the animation timer and background worker.
 
         Parameters
@@ -468,8 +477,8 @@ class ChatPanel(QWidget):
         title : str
             Panel header title.
 
-        show_notes_toggle : bool
-            Whether to show the notes context checkbox.
+        show_snapshot_toggle : bool
+            Whether to show the snapshot context checkbox.
 
         Returns
         -------
@@ -481,18 +490,18 @@ class ChatPanel(QWidget):
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         Bridge(self._worker, self)
-        self._build_ui(title, show_notes_toggle)
+        self._build_ui(title, show_snapshot_toggle)
         self._thread.start()
 
-    def _build_ui(self, title: str, show_notes_toggle: bool) -> None:
+    def _build_ui(self, title: str, show_snapshot_toggle: bool) -> None:
         """Compose the panel layout.
 
         Parameters
         ----------
         title : str
             Panel header title.
-        show_notes_toggle : bool
-            Whether to show the notes context checkbox.
+        show_snapshot_toggle : bool
+            Whether to show the snapshot context checkbox.
 
         Returns
         -------
@@ -503,7 +512,7 @@ class ChatPanel(QWidget):
         self._layout.addLayout(self._build_header(title))
         self._build_status()
         self._build_voice_status()
-        self._build_composer(show_notes_toggle)
+        self._build_composer(show_snapshot_toggle)
         self._pending: QuestionBridge | None = None
 
     def _build_status(self) -> None:
@@ -541,13 +550,13 @@ class ChatPanel(QWidget):
         row.addStretch(1)
         return row
 
-    def _build_composer(self, show_notes_toggle: bool) -> None:
+    def _build_composer(self, show_snapshot_toggle: bool) -> None:
         """Build the log, input row, and question card.
 
         Parameters
         ----------
-        show_notes_toggle : bool
-            Whether to show the notes context checkbox.
+        show_snapshot_toggle : bool
+            Whether to show the snapshot context checkbox.
 
         Returns
         -------
@@ -556,10 +565,10 @@ class ChatPanel(QWidget):
         """
         self._build_log()
         self._build_input_row()
-        self._notes = self._build_notes(show_notes_toggle)
+        self._snapshot_toggle = self._build_snapshot(show_snapshot_toggle)
         self._build_question_card()
-        if self._notes is not None:
-            self._layout.addWidget(self._notes)
+        if self._snapshot_toggle is not None:
+            self._layout.addWidget(self._snapshot_toggle)
         self._add_speak_toggle()
         self._finish_composer()
 
@@ -602,25 +611,25 @@ class ChatPanel(QWidget):
         self._add_talk(self._row)
         self._row.addWidget(self._send)
 
-    def _build_notes(self, show_notes_toggle: bool):
-        """Create the optional notes checkbox.
+    def _build_snapshot(self, show_snapshot_toggle: bool):
+        """Create the optional workspace snapshot checkbox.
 
         Parameters
         ----------
-        show_notes_toggle : bool
-            Whether to show the notes context checkbox.
+        show_snapshot_toggle : bool
+            Whether to show the snapshot context checkbox.
 
         Returns
         -------
         QCheckBox or None
             The checkbox when enabled, otherwise None.
         """
-        if not show_notes_toggle:
+        if not show_snapshot_toggle:
             return None
-        notes = QCheckBox("Include saved notes", self)
-        notes.setChecked(self._notes_included)
-        notes.stateChanged.connect(self._on_notes)
-        return notes
+        box = QCheckBox("Include workspace snapshot", self)
+        box.setChecked(self._snapshot_included)
+        box.stateChanged.connect(self._on_snapshot)
+        return box
 
     def _finish_composer(self) -> None:
         """Wire composer signals and add the input row.
@@ -927,8 +936,8 @@ class ChatPanel(QWidget):
         self._question_input.clear()
         self._question_card.hide()
 
-    def _on_notes(self, state: int) -> None:
-        """Toggle whether notes join the context.
+    def _on_snapshot(self, state: int) -> None:
+        """Toggle whether the workspace snapshot joins the context.
 
         Parameters
         ----------
@@ -940,7 +949,7 @@ class ChatPanel(QWidget):
         None
             The note flag is updated.
         """
-        self._notes_included = state == Qt.CheckState.Checked.value
+        self._snapshot_included = state == Qt.CheckState.Checked.value
 
     def _build_voice(self) -> None:
         """Configure the voice controls for this environment.
@@ -1272,8 +1281,7 @@ class ChatPanel(QWidget):
         self._outgoing.append(prompt)
         self._queued = len(self._outgoing)
         self._input.clear()
-        if self._context is not None:
-            prompt = self._context() + "\n\n" + prompt
+        prompt = _with_context(self._context, prompt)
         self._worker.prompt_ready.emit(prompt)
         self.posted.emit()
 
@@ -1809,9 +1817,46 @@ class MainWindow(QMainWindow):
         self._voice_on = voice_enabled()
         self._theme = ui_mode()
         self._record: SessionRecord | None = None
+        self._configure_research(root)
 
-    def _build_panels(self) -> None:
-        """Create the command and ideas chat panels.
+    def _configure_research(self, root) -> None:
+        """Prepare session-local and global research stores.
+
+        Parameters
+        ----------
+        root : pathlib.Path
+            Active project workspace.
+
+        Returns
+        -------
+        None
+            Research stores are configured or disabled.
+        """
+        self._thread_store = None
+        self._research_thread = None
+        self._restored_store = None
+        self._reset_research_stores(root)
+
+    def _reset_research_stores(self, root) -> None:
+        """Resolve global stores while keeping session stores intact.
+
+        Parameters
+        ----------
+        root : pathlib.Path
+            Active project workspace.
+
+        Returns
+        -------
+        None
+            Note and source stores are replaced.
+        """
+        self._research_root, self._research_error = _resolve_research(root)
+        self._note_store = _init_store(NoteStore, self._research_root)
+        self._source_store = _init_store(SourceStore, self._research_root)
+        self._show_storage_error()
+
+    def _show_storage_error(self) -> None:
+        """Mirror the research storage error into the visible tabs.
 
         Parameters
         ----------
@@ -1820,14 +1865,80 @@ class MainWindow(QMainWindow):
         Returns
         -------
         None
-            Panels and their cards are created.
+            The workspace error state is updated when built.
+        """
+        if hasattr(self, "_research_workspace"):
+            self._research_workspace.set_storage_error(self._research_error)
+
+    def _build_panels(self) -> None:
+        """Create the command and research panels.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Panels, tabs, and their cards are created.
+        """
+        self._build_command_panel()
+        self._build_research_panel()
+        self._research_card = self._card(self._research_workspace)
+        self._research_card.hide()
+
+    def _build_command_panel(self) -> None:
+        """Create and connect the primary chat panel.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The command panel is ready.
         """
         self._command_panel = self._make_command_panel()
         self._command_panel.posted.connect(self._on_posted)
-        self._ideas_panel = self._make_ideas_panel()
-        self._ideas_panel.posted.connect(self._on_posted)
-        self._ideas_card = self._card(self._ideas_panel)
-        self._ideas_card.hide()
+
+    def _build_research_panel(self) -> None:
+        """Create the research tab workspace.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The research workspace is ready.
+        """
+        self._research_panel = self._make_research_panel()
+        self._research_panel.posted.connect(self._on_research_posted)
+        self._research_workspace = ResearchWorkspace(
+            self._research_panel, self._research_error
+        )
+        self._wire_research_workspace()
+
+    def _wire_research_workspace(self) -> None:
+        """Connect research tab actions to window handlers.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Signals are connected.
+        """
+        self._research_workspace.thread_selected.connect(
+            self._select_research_thread
+        )
+        self._research_workspace.new_thread_requested.connect(
+            self._new_research_thread
+        )
 
     def _panel_options(self) -> dict:
         """Return shared chat-panel keyword options.
@@ -1861,10 +1972,12 @@ class MainWindow(QMainWindow):
         ChatPanel
             Panel for direct commands.
         """
-        return ChatPanel(self._make_agent(), **self._panel_options())
+        return ChatPanel(
+            self._make_agent(self._active_path()), **self._panel_options()
+        )
 
-    def _make_ideas_panel(self):
-        """Create the ideas chat panel.
+    def _make_research_panel(self):
+        """Create the research chat panel.
 
         Parameters
         ----------
@@ -1873,13 +1986,13 @@ class MainWindow(QMainWindow):
         Returns
         -------
         ChatPanel
-            Panel for speculative ideas.
+            Panel for research conversations.
         """
         return ChatPanel(
-            self._make_agent(),
-            title="Ideas",
-            context=self._make_ideas_context,
-            show_notes_toggle=True,
+            self._make_research_agent(),
+            title="Research",
+            context=self._make_research_context,
+            show_snapshot_toggle=True,
             **self._panel_options(),
         )
 
@@ -1936,15 +2049,18 @@ class MainWindow(QMainWindow):
         main = QSplitter(Qt.Horizontal, central)
         main.setHandleWidth(6)
         main.addWidget(self._card(self._command_panel))
-        main.addWidget(self._ideas_card)
+        main.addWidget(self._research_card)
         return main
 
-    def _make_agent(self) -> Agent:
+    def _make_agent(self, path, prompt=None) -> Agent:
         """Build an agent for one panel.
 
         Parameters
         ----------
-        None
+        path : pathlib.Path
+            Transcript path.
+        prompt : str or None
+            Optional full system prompt override.
 
         Returns
         -------
@@ -1954,10 +2070,26 @@ class MainWindow(QMainWindow):
         agent = Agent(
             root=self._root,
             max_turns=self._turns(),
-            session=Session(self._active_path()),
+            session=Session(path),
+            system_prompt=prompt,
         )
         agent.tools.require_project_folder = True
         return agent
+
+    def _make_research_agent(self) -> Agent:
+        """Build the research agent with its own prompt.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        Agent
+            Agent bound to a research transcript.
+        """
+        path = Path("runs/gui-research.jsonl")
+        return self._make_agent(path, load_prompt("research"))
 
     def _turns(self) -> int:
         """Return the effective turn budget for the active model.
@@ -1990,8 +2122,8 @@ class MainWindow(QMainWindow):
             return Path("runs/gui-session.jsonl")
         return self._record.transcript
 
-    def _make_ideas_context(self) -> str:
-        """Build the ideas panel live context.
+    def _make_research_context(self) -> str:
+        """Build optional research context without primary leakage.
 
         Parameters
         ----------
@@ -2000,15 +2132,13 @@ class MainWindow(QMainWindow):
         Returns
         -------
         str
-            Workspace snapshot, command tail, and notes.
+            Workspace snapshot when enabled, otherwise empty.
         """
-        first = snapshot(self._root)
-        tail = self._command_tail()
-        notes = self._notes_text() if self._ideas_panel._notes_included else ""
-        return "\n\n".join(part for part in [first, tail, notes] if part)
+        include = self._research_panel._snapshot_included
+        return research_context(self._root, include)
 
-    def _command_tail(self) -> str:
-        """Summarize the recent command conversation.
+    def _session_notes(self) -> list:
+        """Return notes scoped to the active session.
 
         Parameters
         ----------
@@ -2016,17 +2146,15 @@ class MainWindow(QMainWindow):
 
         Returns
         -------
-        str
-            Recent user and assistant messages.
+        list
+            Note records, or an empty list.
         """
-        if self._record is None or not self._record.transcript.exists():
-            return ""
-        return "Recent commands conversation:\n" + self._read_session(
-            self._record.transcript
-        )
+        if self._record is None or self._note_store is None:
+            return []
+        return self._note_store.list(self._record.session_id)
 
-    def _notes_text(self) -> str:
-        """Return the current session notes.
+    def _session_sources(self) -> list:
+        """Return sources scoped to the active session.
 
         Parameters
         ----------
@@ -2034,32 +2162,12 @@ class MainWindow(QMainWindow):
 
         Returns
         -------
-        str
-            Saved notes for the session.
+        list
+            Source records, or an empty list.
         """
-        if self._record is None or not self._record.notes.exists():
-            return ""
-        return "Saved notes:\n" + self._read_session(self._record.notes)
-
-    def _read_session(self, path: Path) -> str:
-        """Format a session transcript as readable text.
-
-        Parameters
-        ----------
-        path : pathlib.Path
-            JSONL session file.
-
-        Returns
-        -------
-        str
-            Joined speaker lines.
-        """
-        lines = []
-        for line in path.read_text().splitlines()[-8:]:
-            entry = _session_line(line)
-            if entry:
-                lines.append(entry)
-        return "\n".join(lines)
+        if self._record is None or self._source_store is None:
+            return []
+        return self._source_store.list(self._record.session_id)
 
     def _build_sidebar(self) -> QWidget:
         """Build the sessions and builds sidebar.
@@ -2357,7 +2465,7 @@ class MainWindow(QMainWindow):
         self._activate(self._store.load(session_id))
 
     def _activate(self, record: SessionRecord) -> None:
-        """Switch both panels to a session.
+        """Switch the primary panel and the session's research threads.
 
         Parameters
         ----------
@@ -2367,15 +2475,135 @@ class MainWindow(QMainWindow):
         Returns
         -------
         None
-            Both panels load the session.
+            Both panels load independent histories.
         """
         self._record = record
         self._touch_active()
-        transcripts = Session(record.transcript)
-        notes = Session(record.notes)
-        self._command_panel.switch_session(transcripts)
-        self._ideas_panel.switch_session(notes)
+        self._command_panel.switch_session(Session(record.transcript))
+        self._activate_research(record)
         self._mark_active(record)
+
+    def _activate_research(self, record):
+        """Load the newest research thread for a session.
+
+        Parameters
+        ----------
+        record : SessionRecord
+            Active session.
+
+        Returns
+        -------
+        None
+            The research panel and tabs are refreshed.
+        """
+        self._thread_store = ThreadStore(record.folder)
+        self._restored_store = RestoredHistoryStore(record.folder)
+        self._open_research_thread(self._thread_store.default())
+        self._refresh_restored_button()
+
+    def _open_research_thread(self, thread):
+        """Bind the research panel to one thread.
+
+        Parameters
+        ----------
+        thread : dict
+            Thread metadata.
+
+        Returns
+        -------
+        None
+            The research transcript and tabs are updated.
+        """
+        self._research_thread = thread
+        path = self._thread_store.transcript_path(thread["id"])
+        self._research_panel.switch_session(Session(path))
+        self._refresh_research_workspace()
+
+    def _refresh_research_workspace(self) -> None:
+        """Refresh thread, note, and source tabs.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The research workspace reflects active state.
+        """
+        if self._thread_store is None:
+            return
+        active = self._research_thread["id"]
+        self._research_workspace.set_threads(self._thread_store.list(), active)
+        self._research_workspace.set_notes(self._session_notes())
+        self._research_workspace.set_sources(self._session_sources())
+
+    def _select_research_thread(self, thread_id) -> None:
+        """Switch the research panel without touching the primary panel.
+
+        Parameters
+        ----------
+        thread_id : str
+            Selected thread identifier.
+
+        Returns
+        -------
+        None
+            The research panel loads the thread.
+        """
+        if self._thread_store is None:
+            return
+        self._open_research_thread(self._thread_store.get(thread_id))
+
+    def _new_research_thread(self) -> None:
+        """Create and open an empty research thread.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The new thread becomes active.
+        """
+        if self._thread_store is None:
+            return
+        self._open_research_thread(self._thread_store.create())
+
+    def _on_research_posted(self) -> None:
+        """Touch the active research thread after a message.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Thread ordering and the sidebar refresh.
+        """
+        thread = self._active_research_thread()
+        if thread is not None:
+            self._research_thread = self._thread_store.update(thread["id"])
+            self._refresh_research_workspace()
+        self._on_posted()
+
+    def _active_research_thread(self):
+        """Return the active thread when research storage exists.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict or None
+            Active thread metadata.
+        """
+        if self._thread_store is None:
+            return None
+        return self._research_thread
 
     def _mark_active(self, record: SessionRecord) -> None:
         """Highlight the active row in its list.
@@ -2461,7 +2689,7 @@ class MainWindow(QMainWindow):
         self._add_workspace_controls(bar)
         bar.addStretch(1)
         self._add_toggles(bar)
-        bar.addWidget(self._ideas_button())
+        bar.addWidget(self._research_button())
         self._update_workspace_label()
         return bar
 
@@ -2498,14 +2726,65 @@ class MainWindow(QMainWindow):
         None
             Checkboxes are added.
         """
-        specs = (
-            ("Show commands", "show_commands", self._on_show_commands),
-            ("Show tool activity", "show_tools", self._on_show_tools),
-        )
-        for label, key, slot in specs:
-            box = _toggle_box(self, label, key, slot)
-            bar.addWidget(box)
+        for label, key, slot in _toggle_specs(self):
+            bar.addWidget(_toggle_box(self, label, key, slot))
         bar.addWidget(self._dark_mode_button())
+        bar.addWidget(self._restored_button())
+
+    def _restored_button(self) -> QPushButton:
+        """Create the restored-history viewer button.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        QPushButton
+            Button that opens read-only restored history.
+        """
+        self._history_button = QPushButton("Restored history", self)
+        self._history_button.clicked.connect(self._show_restored_history)
+        self._history_button.setEnabled(False)
+        return self._history_button
+
+    def _refresh_restored_button(self) -> None:
+        """Enable the history button when records exist.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The button state and tooltip are updated.
+        """
+        histories = self._restored_store.list() if self._restored_store else []
+        self._history_button.setEnabled(bool(histories))
+        hint = f"{len(histories)} restored histories"
+        self._history_button.setToolTip(hint if histories else "No history")
+
+    def _show_restored_history(self) -> None:
+        """Open the read-only restored history viewer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The dialog runs until closed.
+        """
+        if self._restored_store is None:
+            return
+        histories = self._restored_store.list()
+        if not histories:
+            return
+        loader = self._restored_store.transcript
+        dialog = RestoredHistoryDialog(histories, loader, self)
+        dialog.exec()
 
     def _dark_mode_button(self) -> QPushButton:
         """Create the light and dark mode toggle button.
@@ -2558,8 +2837,8 @@ class MainWindow(QMainWindow):
         hint = "Switch to light mode" if dark else "Switch to dark mode"
         self._dark_button.setToolTip(hint)
 
-    def _ideas_button(self) -> QPushButton:
-        """Create the ideas toggle button.
+    def _research_button(self) -> QPushButton:
+        """Create the research panel toggle button.
 
         Parameters
         ----------
@@ -2568,10 +2847,10 @@ class MainWindow(QMainWindow):
         Returns
         -------
         QPushButton
-            Button that opens or closes the ideas panel.
+            Button that opens or closes the research panel.
         """
-        self._toggle = QPushButton("Open Ideas", self)
-        self._toggle.clicked.connect(self.toggle_ideas)
+        self._toggle = QPushButton("Open Research", self)
+        self._toggle.clicked.connect(self.toggle_research)
         return self._toggle
 
     def _update_workspace_label(self) -> None:
@@ -2624,9 +2903,26 @@ class MainWindow(QMainWindow):
         root.mkdir(parents=True, exist_ok=True)
         self._root = root
         self._settings.set("workspace", str(root))
-        self._command_panel._agent.tools.root = root
-        self._ideas_panel._agent.tools.root = root
+        self._bind_workspace_tools(root)
+        self._reset_research_stores(root)
+        self._refresh_research_workspace()
         self._update_workspace_label()
+
+    def _bind_workspace_tools(self, root) -> None:
+        """Rebind both agents to a workspace.
+
+        Parameters
+        ----------
+        root : pathlib.Path
+            New workspace root.
+
+        Returns
+        -------
+        None
+            Both tool registries are updated.
+        """
+        self._command_panel._agent.tools.root = root
+        self._research_panel._agent.tools.root = root
 
     def _on_show_commands(self, checked: bool) -> None:
         """Persist and apply the commands toggle.
@@ -2658,7 +2954,7 @@ class MainWindow(QMainWindow):
         """
         self._settings.set("show_tools", checked)
         self._command_panel._show_tools = checked
-        self._ideas_panel._show_tools = checked
+        self._research_panel._show_tools = checked
 
     def _on_dark_mode(self, checked: bool) -> None:
         """Persist and apply the dark mode toggle.
@@ -2676,10 +2972,10 @@ class MainWindow(QMainWindow):
         self._settings.set("dark_mode", checked)
         apply_palette(QApplication.instance(), checked)
         self._command_panel.set_dark(checked)
-        self._ideas_panel.set_dark(checked)
+        self._research_panel.set_dark(checked)
 
-    def toggle_ideas(self) -> None:
-        """Toggle the ideas panel visibility.
+    def toggle_research(self) -> None:
+        """Toggle the research panel visibility.
 
         Parameters
         ----------
@@ -2688,14 +2984,14 @@ class MainWindow(QMainWindow):
         Returns
         -------
         None
-            The ideas card shows or hides.
+            The research card shows or hides.
         """
-        if self._ideas_card.isVisible():
-            self._ideas_card.hide()
-            self._toggle.setText("Open Ideas")
+        if self._research_card.isVisible():
+            self._research_card.hide()
+            self._toggle.setText("Open Research")
         else:
-            self._ideas_card.show()
-            self._toggle.setText("Close Ideas")
+            self._research_card.show()
+            self._toggle.setText("Close Research")
 
     def _card(self, panel: QWidget) -> QWidget:
         """Wrap a panel in a buffered card container.
@@ -2811,7 +3107,7 @@ class MainWindow(QMainWindow):
             Both panels stop their workers.
         """
         self._command_panel.stop()
-        self._ideas_panel.stop()
+        self._research_panel.stop()
 
 
 def _launch_bundle() -> bool:
@@ -3043,6 +3339,43 @@ def _make_voice(missing: list[str]):
     return VoiceEngine()
 
 
+def _resolve_research(root):
+    """Resolve the research root or return a storage error.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Active project workspace.
+
+    Returns
+    -------
+    tuple
+        Research root or ``None`` and an error string or ``None``.
+    """
+    try:
+        return research_root(workspace=root), None
+    except ResearchPathError as exc:
+        return None, str(exc)
+
+
+def _init_store(factory, root):
+    """Create a store when a research root exists.
+
+    Parameters
+    ----------
+    factory : type
+        Store class.
+    root : pathlib.Path or None
+        Research root.
+
+    Returns
+    -------
+    object or None
+        Store instance when storage is available.
+    """
+    return factory(root) if root is not None else None
+
+
 def _window_central(window) -> QWidget:
     """Create the main window central widget and layout.
 
@@ -3064,29 +3397,6 @@ def _window_central(window) -> QWidget:
     layout.addLayout(window._build_toggle_bar())
     layout.addWidget(window._build_body(central))
     return central
-
-
-def _session_line(line: str) -> str:
-    """Format one JSONL session line as speaker text.
-
-    Parameters
-    ----------
-    line : str
-        Raw JSONL line.
-
-    Returns
-    -------
-    str
-        Formatted speaker line, or an empty string.
-    """
-    try:
-        body = json.loads(line)
-    except json.JSONDecodeError:
-        return ""
-    role, content = body.get("role"), body.get("content")
-    if role in ("user", "assistant") and isinstance(content, str):
-        return role + ": " + content
-    return ""
 
 
 def _sidebar_widget(parent) -> QWidget:
@@ -3156,6 +3466,44 @@ def _new_button(sidebar, label: str, slot) -> QPushButton:
     button = QPushButton(label, sidebar)
     button.clicked.connect(slot)
     return button
+
+
+def _with_context(builder, prompt):
+    """Prepend optional context only when it is non-empty.
+
+    Parameters
+    ----------
+    builder : collections.abc.Callable or None
+        Optional context builder.
+    prompt : str
+        User prompt.
+
+    Returns
+    -------
+    str
+        Prompt with optional context.
+    """
+    context = builder() if builder is not None else ""
+    return context + "\n\n" + prompt if context else prompt
+
+
+def _toggle_specs(window):
+    """Return the checkbox labels, settings keys, and slots.
+
+    Parameters
+    ----------
+    window : QMainWindow
+        Owning window.
+
+    Returns
+    -------
+    tuple
+        Checkbox specifications.
+    """
+    return (
+        ("Show commands", "show_commands", window._on_show_commands),
+        ("Show tool activity", "show_tools", window._on_show_tools),
+    )
 
 
 def _toggle_box(window, label: str, key: str, slot) -> QCheckBox:

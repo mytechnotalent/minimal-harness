@@ -182,6 +182,7 @@ class Agent:
         web_enabled: bool = True,
         lean: bool = False,
         repo: bool = False,
+        system_prompt: str | None = None,
     ) -> None:
         """Initialize an agent session.
 
@@ -206,12 +207,15 @@ class Agent:
         repo : bool
             Use the existing-repository prompt.
 
+        system_prompt : str or None
+            Optional full system prompt override.
+
         Returns
         -------
         None
             This initializer configures the agent.
         """
-        self.observer = observer
+        self.observer, self.system_prompt = observer, system_prompt
         self.lean = lean
         self.repo = repo or _repo_env()
         self.client = client or OpenRouterClient()
@@ -312,11 +316,11 @@ class Agent:
         messages = session.messages[:] if session else []
         for message in messages:
             _repair_tool_calls(message)
+        prompt = self.system_prompt or _system_prompt(self.lean, self.repo)
         if messages and messages[0].get("role") == "system":
+            messages[0] = {"role": "system", "content": prompt}
             return messages
-        return [
-            {"role": "system", "content": _system_prompt(self.lean, self.repo)}
-        ] + messages
+        return [{"role": "system", "content": prompt}] + messages
 
     def run(self, prompt: str) -> str:
         """Run the agent until final text or turn limit.
