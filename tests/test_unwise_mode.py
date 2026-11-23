@@ -101,13 +101,15 @@ class UnwiseModeTests(unittest.TestCase):
         self._env.start()
         self.addCleanup(self._env.stop)
 
-    def _window(self, unwise=False):
-        """Build a window with a chosen Unwise Mode setting.
+    def _window(self, unwise=False, dark=True):
+        """Build a window with chosen Unwise Mode and dark mode settings.
 
         Parameters
         ----------
         unwise : bool
             Initial Unwise Mode value.
+        dark : bool
+            Initial dark mode value.
 
         Returns
         -------
@@ -116,6 +118,7 @@ class UnwiseModeTests(unittest.TestCase):
         """
         settings = Settings(self._base / "settings.json")
         settings.set("unwise_mode", unwise)
+        settings.set("dark_mode", dark)
         window = MainWindow(self._store, self._base / "project", settings)
         self.addCleanup(window._stop_panels)
         return window
@@ -199,7 +202,7 @@ class UnwiseModeTests(unittest.TestCase):
         None
             Dark mode and Unwise Mode remain independent.
         """
-        window = self._window()
+        window = self._window(dark=False)
         window._dark_button.click()
         self.assertTrue(window._settings.get("dark_mode"))
         self.assertEqual(window.windowOpacity(), 1.0)

@@ -12,8 +12,8 @@ from gui.style import STYLESHEET
 class DarkModeTest(unittest.TestCase):
     """Verify the dark mode default and stylesheet."""
 
-    def test_dark_mode_defaults_off(self) -> None:
-        """Fresh settings disable dark mode.
+    def test_dark_mode_defaults_on(self) -> None:
+        """Fresh settings enable dark mode.
 
         Parameters
         ----------
@@ -26,7 +26,7 @@ class DarkModeTest(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as folder:
             settings = Settings(Path(folder) / "settings.json")
-            self.assertFalse(settings.get("dark_mode"))
+            self.assertTrue(settings.get("dark_mode"))
 
     def test_dark_stylesheet_uses_dark_background(self) -> None:
         """The dark sheet differs and uses a dark surface.
