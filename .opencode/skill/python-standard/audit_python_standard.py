@@ -699,7 +699,7 @@ def _local_modules():
     set of str
         Names importable from the repository root.
     """
-    names = {"setup_app"}
+    names = set()
     for child in REPO.iterdir():
         if (child / "__init__.py").exists():
             names.add(child.name)

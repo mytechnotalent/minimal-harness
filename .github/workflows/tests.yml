@@ -29,9 +29,9 @@ jobs:
         if: runner.os == 'Windows'
         run: python -m pip install windows-curses
       - name: Format check
-        run: black --check --diff meta_harness tests gui benchmarks scripts setup_app.py .opencode
+        run: black --check --diff meta_harness tests gui benchmarks scripts .opencode
       - name: Lint
-        run: flake8 meta_harness tests gui benchmarks scripts setup_app.py .opencode
+        run: flake8 meta_harness tests gui benchmarks scripts .opencode
       - name: Standard audit
         run: python .opencode/skill/python-standard/audit_python_standard.py
       - name: Corpus integrity

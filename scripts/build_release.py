@@ -1,6 +1,5 @@
 """Build distributable SavrenAI release archives."""
 
-import os
 import shutil
 import subprocess
 import sys
@@ -22,50 +21,10 @@ def main() -> int:
         Process exit code.
     """
     root = Path(__file__).resolve().parent.parent
-    if sys.platform == "darwin":
-        return _build_darwin(root)
     if sys.platform == "win32":
         return _build_windows(root)
-    print("Release builds run on macOS or Windows only.")
+    print("Release builds run on Windows only.")
     return 1
-
-
-def _build_darwin(root: Path) -> int:
-    """Build, ad-hoc sign, and zip the macOS bundle.
-
-    Parameters
-    ----------
-    root : pathlib.Path
-        Repository root.
-
-    Returns
-    -------
-    int
-        Process exit code.
-    """
-    env = dict(os.environ)
-    env["SAVRENAI_RELEASE"] = "1"
-    _run([sys.executable, "setup_app.py", "py2app"], root, env)
-    bundle = root / "dist" / f"{APP_NAME}.app"
-    _run(_codesign_command(bundle), root, None)
-    _zip(bundle, root / f"{APP_NAME}-macos")
-    return 0
-
-
-def _codesign_command(bundle: Path) -> list[str]:
-    """Build the ad-hoc codesign command for one bundle.
-
-    Parameters
-    ----------
-    bundle : pathlib.Path
-        Built application bundle.
-
-    Returns
-    -------
-    list[str]
-        Command and arguments.
-    """
-    return ["codesign", "--force", "--deep", "-s", "-", str(bundle)]
 
 
 def _build_windows(root: Path) -> int:
@@ -125,12 +84,12 @@ def _run(command: list[str], cwd: Path, env: dict | None) -> None:
 
 
 def _zip(source: Path, destination: Path) -> None:
-    """Archive a bundle or folder with ditto.
+    """Archive a built folder as a zip file.
 
     Parameters
     ----------
     source : pathlib.Path
-        Bundle or folder to archive.
+        Folder to archive.
     destination : pathlib.Path
         Output path without extension.
 
@@ -139,31 +98,7 @@ def _zip(source: Path, destination: Path) -> None:
     None
         The archive is written next to the source.
     """
-    if sys.platform != "darwin":
-        shutil.make_archive(
-            str(destination), "zip", source.parent, source.name
-        )
-        return
-    _run(_ditto_command(source, destination), source.parent, None)
-
-
-def _ditto_command(source: Path, destination: Path) -> list[str]:
-    """Build the ditto zip command.
-
-    Parameters
-    ----------
-    source : pathlib.Path
-        Bundle or folder to archive.
-    destination : pathlib.Path
-        Output path without extension.
-
-    Returns
-    -------
-    list[str]
-        Command and arguments.
-    """
-    target = f"{destination}.zip"
-    return ["ditto", "-c", "-k", "--keepParent", str(source), target]
+    shutil.make_archive(str(destination), "zip", source.parent, source.name)
 
 
 if __name__ == "__main__":

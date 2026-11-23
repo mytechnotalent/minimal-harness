@@ -52,9 +52,9 @@ See `.opencode/skill/python-standard/SKILL.md`. Summary:
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]" flake8 pycodestyle
-black meta_harness tests gui benchmarks scripts setup_app.py
-black --check meta_harness tests gui benchmarks scripts setup_app.py
-flake8 meta_harness tests gui benchmarks scripts setup_app.py
+black meta_harness tests gui benchmarks scripts
+black --check meta_harness tests gui benchmarks scripts
+flake8 meta_harness tests gui benchmarks scripts
 python .opencode/skill/python-standard/audit_python_standard.py
 python -m compileall -q meta_harness tests gui scripts
 python -m unittest discover -s tests -v

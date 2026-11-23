@@ -8,11 +8,12 @@ This repository is an independent modification. It is not the paper authors' art
 
 ## Download
 
-Desktop apps for macOS and Windows are attached to every tagged release at
+A Windows desktop app is attached to every tagged release at
 https://github.com/mytechnotalent/SavrenAI/releases. The builds are
-unsigned, so the operating system shows its standard unverified-software
-warning the first time; the one-time steps to open them are in
-[docs/release-free.md](docs/release-free.md).
+unsigned, so Windows shows its standard unverified-software warning the
+first time; the one-time step to open it is in
+[docs/release-free.md](docs/release-free.md). macOS users run the app from
+source.
 
 ## Installation
 
@@ -35,7 +36,7 @@ Then install the extras for what you want to run:
 | CLI, answer mode, and optimizer | `pip install -e .` | No runtime dependencies (standard library only) |
 | Web search and browser tools | `pip install -e ".[browser]"` then `playwright install chromium` | Playwright and headless Chromium |
 | Desktop app (classic, HAL, cyber) | `pip install -e ".[voice,browser]"` then `playwright install chromium` | PySide6, voice input, TTS, and browser tools |
-| Development and tests | `pip install -e ".[dev]" flake8 pycodestyle` | Black, Playwright, and py2app on macOS |
+| Development and tests | `pip install -e ".[dev]" flake8 pycodestyle` | Black and Playwright |
 
 Activate the virtual environment in every new terminal before running any
 command:
@@ -429,18 +430,6 @@ Desk header reopens it at any time.
 The classic interface offers Light, Dark (psycho), and **Unwise** appearance
 options. Unwise Mode renders the window at 50 percent opacity and is reversible
 without losing the light or dark palette choice.
-
-### macOS app bundle
-
-Build and install the real `.app` so the Dock and menu bar say **SavrenAI** and use the red-eye icon:
-
-```bash
-python scripts/build_macos_app.py
-open "$HOME/Applications/SavrenAI.app"
-```
-
-The bundle uses py2app alias mode and points at this repository's `.venv`.
-Rebuild it after moving the repository.
 
 ### Project folders
 
@@ -853,9 +842,9 @@ cd savrenai
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]" flake8 pycodestyle
-black meta_harness tests gui benchmarks scripts setup_app.py
-black --check meta_harness tests gui benchmarks scripts setup_app.py
-flake8 meta_harness tests gui benchmarks scripts setup_app.py
+black meta_harness tests gui benchmarks scripts
+black --check meta_harness tests gui benchmarks scripts
+flake8 meta_harness tests gui benchmarks scripts
 python .opencode/skill/python-standard/audit_python_standard.py
 python -m compileall -q meta_harness tests gui scripts
 python -m unittest discover -s tests -v
