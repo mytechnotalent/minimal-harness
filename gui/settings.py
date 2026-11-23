@@ -11,7 +11,7 @@ class Settings:
         "show_commands": False,
         "show_tools": False,
         "speak_replies": True,
-        "dark_mode": False,
+        "dark_mode": True,
         "unwise_mode": False,
         "workspace": "",
         "research_desk_welcome_seen": False,

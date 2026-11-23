@@ -4292,7 +4292,7 @@ class MainWindow(QMainWindow):
         QLabel
             Logo showing the header image.
         """
-        path = Path(__file__).parent / "assets" / "sage_logo.png"
+        path = Path(__file__).parent / "assets" / "savren_logo.png"
         label = QLabel(self)
         pixmap = QPixmap(str(path)).scaledToHeight(
             180, Qt.SmoothTransformation

@@ -1,6 +1,6 @@
 ---
 name: python-standard
-description: Use ONLY when writing, editing, or reviewing Python in a savrenai project (meta_harness/, gui/, benchmarks/, scripts/, tests/, setup_app.py). Enforces full PEP 8 via pycodestyle at 79 columns, a module/class/function docstring with Parameters and Returns sections on everything, no function over 8 executable lines, no blank lines inside a function body, and a ban on em/en dashes. Run the bundled audit_python_standard.py before every commit.
+description: Use ONLY when writing, editing, or reviewing Python in a savrenai project (meta_harness/, gui/, benchmarks/, scripts/, tests/). Enforces full PEP 8 via pycodestyle at 79 columns, a module/class/function docstring with Parameters and Returns sections on everything, no function over 8 executable lines, no blank lines inside a function body, and a ban on em/en dashes. Run the bundled audit_python_standard.py before every commit.
 ---
 
 # Python standard (savrenai)
@@ -29,7 +29,7 @@ no variation between projects.
 meta_harness/  pipeline.py agent.py tools.py docker_gate.py openrouter.py ...
 gui/           app.py hal.py store.py worker.py style.py ...
 benchmarks/    starter/ hard/ heldout/ validation/
-scripts/       build_macos_app.py run_desktop.py
+scripts/       build_release.py run_desktop.py
 tests/
 ```
 
