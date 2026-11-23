@@ -12,3 +12,6 @@ runs/
 .DS_Store
 build/
 dist/
+
+# PyInstaller build artifacts
+*.spec

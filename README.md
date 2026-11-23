@@ -8,12 +8,14 @@ This repository is an independent modification. It is not the paper authors' art
 
 ## Download
 
-A Windows desktop app is attached to every tagged release at
-https://github.com/mytechnotalent/SavrenAI/releases. The builds are
-unsigned, so Windows shows its standard unverified-software warning the
-first time; the one-time step to open it is in
-[docs/release-free.md](docs/release-free.md). macOS users run the app from
-source.
+Desktop apps for Windows, Linux, and macOS (Apple Silicon) are attached to
+every tagged release at
+https://github.com/mytechnotalent/SavrenAI/releases. Each archive ships a
+`.env.example` next to the executable - rename it to `.env`, fill in the
+provider key, and launch. The builds are unsigned, so the operating system
+shows its standard unverified-software warning the first time; the
+one-time steps to open them are in
+[docs/release-free.md](docs/release-free.md).
 
 ## Installation
 
