@@ -1,0 +1,30 @@
+[
+  {
+    "id": "inventory",
+    "workspace": "tasks/inventory/workspace",
+    "test": "tasks/inventory/test_inventory.py",
+    "reference": "tasks/inventory/reference",
+    "prompt": "Implement the inventory package in this workspace. Inventory.add(sku, qty, unit_cents) stores stock and raises ValueError for non-positive qty or unit_cents. Inventory.remove(sku, qty) raises KeyError for an unknown sku and ValueError when the quantity is non-positive or exceeds stock. discount_rate(total_units) returns 0.0 below 10 units, 0.05 from 10 through 49, and 0.10 from 50. total_cents(order, tax_bp) takes a mapping of sku to (qty, unit_cents), computes the subtotal, applies the tier discount for the total unit count, rounds the discounted subtotal half up to the nearest cent, then adds tax in basis points rounded half up to the nearest cent."
+  },
+  {
+    "id": "logreport",
+    "workspace": "tasks/logreport/workspace",
+    "test": "tasks/logreport/test_logreport.py",
+    "reference": "tasks/logreport/reference",
+    "prompt": "Implement the logs package in this workspace. parse_line(line) accepts 'YYYY-MM-DDTHH:MM:SS LEVEL message' where LEVEL is DEBUG, INFO, WARN, or ERROR, and returns a dict with time, level, and message (message stripped). It returns None for malformed lines or unknown levels. summarize(lines) returns counts per level (only levels present), the number of invalid lines, and the first and last valid timestamps or None. filter_level(lines, level) returns the messages of valid lines at that level in order."
+  },
+  {
+    "id": "configmerge",
+    "workspace": "tasks/configmerge/workspace",
+    "test": "tasks/configmerge/test_configmerge.py",
+    "reference": "tasks/configmerge/reference",
+    "prompt": "Implement the settings package in this workspace. deep_merge(base, override) returns a new dict where nested dicts merge recursively and every other override value replaces the base value, without mutating base. apply_env(config, env, prefix='APP_') returns a new config with variables starting with prefix applied: APP_DB__HOST maps to nested key db.host (double underscore separates levels, single underscores stay in the key). Values 'true' and 'false' case-insensitively become bools, digit strings become ints, everything else stays a string. Environment values take precedence."
+  },
+  {
+    "id": "verlib",
+    "workspace": "tasks/verlib/workspace",
+    "test": "tasks/verlib/test_verlib.py",
+    "reference": "tasks/verlib/reference",
+    "prompt": "Implement the verlib package in this workspace. parse(text) accepts MAJOR.MINOR.PATCH with an optional -PRERELEASE and +BUILD. Return (major, minor, patch, prerelease) where prerelease is a tuple of ints for numeric identifiers and strings otherwise, or an empty tuple. Raise ValueError for invalid input; build metadata is ignored. compare(left, right) returns -1, 0, or 1 using semver precedence: numeric identifiers compare numerically, alphanumeric identifiers lexically, numeric identifiers rank below alphanumeric ones, a version without prerelease ranks above one with it, and build metadata is ignored."
+  }
+]

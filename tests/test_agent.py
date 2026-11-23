@@ -1,0 +1,2522 @@
+"""Tests for the Pi-like interactive tool runtime."""
+
+import json
+import os
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from meta_harness.agent import Agent
+from meta_harness.agent import _repair_attempts
+from meta_harness.agent import _profile_context_chars
+from meta_harness.agent import _test_command
+from meta_harness.session import Session
+from meta_harness.tools import ToolError
+from meta_harness.tools import ToolRegistry
+from meta_harness.tools import _compact_test_output
+
+
+class AgentTests(unittest.TestCase):
+    """Verify model-driven tool execution and workspace safety."""
+
+    def test_agent_executes_write_then_returns_final_text(self) -> None:
+        """Execute a model-requested write before final response.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Assertions pass when the tool loop completes.
+        """
+        client = ToolCallClient()
+        with tempfile.TemporaryDirectory() as directory:
+            answer = Agent(directory, client=client).run("Build an app")
+            content = Path(directory, "index.html").read_text()
+        self.assertEqual(answer, "App created")
+        self.assertEqual(content, "<h1>SavrenAI</h1>")
+        self.assertEqual(client.calls, 2)
+
+    def test_registry_rejects_path_escape(self) -> None:
+        """Reject file operations outside the workspace root.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Assertions pass when traversal is blocked.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ToolError):
+                ToolRegistry(directory).write("../escape.txt", "bad")
+
+    def test_agent_starts_with_ask_prompt(self) -> None:
+        """The agent begins with the ask-don't-assume system prompt.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Assertions pass when the system message is present.
+        """
+        agent = Agent(".", client=ToolCallClient())
+        self.assertEqual(agent.messages[0]["role"], "system")
+        self.assertIn("ask", agent.messages[0]["content"].lower())
+
+    def test_ask_tool_uses_questioner(self) -> None:
+        """The ask tool returns the questioner's chosen answer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Assertions pass when the answer is returned.
+        """
+        registry = ToolRegistry(".", questioner=lambda q, opts: "beta")
+        raw = registry.execute(
+            "ask", {"question": "Pick", "options": ["alpha", "beta"]}
+        )
+        self.assertEqual(json.loads(raw)["answer"], "beta")
+
+    def test_ask_tool_hidden_without_questioner(self) -> None:
+        """The ask tool is only advertised with a questioner wired.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Assertions pass when visibility tracks the questioner.
+        """
+        bare = ToolRegistry(".")
+        self.assertNotIn("ask", self._names(bare))
+        self.assertNotIn("suggest", self._names(bare))
+        wired = ToolRegistry(".", questioner=lambda q, opts: "x")
+        self.assertIn("ask", self._names(wired))
+        self.assertIn("suggest", self._names(wired))
+
+    def test_suggest_tool_records_short_options(self) -> None:
+        """The suggest tool stores short clickable labels.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Assertions pass when suggestions are recorded.
+        """
+        expected = ["Find local experts", "Find local class"]
+        registry = ToolRegistry(".", questioner=lambda q, opts: "")
+        registry.execute("suggest", {"options": expected})
+        self.assertEqual(registry.suggestions, expected)
+
+    def test_web_tools_can_be_disabled(self) -> None:
+        """Web and browser tools are hidden when disabled.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        registry = ToolRegistry(".", web_enabled=False)
+        names = self._names(registry)
+        self.assertNotIn("web_search", names)
+        self.assertIn("read", names)
+
+    def _names(self, registry: ToolRegistry) -> list[str]:
+        """Return advertised tool names.
+
+        Parameters
+        ----------
+        registry : ToolRegistry
+            Tool registry to inspect.
+
+        Returns
+        -------
+        list[str]
+            Advertised tool names.
+        """
+        return [item["function"]["name"] for item in registry.schema()]
+
+
+class ToolOutputTests(unittest.TestCase):
+    """Verify oversized tool output is clipped before it reaches the model."""
+
+    def test_read_output_is_truncated(self) -> None:
+        """A large file result is wrapped with a bounded payload.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        raw = _read_output()
+        value = json.loads(raw)
+        self.assertTrue(value["truncated"])
+        self.assertLessEqual(len(value["output"]), 2100)
+        self.assertIn("...[truncated]...", value["output"])
+
+
+class WorkspaceSearchTests(unittest.TestCase):
+    """Verify repository search and patch tools."""
+
+    def test_glob_and_repo_map_find_files(self) -> None:
+        """Glob and repo map list nested source files.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _workspace_file(root, "src/a.py", "x = 1\n")
+            globbed, mapped = _search_results(root)
+        expected = str(Path("src") / "a.py")
+        self.assertEqual(globbed["files"], [expected])
+        self.assertEqual(mapped["files"], [expected])
+
+    def test_grep_and_list_report_workspace_entries(self) -> None:
+        """Grep finds lines and list reports directory entries.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _workspace_file(root, "src/a.py", "value = 42\n")
+            registry = ToolRegistry(root)
+            found = registry.grep("42")
+            listed = registry.list("src")
+        self.assertEqual(found["matches"][0]["line"], 1)
+        self.assertEqual(listed["entries"][0]["name"], "a.py")
+
+    def test_edit_accepts_whitespace_variant(self) -> None:
+        """A whitespace-insensitive match still edits safely.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = _workspace_file(
+                root, "a.py", "def  add(a, b):\n    return a + b\n"
+            )
+            registry = ToolRegistry(root)
+            registry.edit("a.py", "def add(a, b):", "def add(a, b, c):")
+            self.assertIn("def add(a, b, c):", path.read_text())
+
+    def test_edit_reports_duplicate_match(self) -> None:
+        """A repeated fragment is rejected with a line hint.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _workspace_file(root, "a.py", "same\nsame\n")
+            registry = ToolRegistry(root)
+            with self.assertRaises(ToolError) as raised:
+                registry.edit("a.py", "same", "other")
+        self.assertIn("not unique", str(raised.exception))
+
+    def test_patch_applies_multiple_edits(self) -> None:
+        """A patch applies every fragment in one call.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = _workspace_file(root, "a.py", "one = 1\ntwo = 2\n")
+            registry = ToolRegistry(root)
+            result = registry.patch("a.py", _two_edits())
+            content = path.read_text()
+        self.assertEqual(result["replacements"], 2)
+        self.assertIn("one = 10", content)
+
+    def test_test_output_is_compacted(self) -> None:
+        """Long test logs keep only failure lines.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        text = "noise\n" * 5000 + "FAILED test_x - AssertionError\n"
+        compact = _compact_test_output(text)
+        self.assertIn("FAILED test_x", compact)
+        self.assertLess(len(compact), 5000)
+
+
+class PythonEditSafetyTests(unittest.TestCase):
+    """Verify invalid Python edits are rejected before writing."""
+
+    def test_write_rejects_invalid_python(self) -> None:
+        """A write with a syntax error leaves no file behind.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            registry = ToolRegistry(directory)
+            with self.assertRaises(ToolError):
+                registry.write("bad.py", "def broken(:\n")
+            self.assertFalse((Path(directory) / "bad.py").exists())
+
+    def test_edit_rejects_invalid_python(self) -> None:
+        """An invalid edit leaves the original file untouched.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = _workspace_file(root, "a.py", "x = 1\n")
+            registry = ToolRegistry(root)
+            with self.assertRaises(ToolError):
+                registry.edit("a.py", "x = 1", "x = (")
+            self.assertEqual(path.read_text(), "x = 1\n")
+
+
+class ReadRangeTests(unittest.TestCase):
+    """Verify ranged reads reduce context for large files."""
+
+    def test_read_line_range(self) -> None:
+        """Offset and limit return only the requested lines.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _workspace_file(root, "a.txt", "one\ntwo\nthree\n")
+            result = ToolRegistry(root).read("a.txt", offset=2, limit=1)
+        self.assertEqual(result["content"], "two")
+
+
+class ContextAndNudgeTests(unittest.TestCase):
+    """Verify compaction pinning, nudge permissions, and context limits."""
+
+    def test_compaction_pins_latest_user_instruction(self) -> None:
+        """A user correction survives compaction exactly once.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".", client=object())
+        agent.messages = _compaction_messages()
+        agent._compact_messages(2)
+        contents = [item.get("content") for item in agent.messages]
+        self.assertIn("task", contents)
+        self.assertEqual(contents.count("steering"), 1)
+
+    def test_nudge_allows_read_and_test_bash(self) -> None:
+        """Inspection and test commands survive the nudge.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".", client=object())
+        agent._nudged = True
+        read = {"name": "read", "arguments": '{"path": "x.py"}'}
+        test = {"name": "bash", "arguments": '{"command": "pytest -q"}'}
+        shell = {"name": "bash", "arguments": '{"command": "ls -la"}'}
+        self.assertTrue(agent._nudge_allowed(read))
+        self.assertTrue(agent._nudge_allowed(test))
+        self.assertFalse(agent._nudge_allowed(shell))
+
+    def test_profile_context_chars(self) -> None:
+        """Profiles provide the default context budget.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        deepseek = SimpleNamespace(model="deepseek-v4.1-flash")
+        beam = SimpleNamespace(model="beam-free")
+        self.assertEqual(_profile_context_chars(deepseek), 250000)
+        self.assertEqual(_profile_context_chars(beam), 80000)
+
+    def test_context_limit_env_override(self) -> None:
+        """An explicit context budget overrides the profile.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = SimpleNamespace(model="deepseek-v4.1-flash")
+        agent = Agent(root=".", client=client)
+        with patch.dict(os.environ, {"HARNESS_CONTEXT_CHARS": "1234"}):
+            self.assertEqual(agent._context_limit(), 1234)
+
+
+class AutoVerifyTests(unittest.TestCase):
+    """Verify project-test auto-verification and repair."""
+
+    def test_test_command_detects_pytest(self) -> None:
+        """A tests directory selects pytest.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tests").mkdir()
+            self.assertEqual(
+                _test_command(root), ["python", "-m", "pytest", "-q"]
+            )
+
+    @patch("meta_harness.agent._restore_workspace")
+    @patch("meta_harness.agent._snapshot", return_value=Path("."))
+    def test_auto_verify_repairs_failure(self, _snapshot, _restore) -> None:
+        """A failing project test triggers one repair loop.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".", client=object(), max_turns=1)
+        result, loop = _auto_verify_result(agent)
+        self.assertEqual(result, "fixed")
+        loop.assert_called_once()
+
+
+class EditNudgeTests(unittest.TestCase):
+    """Verify exploration is cut off with an edit nudge."""
+
+    def test_nudge_restricts_tools(self) -> None:
+        """After three quiet turns edit and inspection tools are advertised.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".", client=object())
+        agent._maybe_nudge(3)
+        names = {item["function"]["name"] for item in agent._tool_schemas(3)}
+        self.assertEqual(
+            names, {"edit", "write", "patch", "read", "grep", "glob"}
+        )
+
+    def test_nudge_allows_read_tools(self) -> None:
+        """Read tools remain available after the nudge to formulate edits.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            resolved = Path(directory).resolve()
+            Path(resolved, "x").write_text("hello", encoding="utf-8")
+            result = _read_nudged_result(resolved)
+            self.assertIn("hello", result["content"])
+
+    def test_nudge_blocks_non_edit_tools(self) -> None:
+        """Non-edit tools fail until a file is modified.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".", client=object())
+        agent._nudged = True
+        call = {"id": "1", "function": {"name": "bash", "arguments": "{}"}}
+        result = agent._tool_result(call)
+        self.assertIn("unavailable", result["content"])
+
+    def test_bash_blocks_outside_paths(self) -> None:
+        """Shell commands cannot escape the workspace.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            registry = ToolRegistry(directory)
+            with self.assertRaises(ToolError):
+                registry.bash("find / -name signer.py")
+
+
+class LoopingClient:
+    """Return one tool call, then a final answer."""
+
+    def __init__(self) -> None:
+        """Initialize the call counter.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        self.calls = 0
+
+    def chat(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Return a tool call first and text second.
+
+        Parameters
+        ----------
+        messages : list[dict]
+            Conversation messages.
+
+        tools : list[dict]
+            Advertised tool schemas.
+
+        Returns
+        -------
+        dict
+            OpenAI-compatible response body.
+        """
+        self.calls += 1
+        return self._tool_call() if self.calls == 1 else self._final()
+
+    def _tool_call(self) -> dict:
+        """Return one read tool call.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            Response containing one tool call.
+        """
+        call = {
+            "id": "1",
+            "function": {"name": "read", "arguments": '{"path": "x"}'},
+        }
+        message = {"role": "assistant", "content": "", "tool_calls": [call]}
+        return {"choices": [{"message": message}]}
+
+    def _final(self) -> dict:
+        """Return a final text response.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            Response containing final text.
+        """
+        message = {"role": "assistant", "content": "final answer"}
+        return {"choices": [{"message": message}]}
+
+
+class ReviewClient:
+    """Return a draft answer and a fixed review response."""
+
+    def __init__(self, review: str, draft: str = "draft answer") -> None:
+        """Store the review response and draft answer.
+
+        Parameters
+        ----------
+        review : str
+            Raw review text.
+        draft : str
+            Draft answer returned by :meth:`chat`.
+
+        Returns
+        -------
+        None
+            The client is ready.
+        """
+        self.review = review
+        self.draft = draft
+        self.complete_calls = 0
+
+    def chat(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Return a draft final answer.
+
+        Parameters
+        ----------
+        messages : list[dict]
+            Conversation messages.
+
+        tools : list[dict]
+            Advertised tool schemas.
+
+        Returns
+        -------
+        dict
+            Response containing the draft answer.
+        """
+        message = {"role": "assistant", "content": self.draft}
+        return {"choices": [{"message": message}]}
+
+    def complete(
+        self, system: str, user: str, temperature: float = 0.2
+    ) -> str:
+        """Return the configured review text.
+
+        Parameters
+        ----------
+        system : str
+            System instruction.
+
+        user : str
+            User payload.
+
+        temperature : float
+            Sampling temperature.
+
+        Returns
+        -------
+        str
+            Raw review text.
+        """
+        self.complete_calls += 1
+        return self.review
+
+
+class RecordingClient:
+    """Record chat requests and return a fixed final answer."""
+
+    def __init__(self) -> None:
+        """Initialize an empty recording.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The client is ready.
+        """
+        self.messages: list[dict] = []
+        self.calls = 0
+
+    def chat(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Record the request and return final text.
+
+        Parameters
+        ----------
+        messages : list[dict]
+            Conversation messages.
+
+        tools : list[dict]
+            Advertised tool schemas.
+
+        Returns
+        -------
+        dict
+            Response containing final text.
+        """
+        self.messages = messages
+        self.calls += 1
+        message = {"role": "assistant", "content": "final answer"}
+        return {"choices": [{"message": message}]}
+
+
+class SlowReviewClient:
+    """Block the review call until released."""
+
+    def __init__(self) -> None:
+        """Create the release gate.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The release event is created.
+        """
+        self.release = threading.Event()
+
+    def chat(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Return a draft final answer.
+
+        Parameters
+        ----------
+        messages : list of dict
+            Conversation messages.
+        tools : list of dict
+            Advertised tools.
+
+        Returns
+        -------
+        dict
+            A model response holding a draft answer.
+        """
+        message = {"role": "assistant", "content": "draft answer"}
+        return {"choices": [{"message": message}]}
+
+    def complete(
+        self, system: str, user: str, temperature: float = 0.2
+    ) -> str:
+        """Block until the test releases the reviewer.
+
+        Parameters
+        ----------
+        system : str
+            Review instruction.
+        user : str
+            Review payload.
+        temperature : float
+            Sampling temperature.
+
+        Returns
+        -------
+        str
+            Approved review JSON.
+        """
+        self.release.wait()
+        return '{"approved": true}'
+
+
+class FailingReviewClient:
+    """Return a draft answer and fail every review call."""
+
+    def chat(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Return a draft final answer.
+
+        Parameters
+        ----------
+        messages : list[dict]
+            Conversation messages.
+        tools : list[dict]
+            Advertised tool schemas.
+
+        Returns
+        -------
+        dict
+            Response containing the draft.
+        """
+        message = {"role": "assistant", "content": "draft answer"}
+        return {"choices": [{"message": message}]}
+
+    def complete(
+        self, system: str, user: str, temperature: float = 0.2
+    ) -> str:
+        """Raise to simulate an unavailable reviewer.
+
+        Parameters
+        ----------
+        system : str
+            Review instruction.
+        user : str
+            Review payload.
+        temperature : float
+            Sampling temperature.
+
+        Returns
+        -------
+        str
+            Never returned.
+        """
+        raise RuntimeError("review unavailable")
+
+
+def _write_call(path: str, content: str) -> dict:
+    """Build an assistant message that writes a workspace file.
+
+    Parameters
+    ----------
+    path : str
+        Workspace path.
+    content : str
+        File contents.
+
+    Returns
+    -------
+    dict
+        Assistant message with one write tool call.
+    """
+    function = {
+        "name": "write",
+        "arguments": json.dumps({"path": path, "content": content}),
+    }
+    call = {"id": "1", "function": function}
+    return {"role": "assistant", "content": "", "tool_calls": [call]}
+
+
+def _reviewed_context(agent: Agent) -> dict:
+    """Return decoded reviewer context for a fixed question.
+
+    Parameters
+    ----------
+    agent : Agent
+        Agent holding the conversation.
+
+    Returns
+    -------
+    dict
+        Parsed reviewer payload.
+    """
+    raw = agent._review_context("question", "draft answer")
+    return json.loads(raw)
+
+
+def _review_agent(review: dict) -> Agent:
+    """Build an agent that answers with one reviewer verdict.
+
+    Parameters
+    ----------
+    review : dict
+        Reviewer verdict.
+
+    Returns
+    -------
+    Agent
+        Agent with a scripted reviewer.
+    """
+    client = ReviewClient(json.dumps(review))
+    return Agent(root=".", client=client, max_turns=1)
+
+
+def _review_verdict(mode: str, kind: str, severity: str, revised: str) -> dict:
+    """Build a reviewer verdict with one issue.
+
+    Parameters
+    ----------
+    mode : str
+        Review mode.
+    kind : str
+        Issue kind.
+    severity : str
+        Issue severity.
+    revised : str
+        Replacement answer.
+
+    Returns
+    -------
+    dict
+        Reviewer verdict.
+    """
+    issue = {"kind": kind, "severity": severity, "detail": "x"}
+    return {
+        "mode": mode,
+        "approved": False,
+        "issues": [issue],
+        "revised_answer": revised,
+    }
+
+
+class AnswerReviewTests(unittest.TestCase):
+    """Verify adversarial review of final answers."""
+
+    def test_approved_answer_is_kept(self) -> None:
+        """An approved draft is returned unchanged.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = ReviewClient('{"approved": true, "issues": []}')
+        agent = Agent(root=".", client=client, max_turns=1)
+        self.assertEqual(agent.run("question"), "draft answer")
+
+    def test_rejected_answer_is_revised(self) -> None:
+        """A rejected draft is replaced by the revised answer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        review = _rejected_review()
+        agent = Agent(root=".", client=ReviewClient(review), max_turns=1)
+        self.assertEqual(agent.run("question"), "better answer")
+
+    def test_revision_that_drops_code_block_is_kept(self) -> None:
+        """A revision that drops the original code block is ignored.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The original code-bearing answer is returned.
+        """
+        draft = "```python\ndef f():\n    return 1\n```"
+        review = json.dumps(
+            {"approved": False, "revised_answer": "fixed prose without code"}
+        )
+        client = ReviewClient(review, draft=draft)
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_REVIEW": "1"}):
+            self.assertEqual(agent.run("question"), draft)
+
+    def test_revision_of_code_answer_is_kept(self) -> None:
+        """A code-bearing answer is never replaced without verification.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The original code-bearing answer is returned.
+        """
+        draft = "```python\ndef f():\n    return 1\n```"
+        revised = "```python\ndef f():\n    return 2\n```"
+        review = json.dumps({"approved": False, "revised_answer": revised})
+        client = ReviewClient(review, draft=draft)
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_REVIEW": "1"}):
+            self.assertEqual(agent.run("question"), draft)
+
+    def test_reviewer_rescues_codeless_answer(self) -> None:
+        """A revision that adds a code block to a codeless answer applies.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The revised code-bearing answer is returned.
+        """
+        draft = "the code is in my notes"
+        revised = "```python\ndef f():\n    return 2\n```"
+        review = json.dumps({"approved": False, "revised_answer": revised})
+        client = ReviewClient(review, draft=draft)
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_REVIEW": "1"}):
+            self.assertEqual(agent.run("question"), revised)
+
+    def test_revision_records_original_and_revised(self) -> None:
+        """A revision records both the original and the corrected answer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Both texts are present in the review event.
+        """
+        review = _rejected_review()
+        agent = Agent(root=".", client=ReviewClient(review), max_turns=1)
+        agent.run("question")
+        event = _revised_event(agent)
+        self.assertEqual("draft answer", event["original"])
+        self.assertEqual("better answer", event["revised"])
+
+    def test_invalid_review_keeps_answer(self) -> None:
+        """An invalid review does not break the answer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".", client=ReviewClient("not json"), max_turns=1)
+        self.assertEqual(agent.run("question"), "draft answer")
+
+    def test_review_can_be_disabled(self) -> None:
+        """The environment can disable answer review.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = ReviewClient('{"approved": false}')
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_REVIEW": "0"}):
+            self.assertEqual(agent.run("question"), "draft answer")
+        self.assertEqual(client.complete_calls, 0)
+
+    def test_auto_review_skips_short_untooled_answer(self) -> None:
+        """Auto mode skips review for short answers without tools.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = ReviewClient('{"approved": false}')
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_REVIEW": "auto"}):
+            self.assertEqual(agent.run("question"), "draft answer")
+        self.assertEqual(client.complete_calls, 0)
+
+    def test_auto_review_checks_long_answer(self) -> None:
+        """Auto mode reviews a long unsupported answer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = ReviewClient('{"approved": true}', draft="x" * 500)
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_REVIEW": "auto"}):
+            agent.run("question")
+        self.assertEqual(client.complete_calls, 1)
+
+    def test_slow_review_returns_draft(self) -> None:
+        """A hung reviewer cannot block delivery of the draft answer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The draft is returned before the reviewer finishes.
+        """
+        client = SlowReviewClient()
+        agent = Agent(root=".", client=client, max_turns=1)
+        try:
+            with patch.dict(os.environ, {"HARNESS_REVIEW_TIMEOUT": "0.05"}):
+                self.assertEqual(agent.run("question"), "draft answer")
+        finally:
+            client.release.set()
+
+
+class ReviewEngagementTests(unittest.TestCase):
+    """Verify review engagement, artifacts, and logging."""
+
+    def test_review_runs_after_file_edit(self) -> None:
+        """An edited workspace no longer skips the answer review.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The reviewer is called once.
+        """
+        client = ReviewClient('{"approved": true}')
+        agent = Agent(root=".", client=client, max_turns=1)
+        agent._mutated = True
+        agent._review_answer("question", "draft answer")
+        self.assertEqual(client.complete_calls, 1)
+
+    def test_review_context_includes_artifact(self) -> None:
+        """The reviewer receives final contents of edited files.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The written file appears under artifacts.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "plan.md").write_text("load = 42 kN")
+            agent = Agent(root=directory, client=object())
+            agent.messages.append(_write_call("plan.md", "load = 42 kN"))
+            context = _reviewed_context(agent)
+        artifact = context["artifacts"][0]
+        self.assertEqual(artifact["content"], "load = 42 kN")
+
+    def test_bash_created_file_appears_as_artifact(self) -> None:
+        """A file made by bash is found through the workspace diff.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The new file appears under artifacts.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Agent(root=directory, client=object())
+            agent._begin_run("question")
+            agent._prepare_tool("bash")
+            Path(directory, "plan.md").write_text("load = 42 kN")
+            context = _reviewed_context(agent)
+        artifact = context["artifacts"][0]
+        self.assertEqual(artifact["path"], "plan.md")
+
+    def test_disabled_review_is_logged(self) -> None:
+        """A disabled review records why it was skipped.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The event reason is ``disabled``.
+        """
+        client = ReviewClient('{"approved": true}')
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_REVIEW": "0"}):
+            agent.run("question")
+        self.assertEqual(agent.review_events[0]["reason"], "disabled")
+
+    def test_review_error_is_logged(self) -> None:
+        """A reviewer failure is recorded and the draft is returned.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The event reason is ``error``.
+        """
+        agent = Agent(root=".", client=FailingReviewClient(), max_turns=1)
+        self.assertEqual(agent.run("question"), "draft answer")
+        self.assertEqual(agent.review_events[0]["reason"], "error")
+
+    def test_review_log_writes_jsonl(self) -> None:
+        """Configured review logging appends one JSON line.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The log records the engaged event.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "review.jsonl")
+            env = {"HARNESS_REVIEW_LOG": str(path)}
+            with patch.dict(os.environ, env):
+                self._run_review()
+            lines = path.read_text().splitlines()
+        self.assertEqual(json.loads(lines[0])["event"], "engaged")
+
+    def _run_review(self) -> None:
+        """Run one reviewed answer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The agent run completes.
+        """
+        client = ReviewClient('{"approved": true}')
+        agent = Agent(root=".", client=client, max_turns=1)
+        agent.run("question")
+
+
+class ReviewPolicyTests(unittest.TestCase):
+    """Verify mode-aware reviewer decisions."""
+
+    def test_survey_unverifiable_keeps_answer(self) -> None:
+        """An unconfirmed survey item does not strip the answer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The original draft is returned.
+        """
+        review = _review_verdict("survey", "unverifiable", "high", "short")
+        self.assertEqual(
+            _review_agent(review).run("find news"), "draft answer"
+        )
+
+    def test_survey_incorrect_applies_revision(self) -> None:
+        """A fabricated survey item allows a shorter correction.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The revised answer is returned.
+        """
+        review = _review_verdict("survey", "incorrect", "high", "fixed")
+        self.assertEqual(_review_agent(review).run("find news"), "fixed")
+
+    def test_caveat_revision_must_not_shorten(self) -> None:
+        """A caveat-only revision is applied when it keeps coverage.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The longer caveated answer is returned.
+        """
+        review = _review_verdict(
+            "advisory", "missing_caveat", "low", "draft answer plus caveat"
+        )
+        self.assertEqual(
+            _review_agent(review).run("advice"),
+            "draft answer plus caveat",
+        )
+
+    def test_verifiable_incorrect_blocks(self) -> None:
+        """A concrete math error replaces the answer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The corrected answer is returned.
+        """
+        review = _review_verdict("verifiable", "incorrect", "high", "fixed")
+        self.assertEqual(_review_agent(review).run("compute load"), "fixed")
+
+
+def _ledger_review(stated: float) -> str:
+    """Build a ledger response with one computation.
+
+    Parameters
+    ----------
+    stated : float
+        Number claimed by the answer.
+
+    Returns
+    -------
+    str
+        JSON ledger.
+    """
+    computation = {
+        "label": "day 1 protein",
+        "expression": "12 + 22 + 13.5",
+        "stated": stated,
+    }
+    return json.dumps({"computations": [computation], "constraints": []})
+
+
+class LedgerReviewTests(unittest.TestCase):
+    """Verify ledger extraction and review context."""
+
+    def test_ledger_mismatch_is_reported(self) -> None:
+        """A wrong stated total becomes a deterministic issue.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The recomputed value is named.
+        """
+        client = ReviewClient(_ledger_review(75))
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_LEDGER": "on"}):
+            ledger = agent._verify_ledger("meal plan", "draft")
+        self.assertIn("recomputed 47.5", ledger["issues"][0])
+
+    def test_ledger_is_skipped_for_news(self) -> None:
+        """Auto mode does not spend a call on a news request.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            No ledger and no model call.
+        """
+        client = ReviewClient("{}")
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_LEDGER": "auto"}):
+            self.assertIsNone(agent._verify_ledger("find news", "draft"))
+        self.assertEqual(client.complete_calls, 0)
+
+    def test_review_context_includes_verification(self) -> None:
+        """Ledger findings are passed to the reviewer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The verification field is present.
+        """
+        agent = Agent(root=".", client=object())
+        context = json.loads(
+            agent._review_context("q", "a", {"issues": ["x"]})
+        )
+        self.assertEqual(context["verification"]["issues"], ["x"])
+
+
+def _violation_review() -> str:
+    """Build an invariant verdict with one violation.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        JSON verdict.
+    """
+    violation = {
+        "invariant": "A UNIQUE constraint blocks both commits",
+        "claim": "Both inserts can commit",
+        "verdict": "violated",
+        "detail": "the answer says both can commit",
+    }
+    return json.dumps({"applies": True, "violations": [violation]})
+
+
+class InvariantReviewTests(unittest.TestCase):
+    """Verify technical invariant review wiring."""
+
+    def test_violation_is_reported(self) -> None:
+        """A violated invariant becomes a formatted issue.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The violation text is returned.
+        """
+        client = ReviewClient(_violation_review())
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_INVARIANTS": "auto"}):
+            result = agent._invariant_review(
+                "postgres unique constraint", "draft"
+            )
+        self.assertIn("UNIQUE", result["violations"][0])
+
+    def test_news_skips_invariants(self) -> None:
+        """A news request does not spend an invariant call.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            No result and no model call.
+        """
+        client = ReviewClient(_violation_review())
+        agent = Agent(root=".", client=client, max_turns=1)
+        with patch.dict(os.environ, {"HARNESS_ANSWER_INVARIANTS": "auto"}):
+            self.assertIsNone(agent._invariant_review("find news", "draft"))
+        self.assertEqual(client.complete_calls, 0)
+
+    def test_review_context_includes_invariants(self) -> None:
+        """Invariant findings are passed to the reviewer.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            The invariants field is present.
+        """
+        agent = Agent(root=".", client=object())
+        context = json.loads(
+            agent._review_context("q", "a", None, {"violations": ["x"]})
+        )
+        self.assertEqual(context["invariants"]["violations"], ["x"])
+
+
+class CodingStandardsTests(unittest.TestCase):
+    """Verify the agent receives the mandatory language standards."""
+
+    def test_system_prompt_describes_voice_input(self) -> None:
+        """The agent knows the app transcribes its press-to-talk audio.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".")
+        system = agent.messages[0]["content"].lower()
+        self.assertIn("press-to-talk", system)
+        self.assertIn("transcribes", system)
+        self.assertIn("never claim", system)
+
+    def test_system_prompt_falls_back_when_browser_fails(self) -> None:
+        """The agent answers from search results if browsing fails.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".")
+        system = agent.messages[0]["content"]
+        self.assertIn("browser_open", system)
+        self.assertIn("web_search", system)
+
+    def test_system_prompt_includes_standards(self) -> None:
+        """Python, C, Rust, and assembly rules start in the prompt.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".")
+        system = agent.messages[0]["content"]
+        self.assertIn("Mandatory coding standards", system)
+        self.assertIn("REA conventions", system)
+        self.assertIn("embedded C standard", system)
+        self.assertIn("RP2350 RISC-V", system)
+
+    def test_repo_prompt_skips_standards(self) -> None:
+        """Repo mode uses the existing-project prompt without standards.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(root=".", repo=True)
+        system = agent.messages[0]["content"]
+        self.assertIn("existing repository", system)
+        self.assertNotIn("Mandatory coding standards", system)
+
+    def test_standards_strip_for_non_coding_prompt(self) -> None:
+        """Auto mode removes standards from a plain question.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = RecordingClient()
+        agent = Agent(root=".", client=client)
+        agent.run("What is the capital of France?")
+        system = client.messages[0]["content"]
+        self.assertNotIn("Mandatory coding standards", system)
+        self.assertIn("ask", system.lower())
+
+    def test_standards_kept_for_coding_prompt(self) -> None:
+        """Auto mode keeps standards for a coding task.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = RecordingClient()
+        agent = Agent(root=".", client=client)
+        agent.run("Write a python function that adds two numbers.")
+        system = client.messages[0]["content"]
+        self.assertIn("Mandatory coding standards", system)
+
+    def test_repo_mode_uses_repo_prompt(self) -> None:
+        """Repo mode uses repo prompt and suppresses coding standards.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = RecordingClient()
+        agent = Agent(root=".", client=client, repo=True)
+        agent.run("Fix bug in parsing markers.")
+        system = client.messages[0]["content"]
+        self.assertIn("existing repository", system)
+        self.assertNotIn("Mandatory coding standards", system)
+
+    def test_repo_env_activates_repo_mode(self) -> None:
+        """Environment variable enables repo prompt.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = RecordingClient()
+        with patch.dict(os.environ, {"HARNESS_REPO": "1"}):
+            agent = Agent(root=".", client=client)
+            agent.run("Fix bug in markers.")
+            system = client.messages[0]["content"]
+        self.assertIn("existing repository", system)
+
+
+class ContextCompactionTests(unittest.TestCase):
+    """Verify long conversations are compacted before model calls."""
+
+    def test_compaction_drops_orphan_tool_messages(self) -> None:
+        """Compaction keeps the system prompt and complete recent turns.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(".", client=object())
+        agent.messages = _orphan_messages()
+        agent._compact_messages(2)
+        self._assert_compacted(agent)
+
+    def _assert_compacted(self, agent) -> None:
+        """Verify orphan tool messages are dropped and user prompt pinned.
+
+        Parameters
+        ----------
+        agent : Agent
+            Agent whose messages were compacted.
+
+        Returns
+        -------
+        None
+            Assertions document the result.
+        """
+        roles = [item["role"] for item in agent.messages]
+        self.assertEqual(roles, ["system", "user", "assistant"])
+        self.assertEqual(agent.messages[0]["content"], "sys")
+        self.assertEqual(agent.messages[1]["content"], "old")
+
+    def test_auto_compaction_respects_budget(self) -> None:
+        """A low character budget triggers compaction.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(".", client=object())
+        agent.messages = _budget_messages()
+        with patch.dict(os.environ, _low_budget()):
+            agent._maybe_compact()
+        self.assertEqual(len(agent.messages), 3)
+        self.assertEqual(agent.messages[0]["role"], "system")
+        self.assertEqual(agent.messages[1]["role"], "user")
+
+    def test_compaction_skips_short_conversations(self) -> None:
+        """A conversation under budget is left untouched.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(".", client=object())
+        before = agent.messages[:]
+        with patch.dict(os.environ, {"HARNESS_CONTEXT_CHARS": "999999"}):
+            agent._maybe_compact()
+        self.assertEqual(agent.messages, before)
+
+    def test_profile_context_limit_respected(self) -> None:
+        """Client model profile determines default context limit.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        client = SimpleNamespace(model="beam-free")
+        agent = Agent(".", client=client)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(agent._context_limit(), 80_000)
+
+    def test_trim_context_keeps_system(self) -> None:
+        """Trimming keeps system prompt, user prompt, and newest messages.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(".", client=object())
+        agent.messages = _trim_messages()
+        agent.trim_context(1)
+        roles = [item["role"] for item in agent.messages]
+        self.assertEqual(roles, ["system", "user", "assistant"])
+
+
+class AgentLimitTests(unittest.TestCase):
+    """Verify turn-limit finalization and tool visibility."""
+
+    def test_turn_limit_requests_final_answer(self) -> None:
+        """The agent asks for a final answer after the turn limit.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "x").write_text("ok", encoding="utf-8")
+            agent = Agent(root=directory, client=LoopingClient(), max_turns=1)
+            self.assertEqual(agent.run("question"), "final answer")
+
+    def test_unadvertised_tool_is_rejected(self) -> None:
+        """A tool hidden from the model cannot be executed.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        registry = ToolRegistry(".")
+        with self.assertRaises(ToolError):
+            registry.execute("ask", {"question": "Pick", "options": ["a"]})
+
+
+class BadArgsClient:
+    """Return a tool call with malformed JSON, then a final answer."""
+
+    def __init__(self) -> None:
+        """Initialize the call counter.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        self.calls = 0
+
+    def chat(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Return a broken tool call first and text second.
+
+        Parameters
+        ----------
+        messages : list[dict]
+            Conversation messages.
+
+        tools : list[dict]
+            Advertised tool schemas.
+
+        Returns
+        -------
+        dict
+            OpenAI-compatible response body.
+        """
+        self.calls += 1
+        if self.calls == 1:
+            return _broken_call()
+        return _final_answer("ok")
+
+
+class ToolCallRepairTests(unittest.TestCase):
+    """Verify malformed tool-call arguments cannot poison a request."""
+
+    def test_loaded_tool_calls_are_repaired(self) -> None:
+        """Invalid arguments in a saved session become an empty object.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        bad = _bad_session_message()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "s.jsonl")
+            path.write_text(json.dumps(bad) + "\n", encoding="utf-8")
+            args = _repaired_args(directory, path)
+        self.assertEqual(args, "{}")
+
+    def test_model_tool_calls_are_repaired(self) -> None:
+        """Invalid arguments returned by the model are repaired.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            session = Session(Path(directory, "s.jsonl"))
+            agent = Agent(directory, client=BadArgsClient(), session=session)
+            agent.run("go")
+            args = session.messages[1]["tool_calls"][0]["function"][
+                "arguments"
+            ]
+        self.assertEqual(args, "{}")
+
+
+class InstallGuardTests(unittest.TestCase):
+    """Verify package-install commands prompt for approval."""
+
+    def test_install_command_detected(self) -> None:
+        """Common install commands are recognized.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Assertions pass when both forms are detected.
+        """
+        registry = ToolRegistry(".")
+        for command in _INSTALL_COMMANDS:
+            self.assertTrue(registry._is_install(command))
+
+    def test_plain_command_not_detected(self) -> None:
+        """Non-install commands are not flagged.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Assertions pass when the command is ignored.
+        """
+        registry = ToolRegistry(".")
+        self.assertFalse(registry._is_install("python script.py"))
+        self.assertFalse(registry._is_install("ls -la"))
+
+    def test_install_requires_approval(self) -> None:
+        """An install command asks the questioner first.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Assertions pass when approval is requested.
+        """
+        asked = []
+        registry = ToolRegistry(".", questioner=_RecordingQuestioner(asked))
+        with self.assertRaises(ToolError):
+            registry.bash("pip install reportlab")
+        self.assertEqual(len(asked), 1)
+        self.assertIn("install", asked[0][0].lower())
+        self.assertIn("Yes, install it", asked[0][1])
+
+    def test_install_approval_missing_raises(self) -> None:
+        """Without a questioner the install is rejected.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Assertions pass when a ToolError is raised.
+        """
+        registry = ToolRegistry(".")
+        with self.assertRaises(ToolError):
+            registry.bash("pip install reportlab")
+
+
+class ProjectFolderGuardTests(unittest.TestCase):
+    """Verify new project files require a named folder."""
+
+    def test_root_file_is_rejected(self) -> None:
+        """A new file directly under the workspace is refused.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            registry = ToolRegistry(directory, require_project_folder=True)
+            with self.assertRaises(ToolError):
+                registry.write("index.html", "x")
+
+    def test_project_folder_is_allowed(self) -> None:
+        """A file inside a project folder is accepted.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            registry = ToolRegistry(directory, require_project_folder=True)
+            result = registry.write("game/index.html", "x")
+        self.assertEqual(result["path"], "game/index.html")
+
+    def test_protected_source_tree_is_rejected(self) -> None:
+        """New files in the harness source tree are refused.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "meta_harness").mkdir()
+            registry = ToolRegistry(directory, require_project_folder=True)
+            with self.assertRaises(ToolError):
+                registry.write("meta_harness/extra.py", "x")
+
+    def test_default_allows_root_writes(self) -> None:
+        """Without the guard, root-level writes still work.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            registry = ToolRegistry(directory)
+            result = registry.write("index.html", "x")
+        self.assertEqual(result["path"], "index.html")
+
+
+class ToolCallClient:
+    """Return one write call followed by final text."""
+
+    def __init__(self) -> None:
+        """Initialize the call counter.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            This initializer configures the fake client.
+        """
+        self.calls = 0
+
+    def chat(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Return a deterministic tool-call sequence.
+
+        Parameters
+        ----------
+        messages : list[dict]
+            Conversation messages.
+        tools : list[dict]
+            Advertised tool schemas.
+
+        Returns
+        -------
+        dict
+            OpenAI-compatible response body.
+        """
+        self.calls += 1
+        if self.calls == 1:
+            return {"choices": [{"message": self._write_message()}]}
+        return {
+            "choices": [
+                {"message": {"role": "assistant", "content": "App created"}}
+            ]
+        }
+
+    def _write_message(self) -> dict:
+        """Build the write tool-call message.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            Assistant message containing one write call.
+        """
+        arguments = '{"path": "index.html", "content": "<h1>SavrenAI</h1>"}'
+        call = {
+            "id": "call-1",
+            "function": {"name": "write", "arguments": arguments},
+        }
+        return {"role": "assistant", "content": None, "tool_calls": [call]}
+
+
+class LeanModeTests(unittest.TestCase):
+    """Verify the lean repo-editing prompt."""
+
+    def test_lean_uses_short_prompt(self) -> None:
+        """Lean mode loads only the short prompt.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(".", client=object(), lean=True)
+        system = agent.messages[0]["content"]
+        self.assertIn("fewest possible turns", system)
+        self.assertNotIn("coding standards", system.lower())
+
+    def test_lean_trim_is_noop(self) -> None:
+        """Lean mode never strips its system prompt.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(".", client=object(), lean=True)
+        before = agent.messages[0]["content"]
+        agent._trim_system("write a script")
+        self.assertEqual(agent.messages[0]["content"], before)
+
+
+class MutationReviewTests(unittest.TestCase):
+    """Verify file edits skip the text-only answer review."""
+
+    def test_mutated_run_skips_review(self) -> None:
+        """A file edit makes answer review unnecessary.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(".", client=object())
+        agent._mutated = True
+        self.assertEqual(agent._review_answer("q", "a"), "a")
+
+    def test_begin_run_resets_mutation(self) -> None:
+        """Starting a run clears the mutation flag.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        agent = Agent(".", client=object())
+        agent._mutated = True
+        agent._begin_run("next")
+        self.assertFalse(agent._mutated)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+_INSTALL_COMMANDS = (
+    "pip install reportlab",
+    "python -m pip install reportlab",
+    "npm install axios",
+    "yarn add axios",
+    "pnpm add axios",
+    "brew install jq",
+    "playwright install chromium",
+    "cargo install ripgrep",
+)
+
+
+def _rejected_review() -> str:
+    """Return a JSON review that rejects the draft.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        Raw review JSON with a revised answer.
+    """
+    return json.dumps(
+        {
+            "approved": False,
+            "issues": ["unsupported claim"],
+            "revised_answer": "better answer",
+        }
+    )
+
+
+def _revised_event(agent) -> dict:
+    """Return the first revision event from an agent.
+
+    Parameters
+    ----------
+    agent : Agent
+        Agent with recorded review events.
+
+    Returns
+    -------
+    dict
+        Revision event.
+    """
+    events = agent.review_events
+    return [item for item in events if item.get("reason") == "revised"][0]
+
+
+def _search_results(root: Path) -> tuple:
+    """Return glob and repo-map results for a workspace.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    tuple
+        Glob result and repo-map result.
+    """
+    registry = ToolRegistry(root)
+    return registry.glob("**/*.py"), registry.repo_map()
+
+
+_COMPACTION_MESSAGES = [
+    {"role": "system", "content": "sys"},
+    {"role": "user", "content": "task"},
+    {"role": "assistant", "content": "a"},
+    {"role": "tool", "content": "t"},
+    {"role": "user", "content": "steering"},
+    {"role": "assistant", "content": "b"},
+    {"role": "assistant", "content": "c"},
+    {"role": "assistant", "content": "d"},
+]
+
+
+def _compaction_messages() -> list[dict]:
+    """Return a conversation with a mid-run user correction.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    list[dict]
+        Conversation messages.
+    """
+    return [dict(item) for item in _COMPACTION_MESSAGES]
+
+
+def _two_edits() -> list[dict[str, str]]:
+    """Return two simple edits for patch tests.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    list[dict[str, str]]
+        Old and new fragments.
+    """
+    return [
+        {"old": "one = 1", "new": "one = 10"},
+        {"old": "two = 2", "new": "two = 20"},
+    ]
+
+
+def _auto_verify_result(agent):
+    """Run auto-verification with a failing-then-passing test double.
+
+    Parameters
+    ----------
+    agent : Agent
+        Agent under test.
+
+    Returns
+    -------
+    tuple
+        Verification result and the patched loop mock.
+    """
+    with patch.dict(os.environ, {"HARNESS_AUTO_VERIFY": "1"}):
+        with patch.object(
+            agent, "_project_tests", side_effect=[(False, "fail"), (True, "")]
+        ):
+            with patch.object(agent, "_loop", return_value="fixed") as loop:
+                return agent._auto_verify("p", "orig"), loop
+
+
+def _workspace_file(root: Path, relative: str, text: str) -> Path:
+    """Write a file inside a temporary workspace.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+    relative : str
+        Relative file path.
+    text : str
+        File content.
+
+    Returns
+    -------
+    pathlib.Path
+        Written file path.
+    """
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def _read_output() -> str:
+    """Read a large file through the tool registry.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        Serialized tool result.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "big.txt").write_text("x" * 20000)
+        limit = {"HARNESS_TOOL_OUTPUT_LIMIT": "2000"}
+        with patch.dict(os.environ, limit):
+            return ToolRegistry(root).execute("read", {"path": "big.txt"})
+
+
+def _orphan_messages() -> list[dict]:
+    """Build messages with a leading orphan tool result.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    list of dict
+        Conversation messages.
+    """
+    return [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "old"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "tool", "tool_call_id": "1", "content": "result"},
+        {"role": "assistant", "content": "new"},
+    ]
+
+
+def _budget_messages() -> list[dict]:
+    """Build messages that exceed the compaction budget.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    list of dict
+        Conversation messages with long content.
+    """
+    return [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "x" * 200},
+        {"role": "assistant", "content": "y" * 200},
+    ]
+
+
+def _low_budget() -> dict:
+    """Return a tight compaction budget environment.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    dict
+        Character and keep-count settings.
+    """
+    return {
+        "HARNESS_CONTEXT_CHARS": "100",
+        "HARNESS_CONTEXT_KEEP": "1",
+    }
+
+
+def _trim_messages() -> list[dict]:
+    """Build a short conversation for trimming.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    list of dict
+        Conversation messages.
+    """
+    return [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "old"},
+        {"role": "assistant", "content": "new"},
+    ]
+
+
+def _read_nudged_result(root: Path) -> dict:
+    """Execute a read call on a nudged agent.
+
+    Parameters
+    ----------
+    root : pathlib.Path
+        Workspace root.
+
+    Returns
+    -------
+    dict
+        Tool execution result.
+    """
+    agent = Agent(root=root, client=object())
+    agent._nudged = True
+    call = {
+        "id": "1",
+        "function": {"name": "read", "arguments": '{"path": "x"}'},
+    }
+    return agent._tool_result(call)
+
+
+def _broken_call() -> dict:
+    """Build a response with malformed tool-call arguments.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    dict
+        OpenAI-compatible response body.
+    """
+    call = {"id": "1", "function": {"name": "read", "arguments": '{"p'}}
+    message = {"role": "assistant", "content": "", "tool_calls": [call]}
+    return {"choices": [{"message": message}]}
+
+
+def _final_answer(content: str) -> dict:
+    """Build a response with a final text answer.
+
+    Parameters
+    ----------
+    content : str
+        Assistant answer text.
+
+    Returns
+    -------
+    dict
+        OpenAI-compatible response body.
+    """
+    return {
+        "choices": [{"message": {"role": "assistant", "content": content}}]
+    }
+
+
+def _bad_session_message() -> dict:
+    """Build an assistant message with malformed tool arguments.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    dict
+        Session message with broken arguments.
+    """
+    call = {"id": "1", "function": {"name": "read", "arguments": '{"p'}}
+    return {"role": "assistant", "content": "", "tool_calls": [call]}
+
+
+def _repaired_args(directory, path) -> str:
+    """Load a session and return the repaired arguments.
+
+    Parameters
+    ----------
+    directory : str
+        Temporary workspace directory.
+
+    path : pathlib.Path
+        Session transcript path.
+
+    Returns
+    -------
+    str
+        Repaired tool-call arguments.
+    """
+    agent = Agent(directory, client=BadArgsClient(), session=Session(path))
+    return agent.messages[-1]["tool_calls"][0]["function"]["arguments"]
+
+
+class _RecordingQuestioner:
+    """Record questions and decline package installs."""
+
+    def __init__(self, asked: list) -> None:
+        """Store the recording list.
+
+        Parameters
+        ----------
+        asked : list
+            List receiving (question, options) pairs.
+
+        Returns
+        -------
+        None
+            The questioner is ready.
+        """
+        self.asked = asked
+
+    def __call__(self, question, options):
+        """Record the question and decline.
+
+        Parameters
+        ----------
+        question : str
+            Question text.
+
+        options : list[str]
+            Suggested answers.
+
+        Returns
+        -------
+        str
+            Decline answer.
+        """
+        self.asked.append((question, options))
+        return "No, don't install"
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class RepairBudgetTests(unittest.TestCase):
+    """Verify the bounded reviewer-test repair budget."""
+
+    def test_repair_attempts_is_bounded(self) -> None:
+        """The repair count is positive and tolerant of bad input.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        with patch.dict(os.environ, {"HARNESS_REPAIR_ATTEMPTS": "3"}):
+            self.assertEqual(_repair_attempts(), 3)
+        with patch.dict(os.environ, {"HARNESS_REPAIR_ATTEMPTS": "0"}):
+            self.assertEqual(_repair_attempts(), 1)
+        with patch.dict(os.environ, {"HARNESS_REPAIR_ATTEMPTS": "bad"}):
+            self.assertEqual(_repair_attempts(), 2)

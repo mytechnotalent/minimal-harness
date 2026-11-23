@@ -1,0 +1,61 @@
+"""Select the desktop interface mode from environment settings."""
+
+import os
+
+CYBER = "cyber"
+HAL = "hal"
+CLASSIC = "classic"
+_CYBER_ALIASES = ("cyber", "neon", "dark")
+_HAL_ALIASES = ("hal", "hal9000", "minimal")
+
+
+def ui_mode() -> str:
+    """Return the configured desktop interface mode.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        ``"cyber"`` when opted in, otherwise ``"classic"``.
+    """
+    value = os.getenv("HARNESS_UI_MODE", "").strip().lower()
+    if value in _HAL_ALIASES:
+        return HAL
+    return CYBER if value in _CYBER_ALIASES else CLASSIC
+
+
+def voice_enabled() -> bool:
+    """Return whether the voice interface is enabled.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    bool
+        ``True`` when voice controls should be built.
+    """
+    if _env_flag("HARNESS_VOICE_UI"):
+        return True
+    return ui_mode() in (CYBER, HAL)
+
+
+def _env_flag(name: str) -> bool:
+    """Return whether an environment flag is truthy.
+
+    Parameters
+    ----------
+    name : str
+        Variable name.
+
+    Returns
+    -------
+    bool
+        ``True`` for ``1``, ``true``, ``yes``, or ``on``.
+    """
+    value = os.getenv(name, "").strip().lower()
+    return value in ("1", "true", "yes", "on")

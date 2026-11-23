@@ -1,0 +1,42 @@
+[
+  {
+    "id": "itsdangerous_signer",
+    "workspace": "tasks/itsdangerous_signer/workspace",
+    "test": "tasks/itsdangerous_signer/test_itsdangerous_signer.py",
+    "reference": "tasks/itsdangerous_signer/reference",
+    "runner": "pytest",
+    "prompt": "Implement the signing core in itsdangerous/signer.py so the project's signer behavior is correct. Keep the public API and signatures. Implement key derivation, HMAC and none signatures, signing, verification, unsigned values, and validation, including all documented exceptions."
+  },
+  {
+    "id": "iniconfig_parser",
+    "workspace": "tasks/iniconfig_parser/workspace",
+    "test": "tasks/iniconfig_parser/test_iniconfig_parser.py",
+    "reference": "tasks/iniconfig_parser/reference",
+    "runner": "pytest",
+    "prompt": "Implement line parsing and comment detection in iniconfig/_parse.py so the project's parser tests pass. Keep the public API and data structures. Handle sections, key/value pairs, inline comments, comment lines, continuation values, and ParseError positions."
+  },
+  {
+    "id": "packaging_utils",
+    "workspace": "tasks/packaging_utils/workspace",
+    "test": "tasks/packaging_utils/test_packaging_utils.py",
+    "reference": "tasks/packaging_utils/reference",
+    "runner": "pytest",
+    "prompt": "Implement the distribution helpers in packaging/utils.py so the project's utility tests pass. Keep the public API and exceptions. Implement name canonicalization and validation, version canonicalization, and wheel and sdist filename parsing."
+  },
+  {
+    "id": "itsdangerous_serializer",
+    "workspace": "tasks/itsdangerous_serializer/workspace",
+    "test": "tasks/itsdangerous_serializer/test_itsdangerous_serializer.py",
+    "reference": "tasks/itsdangerous_serializer/reference",
+    "runner": "pytest",
+    "prompt": "Implement the serialization core in itsdangerous/serializer.py so the project's serializer behavior is correct. Keep the public API, signatures, and exceptions. Implement payload dumping and loading, signer creation, dump/load, and the unsafe variants."
+  },
+  {
+    "id": "packaging_markers",
+    "workspace": "tasks/packaging_markers/workspace",
+    "test": "tasks/packaging_markers/test_packaging_markers.py",
+    "reference": "tasks/packaging_markers/reference",
+    "runner": "pytest",
+    "prompt": "Implement marker evaluation in packaging/markers.py so the project's marker tests pass. Keep the public API and exceptions. Implement the comparison operators and the walk over marker expressions, including extras."
+  }
+]

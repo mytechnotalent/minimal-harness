@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+runs/
+/e2e-workspaces/
+/live-*/
+**/node_modules/
+.DS_Store
+build/
+dist/

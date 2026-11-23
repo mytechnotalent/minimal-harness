@@ -1,0 +1,6 @@
+{"id": "reasoning_numeric", "kind": "reasoning", "prompt": "A cyclist rides 36 kilometers in 2 hours and 15 minutes. What is the average speed in kilometers per hour?", "expected": 16.0, "scorer": "numeric", "tolerance": 0.5}
+{"id": "instruction_exact", "kind": "instruction", "prompt": "Reply with exactly the following text and nothing else: PING-7", "expected": "PING-7", "scorer": "exact"}
+{"id": "reasoning_contains", "kind": "reasoning", "prompt": "What is the largest planet in the Solar System?", "expected": ["jupiter"], "scorer": "contains"}
+{"id": "tool_bash_marker", "kind": "tool", "prompt": "Use the bash tool to run the command `echo marker-77` and then report the output in your final answer.", "expected": ["marker-77"], "scorer": "contains", "tools": ["bash"]}
+{"id": "context_retention", "kind": "context", "prompt": "Remember these two facts. Fact one: the capital of France is Paris. Fact two: the largest ocean is the Pacific. Now answer: what is the largest ocean?", "expected": ["pacific"], "scorer": "contains"}
+{"id": "error_detection", "kind": "error", "prompt": "A student computed 12 times 8 as 97. Check this claim, state whether it is correct, and give the right product.", "expected": ["96"], "scorer": "contains"}

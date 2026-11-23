@@ -1,0 +1,44 @@
+[
+  {
+    "id": "parse_duration",
+    "function": "parse_duration",
+    "prompt": "Implement parse_duration(text) that parses durations such as '1h30m', '45s', '2h', or '500ms' and returns total milliseconds. Units h, m, s, and ms may appear in any order. Strip surrounding whitespace. Raise ValueError for empty or invalid input.",
+    "test": "tasks/parse_duration/test_parse_duration.py"
+  },
+  {
+    "id": "merge_intervals",
+    "function": "merge_intervals",
+    "prompt": "Implement merge_intervals(intervals) that merges overlapping or touching closed [start, end] intervals. The input is unsorted. Return a sorted list of merged intervals. Empty input returns [].",
+    "test": "tasks/merge_intervals/test_merge_intervals.py"
+  },
+  {
+    "id": "normalize_path",
+    "function": "normalize_path",
+    "prompt": "Implement normalize_path(path) that collapses '.', '..', and duplicate slashes. Preserve a leading slash for absolute paths. '..' above the root is ignored for absolute paths. Return '.' for an empty relative path and '/' for the absolute root.",
+    "test": "tasks/normalize_path/test_normalize_path.py"
+  },
+  {
+    "id": "roman_to_int",
+    "function": "roman_to_int",
+    "prompt": "Implement roman_to_int(s) that converts a valid Roman numeral using I,V,X,L,C,D,M into an integer, subtracting when a smaller value precedes a larger one. Raise ValueError for empty input or invalid characters.",
+    "test": "tasks/roman_to_int/test_roman_to_int.py"
+  },
+  {
+    "id": "chunk",
+    "function": "chunk",
+    "prompt": "Implement chunk(items, size) that splits a list into consecutive chunks of at most size. Raise ValueError when size <= 0. Empty input returns [].",
+    "test": "tasks/chunk/test_chunk.py"
+  },
+  {
+    "id": "balanced_brackets",
+    "function": "balanced_brackets",
+    "prompt": "Implement balanced_brackets(s) that returns True when parentheses, square brackets, and braces are balanced and properly nested. Ignore all other characters.",
+    "test": "tasks/balanced_brackets/test_balanced_brackets.py"
+  },
+  {
+    "id": "word_wrap",
+    "function": "word_wrap",
+    "prompt": "Implement word_wrap(text, width) that wraps text into lines of at most width characters, breaking on spaces. Do not split words longer than width; keep them on their own line. Empty or whitespace-only text returns [].",
+    "test": "tasks/word_wrap/test_word_wrap.py"
+  }
+]

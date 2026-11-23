@@ -1,0 +1,20 @@
+[
+  {
+    "name": "baseline",
+    "env": {"HARNESS_ANSWER_TESTS": "0"},
+    "args": ["--max-turns", "24"]
+  },
+  {
+    "name": "verify",
+    "env": {"HARNESS_ANSWER_TESTS": "1"},
+    "args": ["--max-turns", "24"]
+  },
+  {
+    "name": "verify-drafts",
+    "env": {
+      "HARNESS_ANSWER_TESTS": "1",
+      "HARNESS_ADVERSARIAL_DRAFTS": "2"
+    },
+    "args": ["--max-turns", "24"]
+  }
+]

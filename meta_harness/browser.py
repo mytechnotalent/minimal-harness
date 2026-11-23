@@ -1,0 +1,466 @@
+"""Optional Playwright browser tools for page inspection."""
+
+from pathlib import Path
+from threading import Thread
+from typing import Any
+import importlib
+import os
+
+from .url_policy import validate_url
+
+
+class BrowserError(RuntimeError):
+    """Represent unavailable or failed browser automation."""
+
+
+class BrowserClient:
+    """Open pages and capture screenshots with Playwright."""
+
+    def __init__(self, safe: bool = False) -> None:
+        """Configure URL safety checks.
+
+        Parameters
+        ----------
+        safe : bool
+            Reject non-public and non-HTTP URLs.
+
+        Returns
+        -------
+        None
+            The client is ready.
+        """
+        self.safe = safe
+
+    def open(self, url: str) -> dict[str, str]:
+        """Navigate to a URL and return metadata.
+
+        Parameters
+        ----------
+        url : str
+            Page URL.
+
+        Returns
+        -------
+        dict[str, str]
+            URL, title, and visible text.
+        """
+        return self._threaded("open", url, "")
+
+    def screenshot(self, url: str, path: str) -> dict[str, str]:
+        """Navigate to a URL and save a PNG.
+
+        Parameters
+        ----------
+        url : str
+            Page URL.
+        path : str
+            Output PNG path.
+
+        Returns
+        -------
+        dict[str, str]
+            URL and screenshot path.
+        """
+        return self._threaded("screenshot", url, path)
+
+    def assert_page(self, url: str, text: str) -> dict[str, Any]:
+        """Assert that visible page text is present.
+
+        Parameters
+        ----------
+        url : str
+            Page URL.
+        text : str
+            Required visible text.
+
+        Returns
+        -------
+        dict[str, Any]
+            Assertion result and page metadata.
+        """
+        page = self.open(url)
+        return {
+            "passed": text in page["text"],
+            "url": page["url"],
+            "text": text,
+        }
+
+    def _threaded(self, mode: str, url: str, path: str) -> dict[str, str]:
+        """Run browser work outside the caller's event loop.
+
+        Parameters
+        ----------
+        mode : str
+            Browser operation name.
+        url : str
+            Page URL.
+        path : str
+            Screenshot path.
+
+        Returns
+        -------
+        dict[str, str]
+            Operation result.
+        """
+        result, errors = {}, []
+        self._join(mode, url, path, result, errors)
+        return self._thread_result(result, errors)
+
+    def _join(
+        self,
+        mode: str,
+        url: str,
+        path: str,
+        result: dict[str, str],
+        errors: list[Exception],
+    ) -> None:
+        """Run one worker thread.
+
+        Parameters
+        ----------
+        mode : str
+            Browser operation.
+        url : str
+            Page URL.
+        path : str
+            Screenshot path.
+        result : dict[str, str]
+            Result target.
+        errors : list[Exception]
+            Error target.
+
+        Returns
+        -------
+        None
+            Worker completion is awaited.
+        """
+        worker = Thread(
+            target=self._worker,
+            args=(mode, url, path, result, errors),
+            daemon=True,
+        )
+        self._await(worker)
+
+    def _await(self, worker: Thread) -> None:
+        """Run a worker and fail when it outlives the timeout.
+
+        Parameters
+        ----------
+        worker : threading.Thread
+            Worker thread to run.
+
+        Returns
+        -------
+        None
+            The worker completes or an error is raised.
+        """
+        worker.start()
+        worker.join(self._timeout())
+        if worker.is_alive():
+            raise BrowserError(
+                f"Browser operation timed out after {self._timeout()} seconds."
+            )
+
+    def _timeout(self) -> float:
+        """Return the browser worker timeout in seconds.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        float
+            Configured timeout.
+        """
+        return float(os.getenv("HARNESS_BROWSER_TIMEOUT", "45"))
+
+    def _thread_result(
+        self, result: dict[str, str], errors: list[Exception]
+    ) -> dict[str, str]:
+        """Return worker output or raise its error.
+
+        Parameters
+        ----------
+        result : dict[str, str]
+            Worker result.
+        errors : list[Exception]
+            Worker errors.
+
+        Returns
+        -------
+        dict[str, str]
+            Browser result.
+        """
+        if errors:
+            raise errors[0]
+        return result
+
+    def _worker(
+        self,
+        mode: str,
+        url: str,
+        path: str,
+        result: dict[str, str],
+        errors: list[Exception],
+    ) -> None:
+        """Execute one browser operation in a worker thread.
+
+        Parameters
+        ----------
+        mode : str
+            Browser operation name.
+        url : str
+            Page URL.
+        path : str
+            Screenshot path.
+        result : dict[str, str]
+            Mutable result target.
+        errors : list[Exception]
+            Mutable error target.
+
+        Returns
+        -------
+        None
+            Result or error is stored in a supplied container.
+        """
+        playwright = browser = None
+        try:
+            playwright, browser, page = self._page()
+            result.update(self._navigate(mode, url, path, page))
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            self._close(playwright, browser)
+
+    def _navigate(
+        self, mode: str, url: str, path: str, page: Any
+    ) -> dict[str, str]:
+        """Navigate and collect a browser result.
+
+        Parameters
+        ----------
+        mode : str
+            Browser operation.
+        url : str
+            Page URL.
+        path : str
+            Screenshot path.
+        page : Any
+            Playwright page.
+
+        Returns
+        -------
+        dict[str, str]
+            Operation result.
+        """
+        self._guard(url)
+        page.goto(url, wait_until="networkidle", timeout=30000)
+        self._guard(page.url)
+        return self._page_result(mode, page, path)
+
+    def _guard(self, url):
+        """Validate a URL when safe mode is enabled.
+
+        Parameters
+        ----------
+        url : str
+            URL about to be loaded.
+
+        Returns
+        -------
+        None
+            The URL is accepted.
+        """
+        if self.safe:
+            validate_url(url)
+
+    def _close(self, playwright: Any, browser: Any) -> None:
+        """Close Playwright resources when initialized.
+
+        Parameters
+        ----------
+        playwright : Any
+            Playwright manager or None.
+        browser : Any
+            Browser instance or None.
+
+        Returns
+        -------
+        None
+            Resources are closed when present.
+        """
+        if browser:
+            browser.close()
+        if playwright:
+            playwright.stop()
+
+    def _page_result(self, mode: str, page: Any, path: str) -> dict[str, str]:
+        """Collect metadata or write a screenshot.
+
+        Parameters
+        ----------
+        mode : str
+            Browser operation name.
+        page : Any
+            Playwright page object.
+        path : str
+            Screenshot path.
+
+        Returns
+        -------
+        dict[str, str]
+            Operation result.
+        """
+        return (
+            self._metadata(page)
+            if mode == "open"
+            else self._save_screenshot(page, path)
+        )
+
+    def _metadata(self, page: Any) -> dict[str, str]:
+        """Collect page metadata.
+
+        Parameters
+        ----------
+        page : Any
+            Playwright page.
+
+        Returns
+        -------
+        dict[str, str]
+            URL, title, and visible text.
+        """
+        return {
+            "url": page.url,
+            "title": page.title(),
+            "text": page.inner_text("body")[:12000],
+        }
+
+    def _save_screenshot(self, page: Any, path: str) -> dict[str, str]:
+        """Save a full-page screenshot.
+
+        Parameters
+        ----------
+        page : Any
+            Playwright page.
+        path : str
+            Screenshot path.
+
+        Returns
+        -------
+        dict[str, str]
+            URL and screenshot path.
+        """
+        target = Path(path).resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(target), full_page=True)
+        return {"url": page.url, "path": str(target)}
+
+    def _page(self) -> tuple[Any, Any, Any]:
+        """Start a Chromium browser and page.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        tuple[Any, Any, Any]
+            Playwright manager, browser, and page.
+        """
+        return self._launch()
+
+    def _start_playwright(self) -> tuple[Any, Any, Any]:
+        """Start Playwright and headless Chromium.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        tuple[Any, Any, Any]
+            Playwright manager, browser, and page.
+        """
+        return self._launch()
+
+    def _launch(self) -> tuple[Any, Any, Any]:
+        """Start Playwright and Chromium.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        tuple[Any, Any, Any]
+            Playwright manager, browser, and page.
+        """
+        playwright = _start_playwright()
+        browser = _start_browser(playwright)
+        return playwright, browser, browser.new_page()
+
+
+def _start_playwright():
+    """Start a Playwright session.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    Any
+        Started Playwright manager.
+    """
+    module = importlib.import_module("playwright.sync_api")
+    return module.sync_playwright().start()
+
+
+def _start_browser(playwright):
+    """Start headless Chromium, stopping Playwright on failure.
+
+    Parameters
+    ----------
+    playwright : Any
+        Started Playwright manager.
+
+    Returns
+    -------
+    Any
+        Launched Chromium browser.
+
+    Raises
+    ------
+    BrowserError
+        If Chromium cannot start.
+    """
+    try:
+        return playwright.chromium.launch(headless=True)
+    except Exception as exc:
+        playwright.stop()
+        raise BrowserError(_launch_hint(exc)) from exc
+
+
+def _launch_hint(exc: Exception) -> str:
+    """Return an actionable browser launch failure.
+
+    Parameters
+    ----------
+    exc : Exception
+        Original Playwright launch error.
+
+    Returns
+    -------
+    str
+        Error text with an install hint when the browser is missing.
+    """
+    message = str(exc)
+    missing = "Executable doesn't exist" in message
+    if missing or "playwright install" in message:
+        return (
+            "Playwright browser is missing or out of date. "
+            "Run: python -m playwright install chromium"
+        )
+    return f"Browser launch failed: {message}"

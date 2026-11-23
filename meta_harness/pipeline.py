@@ -1,0 +1,2598 @@
+"""Orchestrate proposal, review, testing, adjudication, and cycling."""
+
+import json
+import os
+import time
+from dataclasses import replace
+from datetime import datetime
+from datetime import timezone
+from pathlib import Path
+from typing import Callable
+
+from ._json_util import json_value
+from .chat_model import ChatModel
+from .docker_gate import DockerGate
+from .docker_gate import LocalGate
+from .models import Candidate
+from .models import SearchConfig
+from .models import SearchResult
+from .openrouter import OpenRouterClient
+from .prompts import load as _load_prompt
+from .task_evaluator import load_manifest
+from .task_evaluator import score_candidate
+from .task_evaluator import score_review_tests
+from .web_search import WebSearchClient
+
+Proposer = Callable[[str, list[Candidate]], list[Candidate]]
+
+
+class SearchPipeline:
+    """Run the SavrenAI candidate search loop."""
+
+    def __init__(
+        self,
+        config: SearchConfig,
+        client: ChatModel | None = None,
+        workspace: Path | str = "runs",
+        web_search: WebSearchClient | None = None,
+        observer: Callable[[dict], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> None:
+        """Initialize the search pipeline.
+
+        Parameters
+        ----------
+        config : SearchConfig
+            Search and gate settings.
+        client : ChatModel or None
+            Any chat-completion client that satisfies the ``ChatModel``
+            protocol. Defaults to a new ``OpenRouterClient``.
+        workspace : pathlib.Path or str
+            Artifact directory.
+        web_search : WebSearchClient or None
+            Optional web-search client.
+        observer : collections.abc.Callable or None
+            Optional progress callback invoked with one event dict per
+            state change. Defaults to no reporting.
+        should_stop : collections.abc.Callable or None
+            Optional predicate polled between iterations. When it returns
+            ``True`` the search stops and reports cancellation.
+
+        Returns
+        -------
+        None
+            This initializer mutates the pipeline instance.
+        """
+        self.config = config
+        self.client = client or OpenRouterClient()
+        self.workspace = Path(workspace)
+        self.gate = DockerGate(config.docker_image)
+        self.web_search = web_search or WebSearchClient()
+        self.observer, self.should_stop = observer, should_stop
+        self._reset_state()
+
+    def _reset_state(self) -> None:
+        """Initialize per-run search state.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+            Counters and stop flags are reset.
+        """
+        self._current_iteration = 0
+        self._cancelled = False
+        self._best_score = -1.0
+        self._stale_rounds = 0
+        self._stopped_on_plateau = False
+        self._stopped_on_cost = False
+
+    def run(self, seed: str, proposer: Proposer | None = None) -> SearchResult:
+        """Cycle candidates until target or budget exhaustion.
+
+        Parameters
+        ----------
+        seed : str
+            Initial task description.
+        proposer : Proposer or None
+            Optional offline proposer.
+
+        Returns
+        -------
+        SearchResult
+            Search history, winner, and stop reason.
+        """
+        self._reset_state()
+        self._emit("run_started", seed=seed, iterations=self.config.iterations)
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        history, winner = self._search(seed, proposer)
+        reached = self._target_reached(winner)
+        result = self._result(history, winner, reached)
+        self._emit_finished(result, reached)
+        return result
+
+    def _result(
+        self,
+        history: list[Candidate],
+        winner: Candidate | None,
+        reached: bool,
+    ) -> SearchResult:
+        """Build the search result.
+
+        Parameters
+        ----------
+        history : list[Candidate]
+            Candidate history.
+
+        winner : Candidate or None
+            Selected candidate.
+
+        reached : bool
+            Whether the target score was reached.
+
+        Returns
+        -------
+        SearchResult
+            Search history, winner, and stop reason.
+        """
+        return SearchResult(
+            winner,
+            tuple(history),
+            reached,
+            self._reason(reached),
+            self._held_out(winner),
+        )
+
+    def _held_out(self, winner: Candidate | None) -> float | None:
+        """Score the winner on the held-out manifest after search.
+
+        Parameters
+        ----------
+        winner : Candidate or None
+            Selected candidate.
+
+        Returns
+        -------
+        float or None
+            Held-out pass rate, or ``None`` when not configured.
+        """
+        if winner is None or not self.config.held_out_manifest:
+            return None
+        score = self._score_manifest(winner, self.config.held_out_manifest)
+        self._emit("held_out_scored", score=score)
+        return score
+
+    def _search(
+        self, seed: str, proposer: Proposer | None
+    ) -> tuple[list[Candidate], Candidate | None]:
+        """Run the configured iteration budget.
+
+        Parameters
+        ----------
+        seed : str
+            Initial task description.
+        proposer : Proposer or None
+            Optional offline proposer.
+
+        Returns
+        -------
+        tuple[list[Candidate], Candidate or None]
+            History and best candidate.
+        """
+        history, winner = [], None
+        for iteration in _rounds(self.config.iterations, self._should_stop):
+            history, winner = self._step(
+                iteration, seed, history, winner, proposer
+            )
+            if self._stop_now(iteration, winner):
+                break
+        return history, winner
+
+    def _step(
+        self,
+        iteration: int,
+        seed: str,
+        history: list[Candidate],
+        winner: Candidate | None,
+        proposer: Proposer | None,
+    ) -> tuple[list[Candidate], Candidate | None]:
+        """Run one iteration and track progress toward a plateau.
+
+        Parameters
+        ----------
+        iteration : int
+            Current iteration number.
+        seed : str
+            Initial task description.
+        history : list[Candidate]
+            Prior records.
+        winner : Candidate or None
+            Current best candidate.
+        proposer : Proposer or None
+            Optional offline proposer.
+
+        Returns
+        -------
+        tuple[list[Candidate], Candidate or None]
+            Updated history and winner.
+        """
+        self._current_iteration = iteration
+        history, winner = self._iteration(seed, history, winner, proposer)
+        self._track_plateau(winner)
+        return history, winner
+
+    def _stop_now(self, iteration: int, winner: Candidate | None) -> bool:
+        """Return whether the next iteration should be skipped.
+
+        Parameters
+        ----------
+        iteration : int
+            Current iteration number.
+        winner : Candidate or None
+            Best candidate so far.
+
+        Returns
+        -------
+        bool
+            ``True`` when the target or plateau stops the search.
+        """
+        if self._after_iteration(iteration, winner):
+            return True
+        if self._cost_stop():
+            return True
+        if iteration + 1 >= self.config.iterations:
+            return False
+        return self._plateau_stop()
+
+    def _cost_stop(self) -> bool:
+        """Return whether the configured cost budget is exhausted.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        bool
+            ``True`` when the client cost reaches the limit.
+        """
+        limit = self.config.max_cost
+        if limit <= 0:
+            return False
+        cost = float(getattr(self.client, "cost", 0.0) or 0.0)
+        if cost < limit:
+            return False
+        self._stopped_on_cost = True
+        return True
+
+    def _track_plateau(self, winner: Candidate | None) -> None:
+        """Update the best score and stale iteration count.
+
+        Parameters
+        ----------
+        winner : Candidate or None
+            Best candidate so far.
+
+        Returns
+        -------
+        None
+            Plateau tracking is updated.
+        """
+        score = winner.score if winner and winner.score is not None else 0.0
+        if score > self._best_score + self.config.plateau_epsilon:
+            self._best_score, self._stale_rounds = score, 0
+        else:
+            self._stale_rounds += 1
+
+    def _plateau_stop(self) -> bool:
+        """Return whether the search has stopped improving.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        bool
+            ``True`` when the plateau window is exhausted.
+        """
+        rounds = self.config.plateau_rounds
+        if rounds <= 0 or self._stale_rounds < rounds:
+            return False
+        self._stopped_on_plateau = True
+        return True
+
+    def _after_iteration(
+        self, iteration: int, winner: Candidate | None
+    ) -> bool:
+        """Emit the iteration winner and report whether to stop.
+
+        Parameters
+        ----------
+        iteration : int
+            Current iteration number.
+
+        winner : Candidate or None
+            Best candidate so far.
+
+        Returns
+        -------
+        bool
+            Whether the target score was reached.
+        """
+        self._emit_winner(iteration, winner)
+        return self._target_reached(winner)
+
+    def _iteration(
+        self,
+        seed: str,
+        history: list[Candidate],
+        winner: Candidate | None,
+        proposer: Proposer | None,
+    ) -> tuple[list[Candidate], Candidate | None]:
+        """Run one proposal-to-final-gate iteration.
+
+        Parameters
+        ----------
+        seed : str
+            Initial task description.
+        history : list[Candidate]
+            Prior records.
+        winner : Candidate or None
+            Current best candidate.
+        proposer : Proposer or None
+            Optional offline proposer.
+
+        Returns
+        -------
+        tuple[list[Candidate], Candidate or None]
+            Updated history and winner.
+        """
+        iteration = self._current_iteration
+        self._emit("iteration_started", iteration=iteration)
+        candidates = self._proposals(seed, history, proposer)
+        evaluated = self._evaluate_all(candidates, history, iteration)
+        if not evaluated:
+            return history, winner
+        return self._advance(evaluated, history, winner, iteration)
+
+    def _advance(
+        self,
+        evaluated: list[Candidate],
+        history: list[Candidate],
+        winner: Candidate | None,
+        iteration: int,
+    ) -> tuple[list[Candidate], Candidate | None]:
+        """Adjudicate + final-gate when survivors exist, else log only.
+
+        Parameters
+        ----------
+        evaluated : list[Candidate]
+            First-gate results.
+        history : list[Candidate]
+            Prior records.
+        winner : Candidate or None
+            Current winner.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        tuple[list[Candidate], Candidate or None]
+            Updated history and winner.
+        """
+        survivors = [
+            item for item in evaluated if item.dynamic_test.get("passed")
+        ]
+        if not survivors:
+            return self._record(evaluated, None, history, winner, iteration)
+        selected = self._select_survivor(survivors, history)
+        final = self._final_survivor(selected, iteration, winner)
+        return self._record(evaluated, final, history, winner, iteration)
+
+    def _select_survivor(
+        self, survivors: list[Candidate], history: list[Candidate]
+    ) -> Candidate:
+        """Select a survivor for the configured mode.
+
+        Parameters
+        ----------
+        survivors : list[Candidate]
+            First-gate survivors.
+        history : list[Candidate]
+            Prior records.
+
+        Returns
+        -------
+        Candidate
+            Selected candidate.
+        """
+        if self.config.baseline:
+            return max(survivors, key=lambda item: item.score or 0.0)
+        return self._adjudicate(survivors, history)
+
+    def _final_survivor(
+        self,
+        selected: Candidate,
+        iteration: int,
+        incumbent: Candidate | None = None,
+    ) -> Candidate:
+        """Apply the configured final-gate behavior.
+
+        Parameters
+        ----------
+        selected : Candidate
+            Selected survivor.
+
+        iteration : int
+            Current iteration number.
+
+        incumbent : Candidate or None
+            Current winner, used for differential testing.
+
+        Returns
+        -------
+        Candidate
+            Candidate with final-gate data.
+        """
+        if self.config.baseline:
+            return self._baseline_final(selected)
+        return self._final_dynamic_test(selected, iteration, incumbent)
+
+    def _baseline_final(self, candidate: Candidate) -> Candidate:
+        """Mark a baseline survivor as final without a second gate.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Selected survivor.
+
+        Returns
+        -------
+        Candidate
+            Candidate marked final.
+        """
+        result = {
+            **candidate.dynamic_test,
+            "final_passed": True,
+            "independent": False,
+        }
+        return self._with_test(candidate, result, candidate.score)
+
+    def _evaluate_all(
+        self,
+        candidates: list[Candidate],
+        history: list[Candidate],
+        iteration: int,
+    ) -> list[Candidate]:
+        """Evaluate every candidate in an iteration.
+
+        Parameters
+        ----------
+        candidates : list[Candidate]
+            Candidates to evaluate.
+        history : list[Candidate]
+            Prior records.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        list[Candidate]
+            Evaluated candidates.
+        """
+        return [
+            self._evaluate(item, history, iteration) for item in candidates
+        ]
+
+    def _proposals(
+        self, seed: str, history: list[Candidate], proposer: Proposer | None
+    ) -> list[Candidate]:
+        """Obtain limited proposals for an iteration.
+
+        Parameters
+        ----------
+        seed : str
+            Initial task description.
+        history : list[Candidate]
+            Prior records.
+        proposer : Proposer or None
+            Optional offline proposer.
+
+        Returns
+        -------
+        list[Candidate]
+            Candidates to evaluate.
+        """
+        source = (
+            proposer(seed, history)
+            if proposer
+            else self._propose(seed, history)
+        )
+        return source[: self.config.proposers_per_iteration]
+
+    def _evaluate(
+        self, candidate: Candidate, history: list[Candidate], iteration: int
+    ) -> Candidate:
+        """Review and first-test one candidate.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate under evaluation.
+        history : list[Candidate]
+            Prior records.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        Candidate
+            Reviewed and first-tested candidate.
+        """
+        if self.config.baseline:
+            return self._dynamic_test(candidate, iteration)
+        return self._dynamic_test(self._review(candidate, history), iteration)
+
+    def _propose(self, seed: str, history: list[Candidate]) -> list[Candidate]:
+        """Ask OpenRouter for candidate proposals.
+
+        Parameters
+        ----------
+        seed : str
+            Initial task description.
+        history : list[Candidate]
+            Prior records.
+
+        Returns
+        -------
+        list[Candidate]
+            Parsed proposals.
+        """
+        prompt = _load_prompt("proposer")
+        context = self._json(self._proposer_context(seed, history))
+        self._emit("stage_started", stage="proposer")
+        raw = self.client.complete(prompt, context)
+        self._record_call("proposer", prompt, context, raw)
+        return self._proposal_items(history, raw)
+
+    def _proposer_context(self, seed: str, history: list[Candidate]) -> dict:
+        """Build the proposer context document.
+
+        Parameters
+        ----------
+        seed : str
+            Initial task description.
+
+        history : list[Candidate]
+            Prior records.
+
+        Returns
+        -------
+        dict
+            Seed, history, search tasks, and web context.
+        """
+        return {
+            "seed": seed,
+            "history": history,
+            "tasks": self._manifest_prompts(),
+            "web": self._web(seed),
+        }
+
+    def _web(self, seed: str) -> list[dict[str, str]]:
+        """Collect optional web context for the proposer.
+
+        Parameters
+        ----------
+        seed : str
+            Search query derived from the seed task.
+
+        Returns
+        -------
+        list[dict[str, str]]
+            Search results, or an empty list when disabled or unavailable.
+        """
+        if not self.config.use_web_search:
+            return []
+        return self.web_search.search(seed)
+
+    def _manifest_prompts(self) -> list[dict]:
+        """Return search-task prompts, never held-out tests.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        list[dict]
+            Task identifiers and prompts from the search manifest.
+        """
+        if not self.config.task_manifest:
+            return []
+        manifest = load_manifest(Path(self.config.task_manifest))
+        return [
+            {"id": task.get("id"), "prompt": task.get("prompt")}
+            for task in manifest
+        ]
+
+    def _proposal_items(
+        self, history: list[Candidate], raw: str
+    ) -> list[Candidate]:
+        """Convert a proposal response into candidates.
+
+        Parameters
+        ----------
+        history : list[Candidate]
+            Prior records.
+        raw : str
+            JSON proposal array.
+
+        Returns
+        -------
+        list[Candidate]
+            Parsed candidates.
+        """
+        values = self._proposal_values(raw)
+        return [
+            Candidate(
+                f"candidate-{len(history) + i + 1}", "openrouter", str(item)
+            )
+            for i, item in enumerate(values)
+        ]
+
+    def _proposal_values(self, raw: str) -> list:
+        """Convert model output into proposal values.
+
+        Parameters
+        ----------
+        raw : str
+            Model response.
+
+        Returns
+        -------
+        list
+            Parsed proposals or one raw-text proposal.
+        """
+        try:
+            value = json_value(raw)
+        except ValueError:
+            return [raw.strip()]
+        return value if isinstance(value, list) else [value]
+
+    def _review(
+        self, candidate: Candidate, history: list[Candidate]
+    ) -> Candidate:
+        """Ask an adversarial reviewer to inspect a candidate.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate under review.
+        history : list[Candidate]
+            Prior records.
+
+        Returns
+        -------
+        Candidate
+            Candidate with review data.
+        """
+        review = self._review_data(candidate, history)
+        self._emit(
+            "reviewed",
+            candidate_id=candidate.candidate_id,
+            passed=bool(review.get("passed")),
+            blockers=review.get("blockers", []),
+        )
+        return self._with_review(candidate, review)
+
+    def _review_data(
+        self, candidate: Candidate, history: list[Candidate]
+    ) -> dict:
+        """Request and decode review data.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate under review.
+        history : list[Candidate]
+            Prior records.
+
+        Returns
+        -------
+        dict
+            Decoded review object.
+        """
+        context = self._json(self._review_payload(candidate, history))
+        prompt = _load_prompt("reviewer")
+        self._emit_review(candidate)
+        raw = self.client.complete(prompt, context)
+        self._record_call(
+            "reviewer", prompt, context, raw, candidate.candidate_id
+        )
+        return self._review_value(raw)
+
+    def _review_payload(
+        self, candidate: Candidate, history: list[Candidate]
+    ) -> dict:
+        """Build the reviewer context document.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate under review.
+
+        history : list[Candidate]
+            Prior records.
+
+        Returns
+        -------
+        dict
+            Candidate, history, and search tasks.
+        """
+        return {
+            "candidate": candidate,
+            "history": history,
+            "tasks": self._manifest_prompts(),
+        }
+
+    def _emit_review(self, candidate: Candidate) -> None:
+        """Emit the reviewer stage start.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate under review.
+
+        Returns
+        -------
+        None
+            The observer is notified.
+        """
+        self._emit(
+            "stage_started",
+            stage="reviewer",
+            candidate_id=candidate.candidate_id,
+        )
+
+    def _review_value(self, raw: str) -> dict:
+        """Decode review output with a blocking fallback.
+
+        Parameters
+        ----------
+        raw : str
+            Model response.
+
+        Returns
+        -------
+        dict
+            Review result.
+        """
+        try:
+            value = json_value(raw)
+        except ValueError:
+            return {"passed": False, "blockers": ["invalid JSON"], "tests": []}
+        return value if isinstance(value, dict) else {"passed": False}
+
+    def _dynamic_test(self, candidate: Candidate, iteration: int) -> Candidate:
+        """Run the first dynamic gate.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate with review data.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        Candidate
+            Candidate with score and gate data.
+        """
+        started = time.monotonic()
+        result = self._test_result(candidate, iteration)
+        result = self._review_test_result(candidate, result)
+        result["elapsed"] = round(time.monotonic() - started, 3)
+        self._emit_gate("gate1", candidate, result)
+        self._shadow_label(candidate, iteration)
+        return self._gate1_candidate(candidate, result)
+
+    def _gate1_candidate(
+        self, candidate: Candidate, result: dict
+    ) -> Candidate:
+        """Attach the first-gate result and score to a candidate.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate with review data.
+        result : dict
+            First-gate result.
+
+        Returns
+        -------
+        Candidate
+            Candidate carrying the first-gate data.
+        """
+        score = self._score(candidate, result)
+        return self._with_test(candidate, result, score, gate1=result)
+
+    def _shadow_label(self, candidate: Candidate, iteration: int) -> None:
+        """Score a review-blocked candidate for calibration only.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate with review data.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        None
+            A label is appended when review is blocked and labels are on.
+        """
+        if not os.getenv("HARNESS_REVIEW_LABELS"):
+            return
+        if candidate.review.get("passed", False):
+            return
+        result = self._final_gate(candidate, iteration)
+        self._record_label(candidate, result, iteration)
+
+    def _review_test_result(self, candidate: Candidate, result: dict) -> dict:
+        """Attach reviewer-generated test results to a gate result.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate with review data.
+
+        result : dict
+            Base gate result.
+
+        Returns
+        -------
+        dict
+            Gate result including reviewer test fields.
+        """
+        sources = _review_sources(candidate.review)
+        if not sources or not self.config.use_review_tests:
+            return result
+        return _with_review_tests(candidate.proposal, result, sources)
+
+    def _score(self, candidate: Candidate, result: dict) -> float | None:
+        """Choose an existing or gate-provided score.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate with an optional score.
+        result : dict
+            Dynamic gate result.
+
+        Returns
+        -------
+        float or None
+            Selected score.
+        """
+        return (
+            candidate.score
+            if candidate.score is not None
+            else result.get("score")
+        )
+
+    def _test_result(self, candidate: Candidate, iteration: int) -> dict:
+        """Choose the first-gate result source.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate with review data.
+        iteration : int
+            Current iteration.
+
+        Returns
+        -------
+        dict
+            First-gate result.
+        """
+        if not self.config.baseline and not candidate.review.get(
+            "passed", False
+        ):
+            return self._blocked_result()
+        return self._run_gate(candidate, iteration)
+
+    def _run_gate(self, candidate: Candidate, iteration: int) -> dict:
+        """Run or simulate the first dynamic gate.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate to test.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        dict
+            First-gate result.
+        """
+        if self.config.task_manifest:
+            return self._manifest_result(candidate)
+        if not self.config.use_docker:
+            return self._wiring_result()
+        if not self.config.gate_command:
+            return self._unconfigured_result()
+        return self._run_candidate_gate(candidate, iteration)
+
+    def _wiring_result(self) -> dict:
+        """Return a wiring-only result when Docker is disabled.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            Passing result with no meaningful score.
+        """
+        return {
+            "passed": True,
+            "score": 0.0,
+            "error": "Docker disabled; wiring-only run, no score assigned",
+        }
+
+    def _unconfigured_result(self) -> dict:
+        """Return a fail-closed result when no gate is configured.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            Failed result.
+        """
+        return {
+            "passed": False,
+            "score": 0.0,
+            "error": "no gate configured; set --gate-command or "
+            "--task-manifest",
+        }
+
+    def _manifest_result(
+        self, candidate: Candidate, manifest_path: str | None = None
+    ) -> dict:
+        """Score the candidate proposal against a task manifest.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate to score.
+        manifest_path : str or None
+            Manifest to use, or the configured search manifest.
+
+        Returns
+        -------
+        dict
+            Gate result with pass rate and passed flag.
+        """
+        path = manifest_path or self.config.task_manifest
+        rate = self._score_manifest(candidate, str(path))
+        return {
+            "passed": rate >= self.config.gate_threshold,
+            "score": rate,
+        }
+
+    def _score_manifest(
+        self, candidate: Candidate, manifest_path: str
+    ) -> float:
+        """Score one candidate against a manifest.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate to score.
+        manifest_path : str
+            Manifest path.
+
+        Returns
+        -------
+        float
+            Pass rate in ``[0.0, 1.0]``.
+        """
+        path = Path(manifest_path)
+        manifest = load_manifest(path)
+        rate, _ = score_candidate(candidate.proposal, path.parent, manifest)
+        return rate
+
+    def _run_candidate_gate(
+        self, candidate: Candidate, iteration: int
+    ) -> dict:
+        """Run the first gate for a candidate.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate to test.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        dict
+            First-gate result.
+        """
+        directory = self._candidate_dir(candidate, iteration)
+        (directory / "proposal.txt").write_text(candidate.proposal)
+        return self._run_gate_command(
+            directory, self.config.gate_command or ""
+        )
+
+    def _run_gate_command(self, directory: Path, command: str) -> dict:
+        """Run a gate command locally or in Docker.
+
+        Parameters
+        ----------
+        directory : pathlib.Path
+            Candidate directory.
+        command : str
+            Shell command to execute.
+
+        Returns
+        -------
+        dict
+            Gate result.
+        """
+        if self.config.allow_local_gate:
+            return LocalGate().run(directory, command)
+        return self.gate.run(directory, ["sh", "-c", command])
+
+    def _adjudicate(
+        self, candidates: list[Candidate], history: list[Candidate]
+    ) -> Candidate:
+        """Ask the adjudicator to select a survivor.
+
+        Parameters
+        ----------
+        candidates : list[Candidate]
+            First-gate results.
+        history : list[Candidate]
+            Prior records.
+
+        Returns
+        -------
+        Candidate
+            Selected candidate.
+        """
+        raw = self._ask_adjudicator(candidates, history)
+        pareto = _pareto_survivors(candidates)
+        selected = self._select(pareto, self._selection_id(raw))
+        self._emit_adjudicated(selected, len(candidates), len(pareto))
+        return selected
+
+    def _ask_adjudicator(
+        self, candidates: list[Candidate], history: list[Candidate]
+    ) -> str:
+        """Request one adjudicator response.
+
+        Parameters
+        ----------
+        candidates : list[Candidate]
+            First-gate results.
+
+        history : list[Candidate]
+            Prior records.
+
+        Returns
+        -------
+        str
+            Raw adjudicator response.
+        """
+        prompt = _load_prompt("adjudicator")
+        context = self._json(self._adjudicator_payload(candidates, history))
+        self._emit("stage_started", stage="adjudicator")
+        raw = self.client.complete(prompt, context)
+        self._record_call("adjudicator", prompt, context, raw)
+        return raw
+
+    def _emit_adjudicated(
+        self, selected: Candidate, total: int, pareto: int
+    ) -> None:
+        """Emit the adjudication result.
+
+        Parameters
+        ----------
+        selected : Candidate
+            Chosen candidate.
+
+        total : int
+            Number of first-gate survivors.
+
+        pareto : int
+            Number of non-dominated survivors.
+
+        Returns
+        -------
+        None
+            The event is emitted.
+        """
+        self._emit(
+            "adjudicated",
+            selected=selected.candidate_id,
+            survivors=total,
+            pareto=pareto,
+        )
+
+    def _adjudicator_payload(
+        self, candidates: list[Candidate], history: list[Candidate]
+    ) -> dict:
+        """Build the adjudicator context document.
+
+        Parameters
+        ----------
+        candidates : list[Candidate]
+            First-gate results.
+
+        history : list[Candidate]
+            Prior records.
+
+        Returns
+        -------
+        dict
+            Candidates, history, and search tasks.
+        """
+        return {
+            "candidates": candidates,
+            "history": history,
+            "tasks": self._manifest_prompts(),
+        }
+
+    def _selection_id(self, raw: str) -> str | None:
+        """Extract a selection from adjudicator output.
+
+        Parameters
+        ----------
+        raw : str
+            Model response.
+
+        Returns
+        -------
+        str or None
+            Selected candidate identifier.
+        """
+        return self._selection_value(raw)
+
+    def _selection_value(self, raw: str) -> str | None:
+        """Decode a selection or return no selection.
+
+        Parameters
+        ----------
+        raw : str
+            Model response.
+
+        Returns
+        -------
+        str or None
+            Candidate identifier.
+        """
+        try:
+            value = json_value(raw)
+        except ValueError:
+            return None
+        return self._candidate_id(value)
+
+    def _candidate_id(self, value: object) -> str | None:
+        """Read a selected candidate identifier from decoded JSON.
+
+        Parameters
+        ----------
+        value : object
+            Decoded adjudicator response.
+
+        Returns
+        -------
+        str or None
+            Selected candidate identifier.
+        """
+        return (
+            value.get("selected_candidate_id")
+            if isinstance(value, dict)
+            else None
+        )
+
+    def _select(
+        self, candidates: list[Candidate], selected: str | None
+    ) -> Candidate:
+        """Select a valid candidate or highest score.
+
+        Parameters
+        ----------
+        candidates : list[Candidate]
+            First-gate results.
+        selected : str or None
+            Requested candidate identifier.
+
+        Returns
+        -------
+        Candidate
+            Selected candidate.
+        """
+        valid = self._valid_selection(candidates, selected)
+        return (
+            valid[0]
+            if valid
+            else max(candidates, key=lambda item: item.score or 0.0)
+        )
+
+    def _valid_selection(
+        self, candidates: list[Candidate], selected: str | None
+    ) -> list[Candidate]:
+        """Find the passing selected candidate.
+
+        Parameters
+        ----------
+        candidates : list[Candidate]
+            First-gate results.
+        selected : str or None
+            Requested identifier.
+
+        Returns
+        -------
+        list[Candidate]
+            Matching passing candidates.
+        """
+        return [
+            item
+            for item in candidates
+            if item.candidate_id == selected
+            and item.dynamic_test.get("passed")
+        ]
+
+    def _final_dynamic_test(
+        self,
+        candidate: Candidate,
+        iteration: int,
+        incumbent: Candidate | None = None,
+    ) -> Candidate:
+        """Run the final dynamic gate.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Adjudicated candidate.
+
+        iteration : int
+            Current iteration number.
+
+        incumbent : Candidate or None
+            Current winner, used for differential testing.
+
+        Returns
+        -------
+        Candidate
+            Candidate with final-gate data.
+        """
+        result = self._gate_two_result(candidate, iteration, incumbent)
+        self._emit_gate("gate2", candidate, result)
+        self._record_label(candidate, result, iteration)
+        merged = {**candidate.dynamic_test, **result}
+        return self._with_test(
+            candidate, merged, candidate.score, gate2=result
+        )
+
+    def _record_label(
+        self, candidate: Candidate, result: dict, iteration: int
+    ) -> None:
+        """Append one reviewer calibration label when configured.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate with review data.
+        result : dict
+            Gate 2 result.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        None
+            The label is appended to ``HARNESS_REVIEW_LABELS``.
+        """
+        path = os.getenv("HARNESS_REVIEW_LABELS")
+        if not path:
+            return
+        record = _label_record(candidate, result, iteration)
+        _append_json_line(Path(path), record)
+
+    def _gate_two_result(
+        self,
+        candidate: Candidate,
+        iteration: int,
+        incumbent: Candidate | None,
+    ) -> dict:
+        """Compute gate 2 with timing, consistency, and disagreement.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Adjudicated candidate.
+
+        iteration : int
+            Current iteration number.
+
+        incumbent : Candidate or None
+            Current winner, used for differential testing.
+
+        Returns
+        -------
+        dict
+            Gate 2 result with independence evidence.
+        """
+        started = time.monotonic()
+        result = self._final_result(candidate, iteration, incumbent)
+        result["elapsed"] = round(time.monotonic() - started, 3)
+        result["disagreement"] = _gate_disagreement(candidate, result)
+        _emit_disagreement(self, candidate, result)
+        return result
+
+    def _final_result(
+        self,
+        candidate: Candidate,
+        iteration: int,
+        incumbent: Candidate | None = None,
+    ) -> dict:
+        """Compute the final-gate result without emitting.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Adjudicated candidate.
+
+        iteration : int
+            Current iteration number.
+
+        incumbent : Candidate or None
+            Current winner, used for differential testing.
+
+        Returns
+        -------
+        dict
+            Final-gate result.
+        """
+        if not candidate.dynamic_test.get("passed"):
+            return {"final_passed": False}
+        result = self._final_gate(candidate, iteration)
+        return self._independent_result(candidate, result, incumbent)
+
+    def _independent_result(
+        self, candidate: Candidate, result: dict, incumbent: Candidate | None
+    ) -> dict:
+        """Add flake, differential, and consistency data to gate 2.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate under final testing.
+
+        result : dict
+            Base final-gate result.
+
+        incumbent : Candidate or None
+            Current winner, when one exists.
+
+        Returns
+        -------
+        dict
+            Final-gate result with independence evidence.
+        """
+        enriched = self._flake_check(candidate, result)
+        return self._differential_check(enriched, incumbent)
+
+    def _flake_check(self, candidate: Candidate, result: dict) -> dict:
+        """Re-run the configured final manifest to detect flakiness.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate under final testing.
+
+        result : dict
+            Base final-gate result.
+
+        Returns
+        -------
+        dict
+            Result with ``consistent``, ``runs``, and ``scores`` fields.
+        """
+        runs = max(1, self.config.flake_runs)
+        if runs < 2 or not self.config.final_task_manifest:
+            return {**result, "consistent": None, "runs": 1}
+        return _consistency(self, candidate, runs, result)
+
+    def _differential_check(
+        self, result: dict, incumbent: Candidate | None
+    ) -> dict:
+        """Compare the candidate against the incumbent winner.
+
+        Parameters
+        ----------
+        result : dict
+            Final-gate result.
+
+        incumbent : Candidate or None
+            Current winner.
+
+        Returns
+        -------
+        dict
+            Result with differential fields when an incumbent exists.
+        """
+        if incumbent is None or not self.config.final_task_manifest:
+            return {**result, "beats_incumbent": None}
+        return _with_differential(result, self, incumbent)
+
+    def _final_gate(self, candidate: Candidate, iteration: int) -> dict:
+        """Run or simulate the final dynamic gate.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate to test.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        dict
+            Final-gate result.
+        """
+        if self.config.final_task_manifest:
+            return self._final_manifest_result(
+                candidate, self.config.final_task_manifest
+            )
+        if not self.config.use_docker:
+            return self._final_wiring_result()
+        return self._command_gate(candidate, iteration)
+
+    def _command_gate(self, candidate: Candidate, iteration: int) -> dict:
+        """Run the configured command-based final gate.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate to test.
+
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        dict
+            Final-gate result.
+        """
+        command = self.config.final_gate_command or self.config.gate_command
+        if not command:
+            return self._final_unconfigured_result()
+        return self._final_docker_gate(candidate, iteration, command)
+
+    def _final_wiring_result(self) -> dict:
+        """Return a wiring-only final-gate result.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            Passing result marked as non-independent.
+        """
+        return {
+            "final_passed": True,
+            "error": "Docker disabled; final gate simulated",
+            "independent": False,
+        }
+
+    def _final_unconfigured_result(self) -> dict:
+        """Return a fail-closed final-gate result.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            Failed result.
+        """
+        return {
+            "final_passed": False,
+            "error": "no final gate configured; set "
+            "--final-gate-command or --final-task-manifest",
+            "independent": False,
+        }
+
+    def _final_manifest_result(
+        self, candidate: Candidate, manifest_path: str
+    ) -> dict:
+        """Rescore the winner against a held-out task manifest.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate to score.
+        manifest_path : str
+            Held-out manifest path.
+
+        Returns
+        -------
+        dict
+            Final-gate result with pass rate, passed flag, and independence.
+        """
+        result = self._manifest_result(candidate, manifest_path)
+        return {
+            **result,
+            "final_passed": result["passed"],
+            "independent": True,
+        }
+
+    def _final_docker_gate(
+        self, candidate: Candidate, iteration: int, command: str
+    ) -> dict:
+        """Run the final Docker gate.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate to test.
+        iteration : int
+            Current iteration number.
+        command : str
+            Final-gate shell command.
+
+        Returns
+        -------
+        dict
+            Final-gate result.
+        """
+        result = self._run_gate_command(
+            self._candidate_dir(candidate, iteration), command
+        )
+        independent = self.config.final_gate_command is not None
+        return _final_gate_result(result, independent)
+
+    def _record(
+        self,
+        evaluated: list[Candidate],
+        final: Candidate | None,
+        history: list[Candidate],
+        winner: Candidate | None,
+        iteration: int,
+    ) -> tuple[list[Candidate], Candidate | None]:
+        """Record results and update the winner.
+
+        Parameters
+        ----------
+        evaluated : list[Candidate]
+            First-gate results.
+        final : Candidate or None
+            Final-gate result, or ``None`` when no survivor was adjudicated.
+        history : list[Candidate]
+            Mutable history.
+        winner : Candidate or None
+            Current winner.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        tuple[list[Candidate], Candidate or None]
+            Updated history and winner.
+        """
+        for item in evaluated:
+            completed = self._completed(item, final)
+            history.append(completed)
+            self._write_artifact(iteration, completed)
+            self._emit_candidate(iteration, completed)
+        return history, self._best_or_current(winner, final)
+
+    def _completed(
+        self, item: Candidate, final: Candidate | None
+    ) -> Candidate:
+        """Return the finalized candidate when it matches ``final``.
+
+        Parameters
+        ----------
+        item : Candidate
+            Evaluated candidate.
+        final : Candidate or None
+            Final-gate result.
+
+        Returns
+        -------
+        Candidate
+            ``final`` when the ids match, otherwise ``item``.
+        """
+        if final is None:
+            return item
+        return final if item.candidate_id == final.candidate_id else item
+
+    def _best_or_current(
+        self, winner: Candidate | None, candidate: Candidate | None
+    ) -> Candidate | None:
+        """Update the winner when a valid candidate is present.
+
+        Parameters
+        ----------
+        winner : Candidate or None
+            Current winner.
+        candidate : Candidate or None
+            Candidate to compare, or ``None``.
+
+        Returns
+        -------
+        Candidate or None
+            Updated winner.
+        """
+        return winner if candidate is None else self._best(winner, candidate)
+
+    def _best(
+        self, winner: Candidate | None, candidate: Candidate
+    ) -> Candidate | None:
+        """Keep the highest-scoring final-passed candidate.
+
+        Parameters
+        ----------
+        winner : Candidate or None
+            Current winner.
+        candidate : Candidate
+            Candidate to compare.
+
+        Returns
+        -------
+        Candidate or None
+            Updated winner.
+        """
+        if not candidate.dynamic_test.get("final_passed"):
+            return winner
+        if winner is None or _better(candidate, winner):
+            return candidate
+        return winner
+
+    def _candidate_dir(self, candidate: Candidate, iteration: int) -> Path:
+        """Create a candidate artifact directory.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate being evaluated.
+        iteration : int
+            Current iteration number.
+
+        Returns
+        -------
+        pathlib.Path
+            Candidate directory.
+        """
+        directory = (
+            self.workspace / f"iteration-{iteration}" / candidate.candidate_id
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _write_artifact(self, iteration: int, candidate: Candidate) -> None:
+        """Persist one candidate artifact.
+
+        Parameters
+        ----------
+        iteration : int
+            Current iteration number.
+        candidate : Candidate
+            Candidate record.
+
+        Returns
+        -------
+        None
+            Artifact is written to disk.
+        """
+        path = self._candidate_dir(candidate, iteration) / "candidate.json"
+        path.write_text(json.dumps(candidate.__dict__, indent=2, default=str))
+
+    def _record_call(
+        self,
+        stage: str,
+        prompt: str,
+        context: str,
+        response: str,
+        candidate_id: str | None = None,
+    ) -> None:
+        """Append one model-call entry to the iteration trajectory.
+
+        Parameters
+        ----------
+        stage : str
+            Stage identifier: ``proposer``, ``reviewer``, or ``adjudicator``.
+        prompt : str
+            System prompt sent to the model.
+        context : str
+            User payload sent to the model.
+        response : str
+            Raw model response.
+        candidate_id : str or None
+            Candidate identifier for per-candidate stages.
+
+        Returns
+        -------
+        None
+            Entry appended to ``runs/iteration-N/trajectory.jsonl``.
+        """
+        self._emit("stage_finished", stage=stage, candidate_id=candidate_id)
+        payload = (stage, candidate_id, prompt, context, response)
+        entry = _call_entry(self._current_iteration, payload)
+        self._append_trajectory(entry)
+
+    def _append_trajectory(self, entry: dict) -> None:
+        """Append one trajectory entry to the iteration jsonl file.
+
+        Parameters
+        ----------
+        entry : dict
+            Entry to append.
+
+        Returns
+        -------
+        None
+            Entry written to disk.
+        """
+        directory = self.workspace / f"iteration-{self._current_iteration}"
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / "trajectory.jsonl").open(
+            "a", encoding="utf-8"
+        ) as handle:
+            handle.write(json.dumps(entry) + "\n")
+
+    def _target_reached(self, winner: Candidate | None) -> bool:
+        """Check whether the target is reached.
+
+        Parameters
+        ----------
+        winner : Candidate or None
+            Current winner.
+
+        Returns
+        -------
+        bool
+            Whether the target is reached.
+        """
+        return (
+            winner is not None
+            and (winner.score or 0.0) >= self.config.target_score
+        )
+
+    def _reason(self, reached: bool) -> str:
+        """Return the stop reason, honoring user cancellation.
+
+        Parameters
+        ----------
+        reached : bool
+            Whether the target score was reached.
+
+        Returns
+        -------
+        str
+            Human-readable stop reason.
+        """
+        if self._cancelled:
+            return "cancelled by user"
+        return self._stop_reason(reached)
+
+    def _stop_reason(self, reached: bool) -> str:
+        """Describe why the search stopped.
+
+        Parameters
+        ----------
+        reached : bool
+            Whether the target score was reached.
+
+        Returns
+        -------
+        str
+            Human-readable stop reason.
+        """
+        if reached:
+            return "target score reached"
+        if self._stopped_on_cost:
+            return "cost budget exhausted"
+        if self._stopped_on_plateau:
+            return "no improvement for the plateau window"
+        return _budget_reason(self.config.use_docker)
+
+    def _emit(self, event: str, **fields: object) -> None:
+        """Send one progress event to the observer when present.
+
+        Parameters
+        ----------
+        event : str
+            Event name.
+        **fields : object
+            Event payload fields.
+
+        Returns
+        -------
+        None
+            The observer is invoked only when configured.
+        """
+        if self.observer is not None:
+            self.observer({"event": event, **fields})
+
+    def _should_stop(self) -> bool:
+        """Return whether the caller requested a graceful stop.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        bool
+            ``True`` once cancelled; also latches the cancellation flag.
+        """
+        stopped = self.should_stop is not None and self.should_stop()
+        self._cancelled = self._cancelled or stopped
+        return stopped
+
+    def _emit_finished(self, result: SearchResult, reached: bool) -> None:
+        """Emit the terminal run event.
+
+        Parameters
+        ----------
+        result : SearchResult
+            Completed search result.
+        reached : bool
+            Whether the target score was reached.
+
+        Returns
+        -------
+        None
+            Event is emitted.
+        """
+        self._emit("run_finished", **self._finished_payload(result, reached))
+
+    def _finished_payload(self, result: SearchResult, reached: bool) -> dict:
+        """Build the run-finished event payload.
+
+        Parameters
+        ----------
+        result : SearchResult
+            Completed search result.
+
+        reached : bool
+            Whether the target score was reached.
+
+        Returns
+        -------
+        dict
+            Event payload fields.
+        """
+        return {
+            "winner_id": self._winner_id(result.winner),
+            "winner_score": self._winner_score(result.winner),
+            "stop_reason": result.stop_reason,
+            "stopped_on_target": reached,
+            "held_out_score": result.held_out_score,
+            "cancelled": self._cancelled,
+        }
+
+    def _emit_winner(self, iteration: int, winner: Candidate | None) -> None:
+        """Emit the end-of-iteration summary event.
+
+        Parameters
+        ----------
+        iteration : int
+            Current iteration number.
+        winner : Candidate or None
+            Best candidate so far.
+
+        Returns
+        -------
+        None
+            Event is emitted.
+        """
+        self._emit(
+            "iteration_finished",
+            iteration=iteration,
+            winner_id=self._winner_id(winner),
+            winner_score=self._winner_score(winner),
+        )
+
+    def _emit_gate(
+        self, event: str, candidate: Candidate, result: dict
+    ) -> None:
+        """Emit a gate-result event for one candidate.
+
+        Parameters
+        ----------
+        event : str
+            Event name, ``gate1`` or ``gate2``.
+        candidate : Candidate
+            Candidate evaluated.
+        result : dict
+            Gate result mapping.
+
+        Returns
+        -------
+        None
+            Event is emitted.
+        """
+        self._emit(event, **_gate_payload(candidate, result))
+
+    def _emit_candidate(self, iteration: int, candidate: Candidate) -> None:
+        """Emit a finalized candidate summary.
+
+        Parameters
+        ----------
+        iteration : int
+            Current iteration number.
+        candidate : Candidate
+            Finalized candidate record.
+
+        Returns
+        -------
+        None
+            Event is emitted.
+        """
+        self._emit(
+            "candidate_recorded", **_candidate_payload(iteration, candidate)
+        )
+
+    def _winner_id(self, candidate: Candidate | None) -> str | None:
+        """Return a candidate identifier or ``None``.
+
+        Parameters
+        ----------
+        candidate : Candidate or None
+            Candidate record.
+
+        Returns
+        -------
+        str or None
+            Candidate identifier when present.
+        """
+        return None if candidate is None else candidate.candidate_id
+
+    def _winner_score(self, candidate: Candidate | None) -> float | None:
+        """Return a candidate score or ``None``.
+
+        Parameters
+        ----------
+        candidate : Candidate or None
+            Candidate record.
+
+        Returns
+        -------
+        float or None
+            Candidate score when present.
+        """
+        return None if candidate is None else candidate.score
+
+    def _json(self, value: dict) -> str:
+        """Serialize agent context.
+
+        Parameters
+        ----------
+        value : dict
+            Context to serialize.
+
+        Returns
+        -------
+        str
+            JSON serialization.
+        """
+        return json.dumps(value, default=lambda item: item.__dict__)
+
+    def _with_review(self, candidate: Candidate, review: dict) -> Candidate:
+        """Attach review data.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate under review.
+        review : dict
+            Parsed review object.
+
+        Returns
+        -------
+        Candidate
+            Updated candidate.
+        """
+        return Candidate(
+            candidate.candidate_id,
+            candidate.source,
+            candidate.proposal,
+            review=review,
+        )
+
+    def _with_test(
+        self,
+        candidate: Candidate,
+        result: dict,
+        score: float | None = None,
+        gate1: dict | None = None,
+        gate2: dict | None = None,
+    ) -> Candidate:
+        """Attach dynamic-test data.
+
+        Parameters
+        ----------
+        candidate : Candidate
+            Candidate under testing.
+
+        result : dict
+            Test result.
+
+        score : float or None
+            Candidate score.
+
+        gate1 : dict or None
+            First-gate result, when available.
+
+        gate2 : dict or None
+            Final-gate result, when available.
+
+        Returns
+        -------
+        Candidate
+            Updated candidate.
+        """
+        return replace(
+            candidate,
+            score=score,
+            dynamic_test=result,
+            gate1=gate1 or candidate.gate1,
+            gate2=gate2 or candidate.gate2,
+        )
+
+    def _blocked_result(self) -> dict:
+        """Build a review-block result.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            Failed result with zero score.
+        """
+        return {
+            "passed": False,
+            "score": 0.0,
+            "error": "adversarial review blocked candidate",
+        }
+
+
+def _rounds(limit: int, should_stop: Callable[[], bool]):
+    """Yield iteration numbers until the budget or a stop signal.
+
+    Parameters
+    ----------
+    limit : int
+        Iteration budget.
+
+    should_stop : callable
+        Stop predicate.
+
+    Returns
+    -------
+    iterator of int
+        Iteration numbers to run.
+    """
+    for iteration in range(1, limit + 1):
+        if should_stop():
+            return
+        yield iteration
+
+
+def _final_gate_result(result: dict, independent: bool) -> dict:
+    """Merge final-gate flags into a gate result.
+
+    Parameters
+    ----------
+    result : dict
+        Raw gate result.
+
+    independent : bool
+        Whether a distinct final command was configured.
+
+    Returns
+    -------
+    dict
+        Result with final-gate flags added.
+    """
+    return {
+        **result,
+        "final_passed": result.get("passed", False),
+        "independent": independent,
+    }
+
+
+def _timestamp() -> str:
+    """Return the current UTC timestamp.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str
+        ISO-8601 timestamp with second precision.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _call_entry(iteration, payload):
+    """Build one trajectory entry for a model call.
+
+    Parameters
+    ----------
+    iteration : int
+        Current iteration number.
+
+    payload : tuple
+        Stage, candidate, prompt, context, and response.
+
+    Returns
+    -------
+    dict
+        Trajectory entry ready to append.
+    """
+    entry = {"ts": _timestamp(), "iteration": iteration}
+    entry.update(_call_payload(*payload))
+    return entry
+
+
+def _call_payload(stage, candidate_id, prompt, context, response):
+    """Build the payload fields of a trajectory entry.
+
+    Parameters
+    ----------
+    stage : str
+        Stage identifier.
+
+    candidate_id : str or None
+        Candidate identifier, when the stage is per-candidate.
+
+    prompt : str
+        System prompt sent to the model.
+
+    context : str
+        User payload sent to the model.
+
+    response : str
+        Raw model response.
+
+    Returns
+    -------
+    dict
+        Stage, candidate, prompt, and response fields.
+    """
+    return {
+        "stage": stage,
+        "candidate_id": candidate_id,
+        "prompt_system": prompt,
+        "prompt_user": context,
+        "response": response,
+    }
+
+
+def _gate_payload(candidate: Candidate, result: dict) -> dict:
+    """Build a gate-result event payload.
+
+    Parameters
+    ----------
+    candidate : Candidate
+        Candidate evaluated.
+
+    result : dict
+        Gate result mapping.
+
+    Returns
+    -------
+    dict
+        Event payload fields.
+    """
+    return {
+        "candidate_id": candidate.candidate_id,
+        "passed": bool(result.get("passed")),
+        "final_passed": bool(result.get("final_passed")),
+        "score": result.get("score"),
+        "error": result.get("error"),
+        "independent": result.get("independent"),
+    }
+
+
+def _candidate_payload(iteration: int, candidate: Candidate) -> dict:
+    """Build a finalized-candidate event payload.
+
+    Parameters
+    ----------
+    iteration : int
+        Current iteration number.
+
+    candidate : Candidate
+        Finalized candidate record.
+
+    Returns
+    -------
+    dict
+        Event payload fields.
+    """
+    return {
+        "iteration": iteration,
+        "candidate_id": candidate.candidate_id,
+        "score": candidate.score,
+        "review_passed": bool(candidate.review.get("passed")),
+        "gate_passed": bool(candidate.dynamic_test.get("passed")),
+        "final_passed": bool(candidate.dynamic_test.get("final_passed")),
+    }
+
+
+def _review_sources(review: dict) -> list[str]:
+    """Return non-empty reviewer test sources.
+
+    Parameters
+    ----------
+    review : dict
+        Parsed reviewer output.
+
+    Returns
+    -------
+    list[str]
+        Reviewer-generated unittest sources.
+    """
+    values = review.get("tests") or []
+    if not isinstance(values, list):
+        return []
+    return [item for item in values if isinstance(item, str) and item.strip()]
+
+
+def _with_review_tests(code: str, result: dict, sources: list[str]) -> dict:
+    """Merge reviewer-test results into a gate result.
+
+    Parameters
+    ----------
+    code : str
+        Candidate solution source.
+
+    result : dict
+        Base gate result.
+
+    sources : list[str]
+        Reviewer-generated unittest sources.
+
+    Returns
+    -------
+    dict
+        Gate result including reviewer test fields.
+    """
+    passed, output = score_review_tests(code, sources)
+    result = {**result, "review_tests_passed": passed}
+    result["review_tests"] = len(sources)
+    result["review_tests_output"] = output[-1000:]
+    result["passed"] = bool(result.get("passed")) and passed
+    return result
+
+
+def _budget_reason(use_docker: bool) -> str:
+    """Return the iteration-budget stop reason.
+
+    Parameters
+    ----------
+    use_docker : bool
+        Whether Docker gating was enabled.
+
+    Returns
+    -------
+    str
+        Human-readable stop reason.
+    """
+    suffix = "" if use_docker else " (Docker gate disabled)"
+    return f"iteration budget exhausted{suffix}"
+
+
+def _label_record(candidate: Candidate, result: dict, iteration: int) -> dict:
+    """Build one reviewer calibration record.
+
+    Parameters
+    ----------
+    candidate : Candidate
+        Candidate with review data.
+    result : dict
+        Gate 2 result.
+    iteration : int
+        Current iteration number.
+
+    Returns
+    -------
+    dict
+        Candidate id, review verdict, and gate 2 outcome.
+    """
+    return {
+        "iteration": iteration,
+        "candidate_id": candidate.candidate_id,
+        "review": bool(candidate.review.get("passed")),
+        "truth": bool(result.get("final_passed")),
+    }
+
+
+def _append_json_line(path: Path, record: dict) -> None:
+    """Append one JSON record to a log file.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Destination JSONL path.
+    record : dict
+        Record to append.
+
+    Returns
+    -------
+    None
+        The record is appended when the file is writable.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, default=str) + "\n")
+    except OSError:
+        return
+
+
+def _gate_disagreement(candidate: Candidate, result: dict) -> bool:
+    """Report whether gate 1 and gate 2 disagree.
+
+    Parameters
+    ----------
+    candidate : Candidate
+        Candidate after gate 2.
+
+    result : dict
+        Gate 2 result.
+
+    Returns
+    -------
+    bool
+        Whether the gate outcomes differ.
+    """
+    first = bool(candidate.dynamic_test.get("passed"))
+    second = bool(result.get("final_passed", result.get("passed")))
+    return first != second
+
+
+def _emit_disagreement(
+    pipeline: "SearchPipeline", candidate: Candidate, result: dict
+) -> None:
+    """Emit an event when the two gates disagree.
+
+    Parameters
+    ----------
+    pipeline : SearchPipeline
+        Pipeline owning the observer.
+
+    candidate : Candidate
+        Candidate after gate 2.
+
+    result : dict
+        Gate 2 result.
+
+    Returns
+    -------
+    None
+        An event is emitted only on disagreement.
+    """
+    if result.get("disagreement"):
+        pipeline._emit(
+            "gate_disagreement", candidate_id=candidate.candidate_id
+        )
+
+
+def _pareto_survivors(candidates: list[Candidate]) -> list[Candidate]:
+    """Return the non-dominated gate-1 survivors.
+
+    Parameters
+    ----------
+    candidates : list[Candidate]
+        First-gate survivors.
+
+    Returns
+    -------
+    list[Candidate]
+        Candidates not dominated on score and elapsed time.
+    """
+    return [
+        item
+        for item in candidates
+        if not any(_dominates(other, item) for other in candidates)
+    ]
+
+
+def _dominates(first: Candidate, second: Candidate) -> bool:
+    """Report whether one candidate dominates another.
+
+    Parameters
+    ----------
+    first : Candidate
+        Candidate that may dominate.
+
+    second : Candidate
+        Candidate compared against.
+
+    Returns
+    -------
+    bool
+        Whether ``first`` is at least as good and strictly better once.
+    """
+    score_a = first.score or 0.0
+    score_b = second.score or 0.0
+    time_a = float(first.dynamic_test.get("elapsed") or 0.0)
+    time_b = float(second.dynamic_test.get("elapsed") or 0.0)
+    better = score_a > score_b or (score_a == score_b and time_a < time_b)
+    return better and time_a <= time_b
+
+
+def _elapsed(candidate: Candidate) -> float:
+    """Return a candidate's gate time.
+
+    Parameters
+    ----------
+    candidate : Candidate
+        Candidate record.
+
+    Returns
+    -------
+    float
+        Elapsed seconds, or infinity when unrecorded.
+    """
+    value = candidate.dynamic_test.get("elapsed")
+    return float("inf") if value is None else float(value)
+
+
+def _better(candidate: Candidate, winner: Candidate) -> bool:
+    """Report whether a candidate should replace the incumbent.
+
+    Parameters
+    ----------
+    candidate : Candidate
+        Final-gated candidate.
+
+    winner : Candidate
+        Current winner.
+
+    Returns
+    -------
+    bool
+        Whether the candidate is strictly better or cheaper.
+    """
+    score = candidate.score or 0.0
+    best = winner.score or 0.0
+    if score != best:
+        return score > best
+    return _elapsed(candidate) < _elapsed(winner)
+
+
+def _repeated_scores(pipeline, candidate, runs, first) -> list:
+    """Collect gate scores across repeated runs.
+
+    Parameters
+    ----------
+    pipeline : SearchPipeline
+        Pipeline owning the gate.
+
+    candidate : Candidate
+        Candidate under test.
+
+    runs : int
+        Number of total runs.
+
+    first : float or None
+        Score from the first run.
+
+    Returns
+    -------
+    list
+        One score per run.
+    """
+    scores = [first]
+    for _ in range(runs - 1):
+        rerun = pipeline._final_gate(candidate, pipeline._current_iteration)
+        scores.append(rerun.get("score"))
+    return scores
+
+
+def _with_differential(result: dict, pipeline, incumbent) -> dict:
+    """Attach incumbent-comparison fields to a gate result.
+
+    Parameters
+    ----------
+    result : dict
+        Final-gate result.
+
+    pipeline : SearchPipeline
+        Pipeline owning the evaluator.
+
+    incumbent : Candidate
+        Current winner.
+
+    Returns
+    -------
+    dict
+        Result with incumbent and delta fields.
+    """
+    manifest = pipeline.config.final_task_manifest
+    other = pipeline._score_manifest(incumbent, manifest)
+    score = result.get("score")
+    delta = None if score is None else score - other
+    return _differential_fields(result, other, delta)
+
+
+def _consistency(pipeline, candidate, runs, result) -> dict:
+    """Measure final-gate score consistency across runs.
+
+    Parameters
+    ----------
+    pipeline : SearchPipeline
+        Pipeline owning the gate.
+
+    candidate : Candidate
+        Candidate under test.
+
+    runs : int
+        Number of repeated runs.
+
+    result : dict
+        Base final-gate result.
+
+    Returns
+    -------
+    dict
+        Result with consistency fields.
+    """
+    scores = _repeated_scores(pipeline, candidate, runs, result.get("score"))
+    return {
+        **result,
+        "consistent": len(set(scores)) == 1,
+        "runs": runs,
+        "scores": scores,
+    }
+
+
+def _differential_fields(result, other, delta) -> dict:
+    """Merge incumbent comparison fields into a result.
+
+    Parameters
+    ----------
+    result : dict
+        Final-gate result.
+
+    other : float
+        Incumbent score.
+
+    delta : float or None
+        Candidate minus incumbent score.
+
+    Returns
+    -------
+    dict
+        Result with incumbent and delta fields.
+    """
+    result = {**result, "incumbent_score": other, "delta": delta}
+    result["beats_incumbent"] = bool(delta is not None and delta >= 0)
+    return result
