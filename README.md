@@ -525,9 +525,10 @@ The interactive agent can invoke `evaluate_app` for deterministic checks of `ind
 
 ## Provider Setup
 
-The client supports OpenRouter (default), OpenCode Go, and any
-OpenAI-compatible local server. Create `.env` in the repository root and never
-commit it or place a real key in `.env.example`.
+The client supports OpenRouter (default), OpenCode Go, the Anthropic
+Messages API (Claude), and any OpenAI-compatible server, local or remote.
+Create `.env` in the repository root and never commit it or place a real
+key in `.env.example`.
 
 OpenRouter:
 
@@ -552,7 +553,22 @@ OPENCODE_BASE_URL=https://opencode.ai/inference/go/openai/v1/chat/completions
 ending in `/v1` is also accepted. `OPENCODE_GO_API_KEY` works as an alternate
 key variable.
 
-Local model (Ollama, LM Studio, llama.cpp, or vLLM):
+Anthropic Messages API (Claude models):
+
+```dotenv
+HARNESS_PROVIDER=anthropic
+ANTHROPIC_API_KEY=replace_with_your_key
+ANTHROPIC_MODEL=claude-sonnet-4-5
+```
+
+`ANTHROPIC_BASE_URL` defaults to `https://api.anthropic.com/v1` and accepts a
+base URL ending in `/v1` or a full `/messages` URL, so Claude-compatible
+gateways work the same way. `ANTHROPIC_MAX_TOKENS` caps output tokens per
+request (default 8192). Tool calls are translated to Anthropic tool-use and
+tool-result blocks automatically.
+
+Local or remote OpenAI-compatible server (Ollama, LM Studio, llama.cpp,
+vLLM, or an oMLX box on the network):
 
 ```dotenv
 HARNESS_PROVIDER=local
@@ -573,6 +589,7 @@ For other servers, use their OpenAI-compatible base URL:
 - LM Studio: `http://localhost:1234/v1/chat/completions`
 - llama.cpp: `http://localhost:8080/v1/chat/completions`
 - vLLM: `http://localhost:8000/v1/chat/completions`
+- oMLX on another box: `http://omlx.local:8080/v1/chat/completions`
 
 `LOCAL_BASE_URL` defaults to the Ollama endpoint. A bare host URL, a URL ending
 in `/v1`, and a full `/chat/completions` URL are all accepted. `LOCAL_API_KEY`

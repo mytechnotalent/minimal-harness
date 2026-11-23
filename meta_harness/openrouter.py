@@ -33,6 +33,11 @@ _ALLOWED_MESSAGE_KEYS = {
     "name",
 }
 
+_OPENCODE_URL = "https://opencode.ai/inference/go/openai/v1/chat/completions"
+_ANTHROPIC_URL = "https://api.anthropic.com/v1"
+_LOCAL_URL = "http://localhost:11434/v1/chat/completions"
+_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
 
 def _sanitize_messages(
     messages: list[dict[str, Any]],
@@ -139,11 +144,14 @@ def _provider_name() -> str:
     Returns
     -------
     str
-        ``"opencode"``, ``"local"``, or ``"openrouter"``.
+        ``"opencode"``, ``"anthropic"``, ``"local"``, or
+        ``"openrouter"``.
     """
     value = os.getenv("HARNESS_PROVIDER", "openrouter").strip().lower()
     if value in ("opencode", "opencode-go", "go"):
         return "opencode"
+    if value in ("anthropic", "claude", "anthropic-messages"):
+        return "anthropic"
     if value in _LOCAL_NAMES:
         return "local"
     return "openrouter"
@@ -163,12 +171,27 @@ def _provider_key(provider: str) -> str | None:
         Configured API key.
     """
     if provider == "opencode":
-        return os.getenv("OPENCODE_API_KEY") or os.getenv(
-            "OPENCODE_GO_API_KEY"
-        )
+        return _opencode_key()
+    if provider == "anthropic":
+        return os.getenv("ANTHROPIC_API_KEY")
     if provider == "local":
         return os.getenv("LOCAL_API_KEY") or "local"
     return os.getenv("OPENROUTER_API_KEY")
+
+
+def _opencode_key() -> str | None:
+    """Return the configured OpenCode key from either variable.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    str or None
+        OpenCode API key.
+    """
+    return os.getenv("OPENCODE_API_KEY") or os.getenv("OPENCODE_GO_API_KEY")
 
 
 def _provider_model(provider: str) -> str:
@@ -186,6 +209,8 @@ def _provider_model(provider: str) -> str:
     """
     if provider == "opencode":
         return os.getenv("OPENCODE_MODEL", "deepseek-v4.1-flash")
+    if provider == "anthropic":
+        return os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
     if provider == "local":
         return _local_model()
     return os.getenv("OPENROUTER_MODEL", "openrouter/free")
@@ -222,13 +247,35 @@ def _provider_url(provider: str) -> str:
         Configured or default endpoint URL.
     """
     if provider == "opencode":
-        default = "https://opencode.ai/inference/go/openai/v1/chat/completions"
-        return _chat_url(os.getenv("OPENCODE_BASE_URL") or default)
+        return _chat_url(os.getenv("OPENCODE_BASE_URL") or _OPENCODE_URL)
+    if provider == "anthropic":
+        return _messages_url(os.getenv("ANTHROPIC_BASE_URL") or _ANTHROPIC_URL)
     if provider == "local":
-        default = "http://localhost:11434/v1/chat/completions"
-        return _chat_url(os.getenv("LOCAL_BASE_URL") or default)
-    default = "https://openrouter.ai/api/v1/chat/completions"
-    return os.getenv("OPENROUTER_BASE_URL") or default
+        return _chat_url(os.getenv("LOCAL_BASE_URL") or _LOCAL_URL)
+    return os.getenv("OPENROUTER_BASE_URL") or _OPENROUTER_URL
+
+
+def _messages_url(url: str) -> str:
+    """Complete a base URL with the Anthropic messages path.
+
+    Parameters
+    ----------
+    url : str
+        Full endpoint or base URL.
+
+    Returns
+    -------
+    str
+        Endpoint ending in ``/messages``.
+    """
+    base = url.rstrip("/")
+    if base.endswith("/messages"):
+        return base
+    if base.endswith("/v1"):
+        return base + "/messages"
+    if not urlparse(base).path:
+        return base + "/v1/messages"
+    return base
 
 
 def _chat_url(url: str) -> str:
@@ -428,6 +475,8 @@ class OpenRouterClient:
             Completion content.
         """
         self._require_key()
+        if self._provider == "anthropic":
+            return self._anthropic_complete(system, user, temperature)
         body = self._send(self._build_request(system, user, temperature))
         return self._extract_content(body)
 
@@ -449,13 +498,33 @@ class OpenRouterClient:
             Provider response body.
         """
         self._require_key()
+        if self._provider == "anthropic":
+            return self._anthropic_chat(messages, tools)
+        return self._openai_chat(messages, tools)
+
+    def _openai_chat(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Run one turn through an OpenAI-compatible endpoint.
+
+        Parameters
+        ----------
+        messages : list[dict[str, Any]]
+            Conversation messages.
+        tools : list[dict[str, Any]]
+            OpenAI-compatible tool schemas.
+
+        Returns
+        -------
+        dict[str, Any]
+            Validated provider response body.
+        """
         clean = _sanitize_messages(messages)
         payload: dict[str, Any] = {"model": self.model, "messages": clean}
         if tools:
             payload["tools"] = tools
-        return self._validate_chat(
-            self._send(self._build_payload_request(payload))
-        )
+        body = self._send(self._build_payload_request(payload))
+        return self._validate_chat(body)
 
     def _validate_chat(self, body: dict[str, Any]) -> dict[str, Any]:
         """Validate a chat response before agent processing.
@@ -497,6 +566,103 @@ class OpenRouterClient:
             self._url(), data=data, headers=self._headers(), method="POST"
         )
 
+    def _anthropic_complete(
+        self, system: str, user: str, temperature: float
+    ) -> str:
+        """Run one text completion through the Anthropic API.
+
+        Parameters
+        ----------
+        system : str
+            System instruction.
+        user : str
+            User payload.
+        temperature : float
+            Sampling temperature.
+
+        Returns
+        -------
+        str
+            Completion text.
+        """
+        payload = self._anthropic_payload(system, user, temperature)
+        response = self._send(self._build_payload_request(payload))
+        self._record_usage({"usage": _mapped_usage(response)})
+        return _anthropic_text(response)
+
+    def _anthropic_chat(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Run one tool-capable turn through the Anthropic API.
+
+        Parameters
+        ----------
+        messages : list[dict[str, Any]]
+            Conversation messages.
+        tools : list[dict[str, Any]]
+            OpenAI-compatible tool schemas.
+
+        Returns
+        -------
+        dict[str, Any]
+            OpenAI-shaped response body.
+        """
+        clean = _sanitize_messages(messages)
+        payload = self._anthropic_chat_payload(clean, tools)
+        response = self._send(self._build_payload_request(payload))
+        self._record_usage({"usage": _mapped_usage(response)})
+        return {"choices": [{"message": _anthropic_message(response)}]}
+
+    def _anthropic_payload(
+        self, system: str, user: str, temperature: float
+    ) -> dict[str, Any]:
+        """Build an Anthropic text-completion payload.
+
+        Parameters
+        ----------
+        system : str
+            System instruction.
+        user : str
+            User payload.
+        temperature : float
+            Sampling temperature.
+
+        Returns
+        -------
+        dict[str, Any]
+            JSON-compatible payload.
+        """
+        payload = {"model": self.model, "max_tokens": _anthropic_max_tokens()}
+        payload["temperature"] = temperature
+        payload["messages"] = [{"role": "user", "content": user}]
+        _set_system(payload, system)
+        return payload
+
+    def _anthropic_chat_payload(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Build an Anthropic messages payload with tools.
+
+        Parameters
+        ----------
+        messages : list[dict[str, Any]]
+            Sanitized conversation messages.
+        tools : list[dict[str, Any]]
+            OpenAI-compatible tool schemas.
+
+        Returns
+        -------
+        dict[str, Any]
+            JSON-compatible payload.
+        """
+        system, turns = _anthropic_turns(messages)
+        payload = {"model": self.model, "max_tokens": _anthropic_max_tokens()}
+        payload["messages"] = turns
+        _set_system(payload, system)
+        if tools:
+            payload["tools"] = _anthropic_tools(tools)
+        return payload
+
     def _require_key(self) -> None:
         """Require an API key before a live request.
 
@@ -526,6 +692,8 @@ class OpenRouterClient:
         """
         if self._provider == "opencode":
             return "OPENCODE_API_KEY is not set."
+        if self._provider == "anthropic":
+            return "ANTHROPIC_API_KEY is not set."
         return "OPENROUTER_API_KEY is not set."
 
     def _build_request(
@@ -627,13 +795,47 @@ class OpenRouterClient:
         dict[str, str]
             HTTP headers.
         """
+        if self._provider == "anthropic":
+            return self._anthropic_headers()
+        return self._openai_headers()
+
+    def _openai_headers(self) -> dict[str, str]:
+        """Return OpenAI-compatible request headers.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict[str, str]
+            HTTP headers.
+        """
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        headers["Content-Type"] = "application/json"
+        headers["User-Agent"] = self.user_agent
+        headers["HTTP-Referer"] = self.site_url
+        headers["X-Title"] = self.app_name
+        headers["x-opencode-session"] = self.session_id
+        return headers
+
+    def _anthropic_headers(self) -> dict[str, str]:
+        """Return Anthropic Messages request headers.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict[str, str]
+            HTTP headers.
+        """
         return {
-            "Authorization": f"Bearer {self.api_key}",
+            "x-api-key": self.api_key or "",
+            "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
             "User-Agent": self.user_agent,
-            "HTTP-Referer": self.site_url,
-            "X-Title": self.app_name,
-            "x-opencode-session": self.session_id,
         }
 
     def _send(self, request: urllib.request.Request) -> dict[str, Any]:
@@ -942,6 +1144,352 @@ class OpenRouterClient:
             f"cost=${self.cost:.6f} "
             f"seconds={self.model_seconds:.1f}"
         )
+
+
+def _anthropic_max_tokens() -> int:
+    """Return the configured Anthropic output token limit.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    int
+        Maximum tokens per request.
+    """
+    return int(os.getenv("ANTHROPIC_MAX_TOKENS", "8192"))
+
+
+def _set_system(payload: dict[str, Any], system: str) -> None:
+    """Attach a non-empty system instruction to a payload.
+
+    Parameters
+    ----------
+    payload : dict[str, Any]
+        Payload being built.
+    system : str
+        System instruction.
+
+    Returns
+    -------
+    None
+        The payload is updated in place.
+    """
+    if system:
+        payload["system"] = system
+
+
+def _anthropic_turns(
+    messages: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
+    """Split OpenAI messages into system text and Anthropic turns.
+
+    Parameters
+    ----------
+    messages : list[dict[str, Any]]
+        Sanitized conversation messages.
+
+    Returns
+    -------
+    tuple[str, list[dict[str, Any]]]
+        System instruction and translated turns.
+    """
+    system = _system_text(messages)
+    turns = [_anthropic_turn(m) for m in messages if m.get("role") != "system"]
+    return system, [turn for turn in turns if turn is not None]
+
+
+def _system_text(messages: list[dict[str, Any]]) -> str:
+    """Join system messages into one instruction string.
+
+    Parameters
+    ----------
+    messages : list[dict[str, Any]]
+        Sanitized conversation messages.
+
+    Returns
+    -------
+    str
+        Combined system text.
+    """
+    parts = [
+        str(message.get("content", ""))
+        for message in messages
+        if message.get("role") == "system"
+    ]
+    return " ".join(parts).strip()
+
+
+def _anthropic_turn(message: dict[str, Any]) -> dict[str, Any] | None:
+    """Convert one OpenAI-shaped message to an Anthropic turn.
+
+    Parameters
+    ----------
+    message : dict[str, Any]
+        OpenAI-shaped message.
+
+    Returns
+    -------
+    dict[str, Any] or None
+        Translated turn, or ``None`` for unsupported roles.
+    """
+    role = message.get("role")
+    if role == "tool":
+        return _tool_result_turn(message)
+    if role == "assistant" and message.get("tool_calls"):
+        return {"role": "assistant", "content": _assistant_blocks(message)}
+    if role in ("user", "assistant"):
+        return _plain_turn(role, message)
+    return None
+
+
+def _plain_turn(role: str, message: dict[str, Any]) -> dict[str, Any]:
+    """Build a plain user or assistant turn.
+
+    Parameters
+    ----------
+    role : str
+        Turn role.
+    message : dict[str, Any]
+        OpenAI-shaped message.
+
+    Returns
+    -------
+    dict[str, Any]
+        Plain content turn.
+    """
+    content = str(message.get("content", ""))
+    return {"role": role, "content": content}
+
+
+def _assistant_blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build Anthropic content blocks for an assistant tool-call turn.
+
+    Parameters
+    ----------
+    message : dict[str, Any]
+        Assistant message with tool calls.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Text and tool-use content blocks.
+    """
+    blocks = []
+    text = str(message.get("content", "")).strip()
+    if text:
+        blocks.append({"type": "text", "text": text})
+    for call in message.get("tool_calls") or []:
+        blocks.append(_tool_use_block(call))
+    return blocks
+
+
+def _tool_use_block(call: dict[str, Any]) -> dict[str, Any]:
+    """Convert one OpenAI tool call to an Anthropic tool-use block.
+
+    Parameters
+    ----------
+    call : dict[str, Any]
+        OpenAI tool call.
+
+    Returns
+    -------
+    dict[str, Any]
+        Tool-use content block.
+    """
+    function = call.get("function") or {}
+    return {
+        "type": "tool_use",
+        "id": call.get("id", ""),
+        "name": function.get("name", ""),
+        "input": _anthropic_arguments(function.get("arguments", {})),
+    }
+
+
+def _anthropic_arguments(raw: Any) -> dict[str, Any]:
+    """Parse tool-call arguments into an input mapping.
+
+    Parameters
+    ----------
+    raw : Any
+        Raw argument payload.
+
+    Returns
+    -------
+    dict[str, Any]
+        Parsed argument mapping.
+    """
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _tool_result_turn(message: dict[str, Any]) -> dict[str, Any]:
+    """Convert an OpenAI tool message to a tool-result turn.
+
+    Parameters
+    ----------
+    message : dict[str, Any]
+        Tool message.
+
+    Returns
+    -------
+    dict[str, Any]
+        User turn carrying the tool result block.
+    """
+    result = {
+        "type": "tool_result",
+        "tool_use_id": message.get("tool_call_id", ""),
+        "content": str(message.get("content", "")),
+    }
+    return {"role": "user", "content": [result]}
+
+
+def _anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert OpenAI tool schemas to Anthropic tools.
+
+    Parameters
+    ----------
+    tools : list[dict[str, Any]]
+        OpenAI tool schemas.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Anthropic tool definitions.
+    """
+    return [_anthropic_tool(tool) for tool in tools]
+
+
+def _anthropic_tool(tool: dict[str, Any]) -> dict[str, Any]:
+    """Convert one OpenAI tool schema to an Anthropic tool.
+
+    Parameters
+    ----------
+    tool : dict[str, Any]
+        OpenAI tool schema.
+
+    Returns
+    -------
+    dict[str, Any]
+        Anthropic tool definition.
+    """
+    function = tool.get("function") or {}
+    return {
+        "name": function.get("name", ""),
+        "description": function.get("description", ""),
+        "input_schema": function.get("parameters") or {"type": "object"},
+    }
+
+
+def _anthropic_message(response: dict[str, Any]) -> dict[str, Any]:
+    """Convert an Anthropic response to an OpenAI-shaped message.
+
+    Parameters
+    ----------
+    response : dict[str, Any]
+        Anthropic Messages response.
+
+    Returns
+    -------
+    dict[str, Any]
+        OpenAI-shaped assistant message.
+    """
+    content = response.get("content") or []
+    return {
+        "role": "assistant",
+        "content": _anthropic_text(response),
+        "tool_calls": _anthropic_tool_calls(content),
+    }
+
+
+def _anthropic_text(response: dict[str, Any]) -> str:
+    """Join the text blocks of an Anthropic response.
+
+    Parameters
+    ----------
+    response : dict[str, Any]
+        Anthropic Messages response.
+
+    Returns
+    -------
+    str
+        Combined text content.
+    """
+    parts = []
+    for block in response.get("content") or []:
+        if block.get("type") == "text":
+            parts.append(str(block.get("text", "")))
+    return "\n".join(parts)
+
+
+def _anthropic_tool_calls(content: list) -> list[dict[str, Any]]:
+    """Collect tool-use blocks as OpenAI tool calls.
+
+    Parameters
+    ----------
+    content : list
+        Anthropic content blocks.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        OpenAI tool-call records.
+    """
+    calls = []
+    for block in content:
+        if block.get("type") == "tool_use":
+            calls.append(_tool_call_block(block))
+    return calls
+
+
+def _tool_call_block(block: dict[str, Any]) -> dict[str, Any]:
+    """Convert one tool-use block to an OpenAI tool call.
+
+    Parameters
+    ----------
+    block : dict[str, Any]
+        Tool-use content block.
+
+    Returns
+    -------
+    dict[str, Any]
+        OpenAI tool-call record.
+    """
+    return {
+        "id": block.get("id", ""),
+        "type": "function",
+        "function": {
+            "name": block.get("name", ""),
+            "arguments": json.dumps(block.get("input") or {}),
+        },
+    }
+
+
+def _mapped_usage(response: dict[str, Any]) -> dict[str, Any]:
+    """Map an Anthropic usage record to OpenAI-style counters.
+
+    Parameters
+    ----------
+    response : dict[str, Any]
+        Anthropic Messages response.
+
+    Returns
+    -------
+    dict[str, Any]
+        OpenAI-style usage mapping.
+    """
+    usage = response.get("usage") or {}
+    return {
+        "prompt_tokens": usage.get("input_tokens", 0) or 0,
+        "completion_tokens": usage.get("output_tokens", 0) or 0,
+        "cached_tokens": usage.get("cache_read_input_tokens", 0) or 0,
+        "cost": 0.0,
+    }
 
 
 def _raise_timeout(signum: int, frame: Any) -> None:
