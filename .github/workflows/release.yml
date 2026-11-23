@@ -47,27 +47,8 @@ jobs:
           name: SavrenAI-linux
           path: SavrenAI-linux.zip
 
-  macos:
-    runs-on: macos-13
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - name: Install dependencies
-        run: |
-          pip install -e ".[gui]"
-          pip install pyinstaller
-      - name: Build release archive
-        run: python scripts/build_release.py
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: SavrenAI-macos
-          path: SavrenAI-macos-*.zip
-
   release:
-    needs: [windows, ubuntu, macos]
+    needs: [windows, ubuntu]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -77,4 +58,3 @@ jobs:
           files: |
             SavrenAI-windows/SavrenAI-windows.zip
             SavrenAI-linux/SavrenAI-linux.zip
-            SavrenAI-macos/*.zip

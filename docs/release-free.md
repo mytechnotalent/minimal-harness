@@ -11,24 +11,37 @@ Every release carries three archives:
 
 - `SavrenAI-windows.zip` - Windows executable folder
 - `SavrenAI-linux.zip` - Linux executable folder
-- `SavrenAI-macos-<arch>.zip` - macOS app bundle (arm64 on Apple Silicon)
+- `SavrenAI-macos-arm64.zip` - native Apple Silicon app bundle
 
 Each archive includes `.env.example` next to the executable. Rename it to
 `.env` and fill in the provider settings before the first launch; the app
 reads it from its own directory, so no terminal or environment editing is
 needed.
 
+Windows and Linux archives are built by GitHub Actions on every `v*` tag.
+The Apple Silicon archive is built natively on an Apple Silicon Mac
+because no free CI runner offers the arm64 macOS image:
+
+```bash
+python scripts/build_release.py
+gh release upload <tag> SavrenAI-macos-arm64.zip
+```
+
+Building on an Intel Mac produces an x86_64 archive instead, which is not
+published.
+
 ## Building a release
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
+python scripts/build_release.py        # on an Apple Silicon Mac
+gh release upload v0.1.0 SavrenAI-macos-arm64.zip
 ```
 
-The workflow builds all three archives and attaches them to the release at
-https://github.com/mytechnotalent/SavrenAI/releases. Locally,
-`python scripts/build_release.py` reproduces the current platform's
-archive.
+The workflow builds the Windows and Linux archives and attaches them to
+the release at https://github.com/mytechnotalent/SavrenAI/releases; the
+two commands above attach the Apple Silicon archive.
 
 ## macOS: opening an unverified app
 
